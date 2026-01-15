@@ -1,1 +1,0 @@
-om ganapathaye namah!
