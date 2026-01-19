@@ -1,7 +1,6 @@
 <?php
 $links = [
     ['label' => 'Dashboard', 'path' => 'Attendance_Dashboard.php', 'icon' => 'fas fa-home', 'class' => 'btn-outline-primary'],
-    ['label' => 'Live Punches', 'path' => 'Attendance_Live.php', 'icon' => 'fas fa-clock', 'class' => 'btn-outline-primary'],
     ['label' => 'Employees', 'path' => 'Attendance_Employees.php', 'icon' => 'fas fa-users', 'class' => 'btn-outline-primary'],
 ];
 ?>

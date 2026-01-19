@@ -3,6 +3,20 @@
 declare(strict_types=1);
 
 function h($value): string {
+    if (is_array($value)) {
+        $value = implode(', ', array_map(static function ($item): string {
+            if (is_scalar($item) || $item === null) {
+                return (string) $item;
+            }
+            return json_encode($item, JSON_UNESCAPED_SLASHES) ?: '';
+        }, $value));
+    } elseif (is_object($value)) {
+        if (method_exists($value, '__toString')) {
+            $value = (string) $value;
+        } else {
+            $value = json_encode($value, JSON_UNESCAPED_SLASHES) ?: '';
+        }
+    }
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 

@@ -7,7 +7,7 @@ $page_title = 'Employees';
 
 $employeeId = trim((string) ($_GET['employeeId'] ?? ''));
 $badgeNumber = trim((string) ($_GET['badgeNumber'] ?? ''));
-$departmentId = trim((string) ($_GET['departmentId'] ?? ''));
+$departmentFilter = trim((string) ($_GET['department'] ?? ''));
 $status = trim((string) ($_GET['status'] ?? ''));
 $gender = trim((string) ($_GET['gender'] ?? ''));
 $isActive = trim((string) ($_GET['isActive'] ?? ''));
@@ -16,7 +16,6 @@ $query = trim((string) ($_GET['q'] ?? ''));
 $filters = [
     'employeeId' => $employeeId !== '' ? $employeeId : null,
     'badgeNumber' => $badgeNumber !== '' ? $badgeNumber : null,
-    'departmentId' => $departmentId !== '' ? $departmentId : null,
     'status' => $status !== '' ? $status : null,
     'gender' => $gender !== '' ? $gender : null,
     'isActive' => $isActive !== '' ? $isActive : null,
@@ -34,6 +33,62 @@ if ($result['ok']) {
     $error = $result['error'] ?: 'Unable to reach attendance API.';
 }
 
+if (!empty($rows)) {
+    usort($rows, function ($left, $right) {
+        $leftCode = (string) ($left['badgeNumber'] ?? '');
+        $rightCode = (string) ($right['badgeNumber'] ?? '');
+        if ($leftCode === '' && $rightCode === '') {
+            return 0;
+        }
+        if ($leftCode === '') {
+            return 1;
+        }
+        if ($rightCode === '') {
+            return -1;
+        }
+        $leftNum = (int) $leftCode;
+        $rightNum = (int) $rightCode;
+        if ($leftNum === $rightNum) {
+            return strcmp($leftCode, $rightCode);
+        }
+        return $leftNum <=> $rightNum;
+    });
+}
+
+if (!empty($rows) && $departmentFilter !== '') {
+    $badgeNumbers = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $badge = trim((string) ($row['badgeNumber'] ?? ''));
+        if ($badge !== '') {
+            $badgeNumbers[] = $badge;
+        }
+    }
+    $departmentMap = hrms_department_map($badgeNumbers, null, null, 12);
+    $needle = strtolower($departmentFilter);
+    $filteredRows = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $badge = trim((string) ($row['badgeNumber'] ?? ''));
+        if ($badge === '') {
+            continue;
+        }
+        $departmentName = $departmentMap[$badge] ?? '';
+        if ($departmentName === '') {
+            continue;
+        }
+        if (stripos($departmentName, $needle) === false) {
+            continue;
+        }
+        $filteredRows[] = $row;
+    }
+    $rows = $filteredRows;
+}
+
 $profile = null;
 if ($employeeId !== '') {
     $profileResult = attendance_api_get('employees/' . rawurlencode($employeeId));
@@ -44,6 +99,23 @@ if ($employeeId !== '') {
     $profileResult = attendance_api_get('employees/by-badge/' . rawurlencode($badgeNumber));
     if ($profileResult['ok'] && is_array($profileResult['data'])) {
         $profile = $profileResult['data'];
+    }
+}
+
+$hrmsDepartment = null;
+if (is_array($profile)) {
+    $employeeCode = trim((string) ($profile['badgeNumber'] ?? ''));
+    if ($employeeCode !== '') {
+        $hrmsResult = hrms_api_get('/api/employees/' . rawurlencode($employeeCode) . '/activity');
+        if ($hrmsResult['ok'] && is_array($hrmsResult['data'])) {
+            $employee = $hrmsResult['data']['employee'] ?? null;
+            if (is_array($employee)) {
+                $department = trim((string) ($employee['DEPT_NAME'] ?? ''));
+                if ($department !== '') {
+                    $hrmsDepartment = $department;
+                }
+            }
+        }
     }
 }
 
@@ -91,8 +163,8 @@ include __DIR__ . '/include/layout_top.php';
             <input id="badgeNumber" name="badgeNumber" class="form-control" value="<?= h($badgeNumber) ?>">
           </div>
           <div class="form-group col-md-2">
-            <label for="departmentId">Department ID</label>
-            <input id="departmentId" name="departmentId" class="form-control" value="<?= h($departmentId) ?>">
+            <label for="department">Department (HRMS)</label>
+            <input id="department" name="department" class="form-control" value="<?= h($departmentFilter) ?>" placeholder="HRMS department name">
           </div>
           <div class="form-group col-md-2">
             <label for="gender">Gender</label>
@@ -116,7 +188,7 @@ include __DIR__ . '/include/layout_top.php';
           </div>
           <div class="form-group col-md-6">
             <label for="q">Search keyword</label>
-            <input id="q" name="q" class="form-control" value="<?= h($query) ?>" placeholder="Name, department, designation">
+            <input id="q" name="q" class="form-control" value="<?= h($query) ?>" placeholder="Name, designation">
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
             <button type="submit" class="btn btn-primary btn-block">Search</button>
@@ -140,8 +212,8 @@ include __DIR__ . '/include/layout_top.php';
                 <dd class="col-sm-7"><?= h($profile['badgeNumber'] ?? '-') ?></dd>
                 <dt class="col-sm-5">Name</dt>
                 <dd class="col-sm-7"><?= h(trim(($profile['firstName'] ?? '') . ' ' . ($profile['lastName'] ?? '')) ?: '-') ?></dd>
-                <dt class="col-sm-5">Department</dt>
-                <dd class="col-sm-7"><?= h($profile['departmentName'] ?? '-') ?></dd>
+                <dt class="col-sm-5">Department (HRMS)</dt>
+                <dd class="col-sm-7"><?= h($hrmsDepartment ?? '-') ?></dd>
                 <dt class="col-sm-5">Designation</dt>
                 <dd class="col-sm-7"><?= h($profile['designation'] ?? '-') ?></dd>
               </dl>
@@ -174,14 +246,10 @@ include __DIR__ . '/include/layout_top.php';
         <table class="table table-hover table-sm">
           <thead>
             <tr>
-              <th>Employee ID</th>
-              <th>Badge</th>
+              <th>UtimeId</th>
+              <th>Employee Code</th>
               <th>Name</th>
-              <th>Department</th>
-              <th>Designation</th>
-              <th>Gender</th>
               <th>Active</th>
-              <th>Hire Date</th>
             </tr>
           </thead>
           <tbody>
@@ -191,16 +259,12 @@ include __DIR__ . '/include/layout_top.php';
                   <td><?= h($row['employeeId'] ?? '-') ?></td>
                   <td><?= h($row['badgeNumber'] ?? '-') ?></td>
                   <td><?= h(trim(($row['firstName'] ?? '') . ' ' . ($row['lastName'] ?? '')) ?: '-') ?></td>
-                  <td><?= h($row['departmentName'] ?? '-') ?></td>
-                  <td><?= h($row['designation'] ?? '-') ?></td>
-                  <td><?= h($row['gender'] ?? '-') ?></td>
                   <td><?= !empty($row['isActive']) ? 'Yes' : 'No' ?></td>
-                  <td><?= h($row['hireDate'] ?? '-') ?></td>
                 </tr>
               <?php endforeach; ?>
             <?php else: ?>
               <tr>
-                <td colspan="8" class="text-center text-muted">No employees found for the selected filters.</td>
+                <td colspan="4" class="text-center text-muted">No employees found for the selected filters.</td>
               </tr>
             <?php endif; ?>
           </tbody>

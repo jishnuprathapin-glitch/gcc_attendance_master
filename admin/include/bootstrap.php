@@ -35,6 +35,15 @@ if (empty($_SESSION['user_id'])) {
     exit;
 }
 
+$changedBy = (string) $_SESSION['user_id'];
+$stmt = $bd->prepare('SET @device_project_changed_by = ?');
+if ($stmt) {
+    $stmt->bind_param('s', $changedBy);
+    $stmt->execute();
+    $stmt->close();
+}
+$bd->query('SET @device_project_change_reason = NULL');
+
 include 'include/page_guard.php';
 guard_page($bd);
 

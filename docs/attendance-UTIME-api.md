@@ -780,6 +780,74 @@ Holiday
       curl -N "http://192.168.32.33:3003/v2/attendance/stream?sinceId=3957190&deviceSn=7334232260011&intervalMs=2000"
       ```
 
+29) GET /onboarded/summary
+    - Purpose: summary counts for onboarded users and missing biometrics
+    - Filters: `deviceSn` (comma-separated)
+    - Request:
+      ```text
+      GET /v2/onboarded/summary?deviceSn=7334232260011,3170250300001
+      ```
+    - Response:
+      ```json
+      {
+        "totalOnboarded": "integer",
+        "missingFace": "integer",
+        "missingFingerprint": "integer"
+      }
+      ```
+    - Example:
+      ```bash
+      curl "http://192.168.32.33:3003/v2/onboarded/summary?deviceSn=7334232260011,3170250300001"
+      ```
+
+30) GET /onboarded/users
+    - Purpose: onboarded users list for devices
+    - Filters: `deviceSn` (comma-separated)
+    - Request:
+      ```text
+      GET /v2/onboarded/users?deviceSn=7334232260011,3170250300001
+      ```
+    - Response:
+      ```json
+      [
+        {
+          "badgeNumber": "string",
+          "name": "string",
+          "hasFaceData": "boolean",
+          "hasFingerPrintData": "boolean"
+        }
+      ]
+      ```
+    - Example:
+      ```bash
+      curl "http://192.168.32.33:3003/v2/onboarded/users?deviceSn=7334232260011,3170250300001"
+      ```
+
+31) GET /attendance/badges/with-names
+    - Purpose: badge list with names for a date range
+    - Filters: `startDate`, `endDate`, `deviceSn` (comma-separated)
+    - Source tables: `dbo.iclock_transaction`, `dbo.personnel_employee`
+    - Request:
+      ```text
+      GET /v2/attendance/badges/with-names?startDate=2026-01-13&endDate=2026-01-14&deviceSn=7334232260011
+      ```
+    - Response:
+      ```json
+      {
+        "deviceSn": ["string"],
+        "fromDate": "ISO-8601 string",
+        "toDate": "ISO-8601 string",
+        "rows": [
+          { "badgeNumber": "string|null", "name": "string|null" }
+        ],
+        "total": "integer"
+      }
+      ```
+    - Example:
+      ```bash
+      curl "http://192.168.32.33:3003/v2/attendance/badges/with-names?startDate=2026-01-13&endDate=2026-01-14&deviceSn=7334232260011"
+      ```
+
 ## Field-to-table map (key fields)
 - `badgeNumber` -> `dbo.personnel_employee.emp_code`
 - `employeeId` -> `dbo.personnel_employee.id`
