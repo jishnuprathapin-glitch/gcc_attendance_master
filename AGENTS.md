@@ -74,10 +74,10 @@
 
 ## Attendance Dashboard data URLs (Attendance_Dashboard.php)
 Attendance API base: http://192.168.32.33:3003/v2
-- Logged in badges (table + CSV): GET http://192.168.32.33:3003/v2/attendance/badges/with-names?startDate=YYYY-MM-DDT00:00:00&endDate=YYYY-MM-DDT24:00:00&deviceSn=DEVICE_SN_1,DEVICE_SN_2
-- Logged in badge count (KPI): GET http://192.168.32.33:3003/v2/attendance/badges/count?startDate=YYYY-MM-DDT00:00:00&endDate=YYYY-MM-DDT24:00:00&deviceSn=DEVICE_SN_1,DEVICE_SN_2
+- Logged in badges (table + CSV): GET http://192.168.32.33:3003/v2/attendance/badges/with-names?startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT24:00:00+00:00&deviceSn=DEVICE_SN_1,DEVICE_SN_2
+- Logged in badge count (KPI): GET http://192.168.32.33:3003/v2/attendance/badges/count?startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT24:00:00+00:00&deviceSn=DEVICE_SN_1,DEVICE_SN_2
 - Daily totals (API call still runs if device filter set): GET http://192.168.32.33:3003/v2/attendance/daily/by-devices?deviceSn=DEVICE_SN_1,DEVICE_SN_2&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
-- Device punches by device (active device count): GET http://192.168.32.33:3003/v2/attendance/counts?groupBy=deviceSn&startDate=YYYY-MM-DDT00:00:00&endDate=YYYY-MM-DDT24:00:00
+- Device punches by device (active device count): GET http://192.168.32.33:3003/v2/attendance/counts?groupBy=deviceSn&startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT24:00:00+00:00
 - Online/total devices: GET http://192.168.32.33:3003/v2/devices/status/counts?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&deviceSn=DEVICE_SN_1,DEVICE_SN_2
 - UTime onboarded users (exports): GET http://192.168.32.33:3003/v2/onboarded/users?deviceSn=DEVICE_SN_1,DEVICE_SN_2
 
@@ -88,4 +88,4 @@ HRMS API base: http://192.168.34.1:3000
 - HRMS bulk details (logged in badges): POST http://192.168.34.1:3000/api/employees/details with JSON body ["EMP_CODE_1","EMP_CODE_2"]
 
 Employee attendance API base: http://192.168.32.33:3000
-- Employee attendance (HRMS snapshot attendance days): GET http://192.168.32.33:3000/attendance?badgeNumber=EMP_CODE&startDate=YYYY-MM-DDT00:00:00Z&endDate=YYYY-MM-DDT23:59:59Z
+- Employee attendance (HRMS snapshot attendance days): GET http://192.168.32.33:3000/attendance?badgeNumber=EMP_CODE&startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT23:59:59+00:00

@@ -517,8 +517,8 @@ function build_hrms_summary(string $employeeCode, string $startDate, string $end
         $localTz = null;
     }
 
-    $attendanceStart = $startDate . 'T00:00:00Z';
-    $attendanceEnd = $endDate . 'T23:59:59Z';
+$attendanceStart = $startDate . 'T00:00:00+00:00';
+$attendanceEnd = $endDate . 'T23:59:59+00:00';
     $attendanceResult = employee_attendance_api_get('attendance', [
         'badgeNumber' => $employeeCode,
         'startDate' => $attendanceStart,
@@ -633,8 +633,8 @@ if ($startDate > $endDate) {
     $startDate = $endDate;
     $endDate = $tmp;
 }
-$startDateTime = $startDate . 'T00:00:00';
-$endDateTime = $endDate . 'T24:00:00';
+$startDateTime = $startDate . 'T00:00:00+00:00';
+$endDateTime = $endDate . 'T24:00:00+00:00';
 
 $deviceSnInput = trim((string) ($_GET['deviceSn'] ?? ''));
 $projectId = trim((string) ($_GET['projectId'] ?? ''));
@@ -840,262 +840,13 @@ if ($exportType !== '') {
 }
 $showActiveEmployeesRatio = ($projectId === '');
 $lazyMode = ($_GET['lazy'] ?? '') !== '0';
-$loadDataNow = $isAjax || !$lazyMode;
+if (!$isAjax) {
+    $lazyMode = true;
+}
 
 $apiErrors = [];
 
-if ($loadDataNow) {
-$badgeCountOk = false;
-$uniqueBadgeCount = 0;
-if ($deviceScope === 'none') {
-    $badgeCountOk = true;
-} else {
-    $badgeCountResult = attendance_api_get('attendance/badges/count', [
-        'startDate' => $startDateTime,
-        'endDate' => $endDateTime,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-    ]);
-    if ($badgeCountResult['ok'] && is_array($badgeCountResult['data'])) {
-        $badgeCountOk = true;
-        $uniqueBadgeCount = (int) ($badgeCountResult['data']['total'] ?? 0);
-    } else {
-        $apiErrors[] = 'Badge count';
-    }
-}
-
-$activeEmployeesOk = false;
-$activeEmployeesCount = 0;
-if ($showActiveEmployeesRatio) {
-    $activeEmployeesResult = hrms_api_get('/api/employees/active/count');
-    if ($activeEmployeesResult['ok'] && is_array($activeEmployeesResult['data'])) {
-        $activeEmployeesOk = true;
-        $activeEmployeesCount = (int) ($activeEmployeesResult['data']['count'] ?? ($activeEmployeesResult['data']['total'] ?? 0));
-    } else {
-        $activeEmployeesFallback = hrms_api_get('/api/employees/active');
-        if ($activeEmployeesFallback['ok'] && is_array($activeEmployeesFallback['data'])) {
-            $activeEmployeesOk = true;
-            $activeEmployeesCount = (int) ($activeEmployeesFallback['data']['count'] ?? 0);
-            if ($activeEmployeesCount === 0) {
-                $employees = $activeEmployeesFallback['data']['employees'] ?? null;
-                if (is_array($employees)) {
-                    $activeEmployeesCount = count($employees);
-                }
-            }
-        } else {
-            $apiErrors[] = 'HRMS active count';
-        }
-    }
-}
-
-$badgeCoveragePercent = null;
-if ($showActiveEmployeesRatio && $badgeCountOk && $activeEmployeesOk && $activeEmployeesCount > 0) {
-    $badgeCoveragePercent = (int) round(($uniqueBadgeCount / $activeEmployeesCount) * 100);
-}
-$badgeRatioText = $badgeCountOk
-    ? ($showActiveEmployeesRatio && $activeEmployeesOk ? $uniqueBadgeCount . ' / ' . $activeEmployeesCount : (string) $uniqueBadgeCount)
-    : '-';
-$badgeCoverageLabel = $showActiveEmployeesRatio
-    ? ($badgeCoveragePercent !== null ? $badgeCoveragePercent . '% logged in' : 'Coverage n/a')
-    : 'Unique badges in range';
-$badgeCardTitle = $showActiveEmployeesRatio ? 'Logged in / active employees' : 'Logged in employees';
-
-$loggedBadgesOk = false;
-$loggedBadgesRows = [];
-$loggedBadgesCount = 0;
-$loggedBadgesNote = '';
-if ($deviceScope === 'none') {
-    $loggedBadgesOk = true;
-    $loggedBadgesNote = $deviceScopeNote;
-} else {
-    $loggedBadgesResult = load_logged_in_badges($startDateTime, $endDateTime, $deviceSnParam, true);
-    if ($loggedBadgesResult['ok']) {
-        $loggedBadgesOk = true;
-        $loggedBadgesRows = $loggedBadgesResult['rows'];
-        $loggedBadgesCount = (int) ($loggedBadgesResult['total'] ?? count($loggedBadgesRows));
-        if (isset($loggedBadgesResult['hrmsOk']) && $loggedBadgesResult['hrmsOk'] === false) {
-            $apiErrors[] = 'HRMS details';
-        }
-    } else {
-        $apiErrors[] = 'Logged in badges';
-    }
-}
-$loggedBadgesMeta = $loggedBadgesOk
-    ? ($loggedBadgesNote !== '' ? $loggedBadgesNote : $loggedBadgesCount . ' badges')
-    : 'Unable to load badges';
-$loggedBadgesEmptyText = 'No logged in badges for the selected range.';
-if (!$loggedBadgesOk) {
-    $loggedBadgesEmptyText = 'Unable to load logged in badges.';
-} elseif ($loggedBadgesNote !== '') {
-    $loggedBadgesEmptyText = $loggedBadgesNote;
-}
-
-$dailyOk = false;
-$dailyTotals = [];
-$dailyLabel = $deviceScopeLabel;
-$dailyNote = '';
-if ($deviceScope === 'selected') {
-    $dailyResult = attendance_api_get('attendance/daily/by-devices', [
-        'deviceSn' => $deviceSnParam,
-        'startDate' => $startDate,
-        'endDate' => $endDate,
-    ]);
-    if ($dailyResult['ok'] && is_array($dailyResult['data'])) {
-        $dailyOk = true;
-        $rows = $dailyResult['data']['rows'] ?? [];
-        if (is_array($rows)) {
-            foreach ($rows as $row) {
-                $date = (string) ($row['date'] ?? '');
-                if ($date === '') {
-                    continue;
-                }
-                $dailyTotals[$date] = (int) ($row['total'] ?? 0);
-            }
-        }
-    } else {
-        $apiErrors[] = 'Daily totals (devices)';
-    }
-} elseif ($deviceScope === 'none') {
-    $dailyNote = $deviceScopeNote;
-} else {
-    $dailyNote = 'Select a device or project to load daily totals.';
-}
-
-$dailySeries = [];
-foreach ($dailyTotals as $date => $total) {
-    $dailySeries[] = ['date' => $date, 'total' => (int) $total];
-}
-usort($dailySeries, function (array $a, array $b): int {
-    return strcmp($a['date'], $b['date']);
-});
-if (count($dailySeries) > 14) {
-    $dailySeries = array_slice($dailySeries, -14);
-    $dailyNote = 'Showing last 14 days';
-}
-
-$dailyMax = 0;
-foreach ($dailySeries as $row) {
-    if ($row['total'] > $dailyMax) {
-        $dailyMax = $row['total'];
-    }
-}
-
-$deviceCountsOk = false;
-$deviceCounts = [];
-if ($deviceScope === 'none') {
-    $deviceCountsOk = true;
-} else {
-    $deviceCountsResult = attendance_api_get('attendance/counts', [
-        'groupBy' => 'deviceSn',
-        'startDate' => $startDateTime,
-        'endDate' => $endDateTime,
-    ]);
-    if ($deviceCountsResult['ok'] && is_array($deviceCountsResult['data'])) {
-        $deviceCountsOk = true;
-        foreach ($deviceCountsResult['data'] as $row) {
-            if (!is_array($row)) {
-                continue;
-            }
-            $sn = trim((string) ($row['value'] ?? ''));
-            if ($sn === '') {
-                continue;
-            }
-            if (!empty($deviceSnList) && !in_array($sn, $deviceSnList, true)) {
-                continue;
-            }
-            $deviceCounts[$sn] = (int) ($row['total'] ?? 0);
-        }
-    } else {
-        $apiErrors[] = 'Device counts';
-    }
-}
-
-arsort($deviceCounts);
-$activeDeviceCount = count($deviceCounts);
-
-$deviceStatusOk = false;
-$deviceStatusTotal = 0;
-$deviceStatusCounts = [
-    'online' => 0,
-    'offline' => 0,
-    'unknown' => 0,
-];
-$deviceStatusStartDate = $startDate;
-$deviceStatusEndDate = $endDate;
-$deviceStatusEnd = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
-if ($deviceStatusEnd instanceof DateTimeImmutable) {
-    $deviceStatusEndDate = $deviceStatusEnd->modify('+1 day')->format('Y-m-d');
-}
-if ($deviceScope !== 'none') {
-    $deviceStatusResult = attendance_api_get('devices/status/counts', [
-        'startDate' => $deviceStatusStartDate,
-        'endDate' => $deviceStatusEndDate,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-    ]);
-    if ($deviceStatusResult['ok'] && is_array($deviceStatusResult['data'])) {
-        $deviceStatusData = $deviceStatusResult['data'];
-        if (isset($deviceStatusData['counts']) && is_array($deviceStatusData['counts'])) {
-            $deviceStatusData = $deviceStatusData['counts'];
-        }
-        $hasCounts = array_key_exists('totalActive', $deviceStatusData)
-            || array_key_exists('totalInactive', $deviceStatusData)
-            || array_key_exists('totalUnknown', $deviceStatusData)
-            || array_key_exists('active', $deviceStatusData)
-            || array_key_exists('inactive', $deviceStatusData)
-            || array_key_exists('online', $deviceStatusData)
-            || array_key_exists('offline', $deviceStatusData)
-            || array_key_exists('unknown', $deviceStatusData)
-            || array_key_exists('total', $deviceStatusData);
-        if ($hasCounts) {
-            $deviceStatusOk = true;
-            $deviceStatusCounts['online'] = (int) ($deviceStatusData['totalActive'] ?? ($deviceStatusData['active'] ?? ($deviceStatusData['online'] ?? 0)));
-            $deviceStatusCounts['offline'] = (int) ($deviceStatusData['totalInactive'] ?? ($deviceStatusData['inactive'] ?? ($deviceStatusData['offline'] ?? 0)));
-            $deviceStatusCounts['unknown'] = (int) ($deviceStatusData['totalUnknown'] ?? ($deviceStatusData['unknown'] ?? 0));
-            $deviceStatusTotal = (int) ($deviceStatusData['total']
-                ?? ($deviceStatusCounts['online'] + $deviceStatusCounts['offline'] + $deviceStatusCounts['unknown']));
-        }
-    }
-}
-if ($deviceScope !== 'none' && !$deviceStatusOk) {
-    $apiErrors[] = 'Device status';
-}
-$deviceStatusScope = $deviceScopeLabel;
-$deviceStatusRatio = $deviceStatusOk ? ($deviceStatusCounts['online'] . ' / ' . $deviceStatusTotal) : '-';
-$deviceStatusMeta = $deviceStatusOk
-    ? ('Offline: ' . $deviceStatusCounts['offline'] . ' • Unknown: ' . $deviceStatusCounts['unknown'] . ' • ' . $deviceStatusScope)
-    : 'Status data unavailable';
-if ($deviceScope === 'none') {
-    $deviceStatusOk = true;
-    $deviceStatusRatio = '0 / 0';
-    $deviceStatusMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
-}
-
-$hrmsError = null;
-$hrmsSummary = [
-    'employeeName' => null,
-    'department' => null,
-    'designation' => null,
-    'status' => null,
-    'attendanceDays' => 0,
-    'leaveDays' => 0,
-    'lastAttendance' => null,
-    'holidayCount' => 0,
-];
-
-if ($employeeCode !== '') {
-    $hrmsPayload = build_hrms_summary($employeeCode, $startDate, $endDate);
-    $hrmsSummary = $hrmsPayload['summary'];
-    $hrmsError = $hrmsPayload['error'];
-}
-} else {
-    $badgeCountOk = false;
-    $uniqueBadgeCount = 0;
-    $activeEmployeesOk = false;
-    $activeEmployeesCount = 0;
-    $badgeCoveragePercent = null;
-    $badgeRatioText = '...';
-    $badgeCoverageLabel = 'Loading...';
-    $badgeCardTitle = $showActiveEmployeesRatio ? 'Logged in / active employees' : 'Logged in employees';
-
+if ($isAjax && $ajaxSection === 'logged-badges') {
     $loggedBadgesOk = false;
     $loggedBadgesRows = [];
     $loggedBadgesCount = 0;
@@ -1103,29 +854,167 @@ if ($employeeCode !== '') {
     if ($deviceScope === 'none') {
         $loggedBadgesOk = true;
         $loggedBadgesNote = $deviceScopeNote;
-        $loggedBadgesMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
-        $loggedBadgesEmptyText = $loggedBadgesMeta;
     } else {
-        $loggedBadgesMeta = 'Loading logged in badges...';
-        $loggedBadgesEmptyText = $loggedBadgesMeta;
+        $loggedBadgesResult = load_logged_in_badges($startDateTime, $endDateTime, $deviceSnParam, true);
+        if ($loggedBadgesResult['ok']) {
+            $loggedBadgesOk = true;
+            $loggedBadgesRows = $loggedBadgesResult['rows'];
+            $loggedBadgesCount = (int) ($loggedBadgesResult['total'] ?? count($loggedBadgesRows));
+        }
     }
+
+    $payload = [
+        'loggedBadges' => [
+            'ok' => $loggedBadgesOk,
+            'note' => $loggedBadgesNote,
+            'count' => $loggedBadgesCount,
+            'rows' => $loggedBadgesRows,
+        ],
+    ];
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+if ($isAjax) {
+    $badgeCountOk = false;
+    $uniqueBadgeCount = 0;
+    if ($deviceScope === 'none') {
+        $badgeCountOk = true;
+    } else {
+        $badgeCountResult = attendance_api_get('attendance/badges/count', [
+            'startDate' => $startDateTime,
+            'endDate' => $endDateTime,
+            'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
+        ]);
+        if ($badgeCountResult['ok'] && is_array($badgeCountResult['data'])) {
+            $badgeCountOk = true;
+            $uniqueBadgeCount = (int) ($badgeCountResult['data']['total'] ?? 0);
+        } else {
+            $apiErrors[] = 'Badge count';
+        }
+    }
+
+    $activeEmployeesOk = false;
+    $activeEmployeesCount = 0;
+    if ($showActiveEmployeesRatio) {
+        $activeEmployeesResult = hrms_api_get('/api/employees/active/count');
+        if ($activeEmployeesResult['ok'] && is_array($activeEmployeesResult['data'])) {
+            $activeEmployeesOk = true;
+            $activeEmployeesCount = (int) ($activeEmployeesResult['data']['count'] ?? ($activeEmployeesResult['data']['total'] ?? 0));
+        } else {
+            $activeEmployeesFallback = hrms_api_get('/api/employees/active');
+            if ($activeEmployeesFallback['ok'] && is_array($activeEmployeesFallback['data'])) {
+                $activeEmployeesOk = true;
+                $activeEmployeesCount = (int) ($activeEmployeesFallback['data']['count'] ?? 0);
+                if ($activeEmployeesCount === 0) {
+                    $employees = $activeEmployeesFallback['data']['employees'] ?? null;
+                    if (is_array($employees)) {
+                        $activeEmployeesCount = count($employees);
+                    }
+                }
+            } else {
+                $apiErrors[] = 'HRMS active count';
+            }
+        }
+    }
+
+    $badgeCoveragePercent = null;
+    if ($showActiveEmployeesRatio && $badgeCountOk && $activeEmployeesOk && $activeEmployeesCount > 0) {
+        $badgeCoveragePercent = (int) round(($uniqueBadgeCount / $activeEmployeesCount) * 100);
+    }
+    $badgeRatioText = $badgeCountOk
+        ? ($showActiveEmployeesRatio && $activeEmployeesOk ? $uniqueBadgeCount . ' / ' . $activeEmployeesCount : (string) $uniqueBadgeCount)
+        : '-';
+    $badgeCoverageLabel = $showActiveEmployeesRatio
+        ? ($badgeCoveragePercent !== null ? $badgeCoveragePercent . '% logged in' : 'Coverage n/a')
+        : 'Unique badges in range';
+    $badgeCardTitle = $showActiveEmployeesRatio ? 'Logged in / active employees' : 'Logged in employees';
 
     $dailyOk = false;
     $dailyTotals = [];
     $dailyLabel = $deviceScopeLabel;
+    $dailyNote = '';
     if ($deviceScope === 'selected') {
-        $dailyNote = '';
+        $dailyResult = attendance_api_get('attendance/daily/by-devices', [
+            'deviceSn' => $deviceSnParam,
+            'startDate' => $startDate,
+            'endDate' => $endDate,
+        ]);
+        if ($dailyResult['ok'] && is_array($dailyResult['data'])) {
+            $dailyOk = true;
+            $rows = $dailyResult['data']['rows'] ?? [];
+            if (is_array($rows)) {
+                foreach ($rows as $row) {
+                    $date = (string) ($row['date'] ?? '');
+                    if ($date === '') {
+                        continue;
+                    }
+                    $dailyTotals[$date] = (int) ($row['total'] ?? 0);
+                }
+            }
+        } else {
+            $apiErrors[] = 'Daily totals (devices)';
+        }
     } elseif ($deviceScope === 'none') {
         $dailyNote = $deviceScopeNote;
     } else {
         $dailyNote = 'Select a device or project to load daily totals.';
     }
+
     $dailySeries = [];
+    foreach ($dailyTotals as $date => $total) {
+        $dailySeries[] = ['date' => $date, 'total' => (int) $total];
+    }
+    usort($dailySeries, function (array $a, array $b): int {
+        return strcmp($a['date'], $b['date']);
+    });
+    if (count($dailySeries) > 14) {
+        $dailySeries = array_slice($dailySeries, -14);
+        $dailyNote = 'Showing last 14 days';
+    }
+
     $dailyMax = 0;
+    foreach ($dailySeries as $row) {
+        if ($row['total'] > $dailyMax) {
+            $dailyMax = $row['total'];
+        }
+    }
 
     $deviceCountsOk = false;
     $deviceCounts = [];
-    $activeDeviceCount = 0;
+    if ($deviceScope === 'none') {
+        $deviceCountsOk = true;
+    } else {
+        $deviceCountsResult = attendance_api_get('attendance/counts', [
+            'groupBy' => 'deviceSn',
+            'startDate' => $startDateTime,
+            'endDate' => $endDateTime,
+        ]);
+        if ($deviceCountsResult['ok'] && is_array($deviceCountsResult['data'])) {
+            $deviceCountsOk = true;
+            foreach ($deviceCountsResult['data'] as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $sn = trim((string) ($row['value'] ?? ''));
+                if ($sn === '') {
+                    continue;
+                }
+                if (!empty($deviceSnList) && !in_array($sn, $deviceSnList, true)) {
+                    continue;
+                }
+                $deviceCounts[$sn] = (int) ($row['total'] ?? 0);
+            }
+        } else {
+            $apiErrors[] = 'Device counts';
+        }
+    }
+
+    arsort($deviceCounts);
+    $activeDeviceCount = count($deviceCounts);
 
     $deviceStatusOk = false;
     $deviceStatusTotal = 0;
@@ -1134,26 +1023,56 @@ if ($employeeCode !== '') {
         'offline' => 0,
         'unknown' => 0,
     ];
+    $deviceStatusStartDate = $startDate;
+    $deviceStatusEndDate = $endDate;
+    $deviceStatusEnd = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
+    if ($deviceStatusEnd instanceof DateTimeImmutable) {
+        $deviceStatusEndDate = $deviceStatusEnd->modify('+1 day')->format('Y-m-d');
+    }
+    if ($deviceScope !== 'none') {
+        $deviceStatusResult = attendance_api_get('devices/status/counts', [
+            'startDate' => $deviceStatusStartDate,
+            'endDate' => $deviceStatusEndDate,
+            'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
+        ]);
+        if ($deviceStatusResult['ok'] && is_array($deviceStatusResult['data'])) {
+            $deviceStatusData = $deviceStatusResult['data'];
+            if (isset($deviceStatusData['counts']) && is_array($deviceStatusData['counts'])) {
+                $deviceStatusData = $deviceStatusData['counts'];
+            }
+            $hasCounts = array_key_exists('totalActive', $deviceStatusData)
+                || array_key_exists('totalInactive', $deviceStatusData)
+                || array_key_exists('totalUnknown', $deviceStatusData)
+                || array_key_exists('active', $deviceStatusData)
+                || array_key_exists('inactive', $deviceStatusData)
+                || array_key_exists('online', $deviceStatusData)
+                || array_key_exists('offline', $deviceStatusData)
+                || array_key_exists('unknown', $deviceStatusData)
+                || array_key_exists('total', $deviceStatusData);
+            if ($hasCounts) {
+                $deviceStatusOk = true;
+                $deviceStatusCounts['online'] = (int) ($deviceStatusData['totalActive'] ?? ($deviceStatusData['active'] ?? ($deviceStatusData['online'] ?? 0)));
+                $deviceStatusCounts['offline'] = (int) ($deviceStatusData['totalInactive'] ?? ($deviceStatusData['inactive'] ?? ($deviceStatusData['offline'] ?? 0)));
+                $deviceStatusCounts['unknown'] = (int) ($deviceStatusData['totalUnknown'] ?? ($deviceStatusData['unknown'] ?? 0));
+                $deviceStatusTotal = (int) ($deviceStatusData['total']
+                    ?? ($deviceStatusCounts['online'] + $deviceStatusCounts['offline'] + $deviceStatusCounts['unknown']));
+            }
+        }
+    }
+    if ($deviceScope !== 'none' && !$deviceStatusOk) {
+        $apiErrors[] = 'Device status';
+    }
     $deviceStatusScope = $deviceScopeLabel;
-    $deviceStatusRatio = $deviceScope === 'none' ? '0 / 0' : '-';
-    $deviceStatusMeta = $deviceScope === 'none'
-        ? ($deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.')
-        : 'Loading device status...';
+    $deviceStatusRatio = $deviceStatusOk ? ($deviceStatusCounts['online'] . ' / ' . $deviceStatusTotal) : '-';
+    $deviceStatusMeta = $deviceStatusOk
+        ? ('Offline: ' . $deviceStatusCounts['offline'] . ' | Unknown: ' . $deviceStatusCounts['unknown'] . ' | ' . $deviceStatusScope)
+        : 'Status data unavailable';
+    if ($deviceScope === 'none') {
+        $deviceStatusOk = true;
+        $deviceStatusRatio = '0 / 0';
+        $deviceStatusMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
+    }
 
-$hrmsError = null;
-$hrmsSummary = [
-        'employeeName' => null,
-        'department' => null,
-        'designation' => null,
-        'status' => null,
-        'attendanceDays' => 0,
-        'leaveDays' => 0,
-        'lastAttendance' => null,
-        'holidayCount' => 0,
-    ];
-}
-
-if ($isAjax) {
     $payload = [
         'errors' => array_values(array_unique($apiErrors)),
         'summary' => [
@@ -1168,17 +1087,6 @@ if ($isAjax) {
             'note' => $dailyNote !== '' ? $dailyNote : $dailyLabel,
             'series' => $dailySeries,
         ],
-        'loggedBadges' => [
-            'ok' => $loggedBadgesOk,
-            'note' => $loggedBadgesNote,
-            'count' => $loggedBadgesCount,
-            'rows' => $loggedBadgesRows,
-        ],
-        'hrms' => [
-            'enabled' => $employeeCode !== '',
-            'error' => $hrmsError,
-            'summary' => $hrmsSummary,
-        ],
     ];
 
     header('Content-Type: application/json; charset=utf-8');
@@ -1186,6 +1094,72 @@ if ($isAjax) {
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
     exit;
 }
+
+$badgeCountOk = false;
+$uniqueBadgeCount = 0;
+$activeEmployeesOk = false;
+$activeEmployeesCount = 0;
+$badgeCoveragePercent = null;
+$badgeRatioText = '...';
+$badgeCoverageLabel = 'Loading...';
+$badgeCardTitle = $showActiveEmployeesRatio ? 'Logged in / active employees' : 'Logged in employees';
+
+$loggedBadgesOk = true;
+$loggedBadgesRows = [];
+$loggedBadgesCount = 0;
+$loggedBadgesNote = '';
+if ($deviceScope === 'none') {
+    $loggedBadgesOk = true;
+    $loggedBadgesNote = $deviceScopeNote;
+    $loggedBadgesMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
+    $loggedBadgesEmptyText = $loggedBadgesMeta;
+} else {
+    $loggedBadgesNote = 'Loading logged in badges...';
+    $loggedBadgesMeta = $loggedBadgesNote;
+    $loggedBadgesEmptyText = $loggedBadgesNote;
+}
+
+$dailyOk = false;
+$dailyTotals = [];
+$dailyLabel = $deviceScopeLabel;
+if ($deviceScope === 'selected') {
+    $dailyNote = '';
+} elseif ($deviceScope === 'none') {
+    $dailyNote = $deviceScopeNote;
+} else {
+    $dailyNote = 'Select a device or project to load daily totals.';
+}
+$dailySeries = [];
+$dailyMax = 0;
+
+$deviceCountsOk = false;
+$deviceCounts = [];
+$activeDeviceCount = 0;
+
+$deviceStatusOk = false;
+$deviceStatusTotal = 0;
+$deviceStatusCounts = [
+    'online' => 0,
+    'offline' => 0,
+    'unknown' => 0,
+];
+$deviceStatusScope = $deviceScopeLabel;
+$deviceStatusRatio = $deviceScope === 'none' ? '0 / 0' : '-';
+$deviceStatusMeta = $deviceScope === 'none'
+    ? ($deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.')
+    : 'Loading device status...';
+
+$hrmsError = null;
+$hrmsSummary = [
+    'employeeName' => null,
+    'department' => null,
+    'designation' => null,
+    'status' => null,
+    'attendanceDays' => 0,
+    'leaveDays' => 0,
+    'lastAttendance' => null,
+    'holidayCount' => 0,
+];
 
 $quickRanges = [
     [
@@ -1566,18 +1540,11 @@ include __DIR__ . '/include/layout_top.php';
 
 <script>
   (function () {
-    const lazyEnabled = <?= $lazyMode ? 'true' : 'false' ?>;
     const errorBox = document.getElementById('apiErrors');
     const setText = (id, value) => {
       const el = document.getElementById(id);
       if (el) {
         el.textContent = value;
-      }
-    };
-    const setHtml = (id, html) => {
-      const el = document.getElementById(id);
-      if (el) {
-        el.innerHTML = html;
       }
     };
     const escapeHtml = (value) => {
@@ -1817,124 +1784,167 @@ include __DIR__ . '/include/layout_top.php';
     ) ?>;
 
     const hrmsForm = document.getElementById('hrmsSnapshotForm');
+    const hrmsButton = hrmsForm ? hrmsForm.querySelector('button[type="submit"]') : null;
+    const hrmsContent = document.getElementById('hrmsSnapshotContent');
+
+    const fetchHrmsSnapshot = (code) => {
+      if (!hrmsForm) {
+        return;
+      }
+      const cleanCode = String(code ?? '').trim();
+      if (cleanCode === '') {
+        renderHrmsSnapshot({ enabled: false });
+        return;
+      }
+      const formData = new FormData(hrmsForm);
+      formData.set('employeeCode', cleanCode);
+      if (hrmsContent) {
+        hrmsContent.innerHTML = '<p class="text-muted mb-0">Loading HRMS details...</p>';
+      }
+      const hrmsParams = new URLSearchParams(formData);
+      hrmsParams.set('ajax', '1');
+      hrmsParams.set('ajax_section', 'hrms');
+      const hrmsUrl = baseUrl + '?' + hrmsParams.toString();
+      if (hrmsButton) {
+        hrmsButton.disabled = true;
+      }
+      fetch(hrmsUrl, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          renderHrmsSnapshot((data && data.hrms) || {});
+        })
+        .catch(() => {
+          if (hrmsContent) {
+            hrmsContent.innerHTML = '<div class="alert alert-warning mb-0">Unable to load HRMS details.</div>';
+          }
+        })
+        .finally(() => {
+          if (hrmsButton) {
+            hrmsButton.disabled = false;
+          }
+        });
+    };
+
     if (hrmsForm) {
-      const hrmsButton = hrmsForm.querySelector('button[type="submit"]');
       hrmsForm.addEventListener('submit', (event) => {
         event.preventDefault();
         const formData = new FormData(hrmsForm);
         const code = String(formData.get('employeeCode') ?? '').trim();
-        formData.set('employeeCode', code);
-        if (code === '') {
-          renderHrmsSnapshot({ enabled: false });
-          return;
-        }
-        const hrmsContent = document.getElementById('hrmsSnapshotContent');
-        if (hrmsContent) {
-          hrmsContent.innerHTML = '<p class="text-muted mb-0">Loading HRMS details...</p>';
-        }
-        const hrmsParams = new URLSearchParams(formData);
-        hrmsParams.set('ajax', '1');
-        hrmsParams.set('ajax_section', 'hrms');
-        const hrmsUrl = baseUrl + '?' + hrmsParams.toString();
-        if (hrmsButton) {
-          hrmsButton.disabled = true;
-        }
-        fetch(hrmsUrl, { credentials: 'same-origin' })
-          .then((response) => {
-            if (!response.ok) {
-              throw new Error('Request failed');
-            }
-            return response.json();
-          })
-          .then((data) => {
-            renderHrmsSnapshot((data && data.hrms) || {});
-          })
-          .catch(() => {
-            if (hrmsContent) {
-              hrmsContent.innerHTML = '<div class="alert alert-warning mb-0">Unable to load HRMS details.</div>';
-            }
-          })
-          .finally(() => {
-            if (hrmsButton) {
-              hrmsButton.disabled = false;
-            }
-          });
+        fetchHrmsSnapshot(code);
       });
+
+      const employeeInput = hrmsForm.querySelector('#employeeCode');
+      const initialCode = employeeInput ? String(employeeInput.value ?? '').trim() : '';
+      if (initialCode !== '') {
+        fetchHrmsSnapshot(initialCode);
+      } else {
+        renderHrmsSnapshot({ enabled: false });
+      }
     }
 
-    if (!lazyEnabled) {
-      renderLoggedBadges(initialLoggedBadges || {});
-      return;
-    }
+    renderLoggedBadges(initialLoggedBadges || {});
 
-    const params = new URLSearchParams(window.location.search);
-    params.set('ajax', '1');
-    const url = baseUrl + '?' + params.toString();
+    const baseParams = new URLSearchParams(window.location.search);
+    baseParams.delete('ajax_section');
+    baseParams.set('ajax', '1');
 
-    fetch(url, { credentials: 'same-origin' })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error('Request failed');
-        }
-        return response.json();
-      })
-      .then((data) => {
-        const summary = data.summary || {};
-        setText('badgeRatioText', summary.badgeRatioText || '-');
-        setText('badgeCardTitle', summary.badgeCardTitle || 'Logged in employees');
-        setText('badgeCoverageLabel', summary.badgeCoverageLabel || '');
-        setText('deviceStatusRatio', summary.deviceStatusRatio || '-');
-        setText('deviceStatusMeta', summary.deviceStatusMeta || '');
-        setText('activeDeviceCount', summary.activeDeviceCountText || '-');
+    const fetchSummary = () => {
+      const summaryParams = new URLSearchParams(baseParams);
+      summaryParams.set('ajax_section', 'summary');
+      const summaryUrl = baseUrl + '?' + summaryParams.toString();
 
-        const daily = data.daily || {};
-        const series = Array.isArray(daily.series) ? daily.series : [];
-        setText('dailyTrendNote', daily.note || '');
-        const chartEl = document.getElementById('dailyTrendChart');
-        const placeholderEl = document.getElementById('dailyTrendPlaceholder');
-        if (chartEl && placeholderEl) {
-          if (series.length) {
-            const max = series.reduce((acc, row) => Math.max(acc, Number(row.total) || 0), 0);
-            chartEl.innerHTML = series.map((row) => {
-              const total = Number(row.total) || 0;
-              const height = max > 0 ? Math.max(Math.round((total / max) * 100), 4) : 0;
-              const label = formatMonthDay(row.date);
-              return `
-                <div class="trend-bar" style="height: ${height}%">
-                  <span class="trend-value">${escapeHtml(total)}</span>
-                  <span class="trend-label">${escapeHtml(label)}</span>
-                </div>
-              `;
-            }).join('');
-            chartEl.classList.remove('d-none');
-            placeholderEl.classList.add('d-none');
-          } else {
-            placeholderEl.textContent = 'No daily totals available for the selected range.';
-            placeholderEl.classList.remove('d-none');
-            chartEl.classList.add('d-none');
+      fetch(summaryUrl, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
           }
-        }
+          return response.json();
+        })
+        .then((data) => {
+          const summary = data.summary || {};
+          setText('badgeRatioText', summary.badgeRatioText || '-');
+          setText('badgeCardTitle', summary.badgeCardTitle || 'Logged in employees');
+          setText('badgeCoverageLabel', summary.badgeCoverageLabel || '');
+          setText('deviceStatusRatio', summary.deviceStatusRatio || '-');
+          setText('deviceStatusMeta', summary.deviceStatusMeta || '');
+          setText('activeDeviceCount', summary.activeDeviceCountText || '-');
 
-        renderLoggedBadges(data.loggedBadges || {});
-        renderHrmsSnapshot(data.hrms || {});
+          const daily = data.daily || {};
+          const series = Array.isArray(daily.series) ? daily.series : [];
+          setText('dailyTrendNote', daily.note || '');
+          const chartEl = document.getElementById('dailyTrendChart');
+          const placeholderEl = document.getElementById('dailyTrendPlaceholder');
+          if (chartEl && placeholderEl) {
+            if (series.length) {
+              const max = series.reduce((acc, row) => Math.max(acc, Number(row.total) || 0), 0);
+              chartEl.innerHTML = series.map((row) => {
+                const total = Number(row.total) || 0;
+                const height = max > 0 ? Math.max(Math.round((total / max) * 100), 4) : 0;
+                const label = formatMonthDay(row.date);
+                return `
+                  <div class="trend-bar" style="height: ${height}%">
+                    <span class="trend-value">${escapeHtml(total)}</span>
+                    <span class="trend-label">${escapeHtml(label)}</span>
+                  </div>
+                `;
+              }).join('');
+              chartEl.classList.remove('d-none');
+              placeholderEl.classList.add('d-none');
+            } else {
+              placeholderEl.textContent = 'No daily totals available for the selected range.';
+              placeholderEl.classList.remove('d-none');
+              chartEl.classList.add('d-none');
+            }
+          }
 
-        const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-        if (errorBox) {
-          if (errors.length) {
-            errorBox.textContent = `Some data panels could not be refreshed: ${errors.join(', ')}.`;
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          if (errorBox) {
+            if (errors.length) {
+              errorBox.textContent = `Some data panels could not be refreshed: ${errors.join(', ')}.`;
+              errorBox.classList.remove('d-none');
+            } else {
+              errorBox.classList.add('d-none');
+            }
+          }
+        })
+        .catch(() => {
+          if (errorBox) {
+            errorBox.textContent = 'Unable to load dashboard data. Please refresh the page.';
             errorBox.classList.remove('d-none');
-          } else {
-            errorBox.classList.add('d-none');
           }
-        }
-      })
-      .catch(() => {
-        if (errorBox) {
-          errorBox.textContent = 'Unable to load dashboard data. Please refresh the page.';
-          errorBox.classList.remove('d-none');
-        }
-      });
+        });
+    };
+
+    const fetchLoggedBadges = () => {
+      const badgesParams = new URLSearchParams(baseParams);
+      badgesParams.set('ajax_section', 'logged-badges');
+      const badgesUrl = baseUrl + '?' + badgesParams.toString();
+
+      fetch(badgesUrl, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          renderLoggedBadges((data && data.loggedBadges) || {});
+        })
+        .catch(() => {
+          renderLoggedBadges({ ok: false });
+        });
+    };
+
+    fetchSummary();
+    fetchLoggedBadges();
   })();
 </script>
 
 <?php include __DIR__ . '/include/layout_bottom.php'; ?>
+
+
