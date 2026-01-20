@@ -60,6 +60,60 @@ function normalize_bool_flag($value): ?bool {
     return null;
 }
 
+function build_project_device_summary(array $deviceCounts, array $deviceMap, int $limit = 3): array {
+    $projectCounts = [];
+    foreach ($deviceCounts as $sn => $count) {
+        $projectKey = 'unassigned';
+        $projectLabel = 'Unassigned';
+        if (isset($deviceMap[$sn]) && is_array($deviceMap[$sn])) {
+            $projectId = $deviceMap[$sn]['project_id'] ?? null;
+            $projectKey = $projectId !== null ? (string) $projectId : 'unassigned';
+            $projectName = trim((string) ($deviceMap[$sn]['project_name'] ?? ''));
+            $projectCode = trim((string) ($deviceMap[$sn]['pro_code'] ?? ''));
+            $projectLabel = trim(($projectCode !== '' ? $projectCode . ' ' : '') . $projectName);
+            if ($projectLabel === '') {
+                $projectLabel = $projectKey !== 'unassigned' ? ('Project ' . $projectKey) : 'Unassigned';
+            }
+        }
+        if (!isset($projectCounts[$projectKey])) {
+            $projectCounts[$projectKey] = ['label' => $projectLabel, 'count' => 0];
+        }
+        $projectCounts[$projectKey]['count']++;
+    }
+
+    $projects = array_values($projectCounts);
+    usort($projects, function (array $a, array $b): int {
+        $diff = $b['count'] <=> $a['count'];
+        if ($diff !== 0) {
+            return $diff;
+        }
+        return strcmp($a['label'], $b['label']);
+    });
+
+    $totalProjects = count($projects);
+    $limit = max(1, $limit);
+    $topProjects = array_slice($projects, 0, $limit);
+    $parts = [];
+    foreach ($topProjects as $project) {
+        $label = $project['label'] !== '' ? $project['label'] : 'Project';
+        $parts[] = $label . ': ' . $project['count'];
+    }
+    if ($totalProjects === 0) {
+        $meta = 'No devices with punches';
+    } else {
+        $meta = implode(' | ', $parts);
+        $remaining = $totalProjects - count($topProjects);
+        if ($remaining > 0) {
+            $meta .= ' | +' . $remaining . ' more';
+        }
+    }
+
+    return [
+        'count' => $totalProjects,
+        'meta' => $meta,
+    ];
+}
+
 function hrms_date_key(?string $value, ?DateTimeZone $localTz = null): ?string {
     $value = trim((string) $value);
     if ($value === '') {
@@ -100,6 +154,75 @@ function export_error(string $message): void {
     exit;
 }
 
+function csv_stream_begin(string $filename, array $headers) {
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
+    header('X-Accel-Buffering: no');
+    @ini_set('output_buffering', '0');
+    @ini_set('zlib.output_compression', '0');
+    @ini_set('implicit_flush', '1');
+
+    while (ob_get_level() > 0) {
+        ob_end_flush();
+    }
+    ob_implicit_flush(true);
+
+    $output = fopen('php://output', 'w');
+    if ($output === false) {
+        return false;
+    }
+    fputcsv($output, $headers);
+    return $output;
+}
+
+function csv_stream_flush($output): void {
+    if (is_resource($output)) {
+        fflush($output);
+    }
+    if (function_exists('ob_flush')) {
+        @ob_flush();
+    }
+    flush();
+}
+
+function fetch_logged_badges_page(
+    string $startDateParam,
+    string $endDateParam,
+    string $deviceSnParam,
+    int $page,
+    int $pageSize,
+    string $badgeNumberFilter = '',
+    int $timeoutSeconds = 20,
+    int $retries = 1
+): array {
+    $timeoutSeconds = max(1, $timeoutSeconds);
+    $retries = max(1, $retries);
+    $lastResult = null;
+    for ($attempt = 1; $attempt <= $retries; $attempt++) {
+        $result = attendance_api_get('attendance/badges/with-names', [
+            'startDate' => $startDateParam,
+            'endDate' => $endDateParam,
+            'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
+            'badgeNumber' => $badgeNumberFilter !== '' ? $badgeNumberFilter : null,
+            'page' => $page,
+            'pageSize' => $pageSize,
+        ], $timeoutSeconds);
+        $lastResult = $result;
+        if ($result['ok'] && is_array($result['data'])) {
+            return $result;
+        }
+        if ($attempt < $retries) {
+            usleep(200000);
+        }
+    }
+    if ($lastResult === null) {
+        return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'request_failed', 'url' => null];
+    }
+    return $lastResult;
+}
+
 function load_onboarded_users(string $deviceSnParam): array {
     $params = [];
     if ($deviceSnParam !== '') {
@@ -130,20 +253,21 @@ function load_onboarded_users(string $deviceSnParam): array {
 }
 
 function load_hrms_employee_details(array $employeeCodes, int $chunkSize = 100): array {
-    $uniqueCodes = [];
+    $codes = [];
     foreach ($employeeCodes as $code) {
         $code = trim((string) $code);
         if ($code === '') {
             continue;
         }
-        $uniqueCodes[$code] = true;
+        $codes[] = $code;
     }
-    if (empty($uniqueCodes)) {
+    $codes = array_values(array_unique($codes, SORT_STRING));
+    if (empty($codes)) {
         return ['ok' => true, 'map' => []];
     }
     $map = [];
     $allOk = true;
-    $chunks = array_chunk(array_keys($uniqueCodes), max(1, $chunkSize));
+    $chunks = array_chunk($codes, max(1, $chunkSize));
     foreach ($chunks as $chunk) {
         $result = hrms_api_post_json('/api/employees/details', array_values($chunk), 20);
         if (!$result['ok'] || !is_array($result['data'])) {
@@ -190,18 +314,34 @@ function load_hrms_employee_details(array $employeeCodes, int $chunkSize = 100):
                 ?? $row['name']
                 ?? ''));
             $firstName = trim((string) ($employee['EMP_FIRSTNAME']
+                ?? $employee['EMP_FIRST_NAME']
+                ?? $employee['EMP_FNAME']
+                ?? $employee['FIRST_NAME']
                 ?? $employee['empFirstName']
                 ?? $employee['firstName']
+                ?? $employee['first_name']
                 ?? $row['EMP_FIRSTNAME']
+                ?? $row['EMP_FIRST_NAME']
+                ?? $row['EMP_FNAME']
+                ?? $row['FIRST_NAME']
                 ?? $row['empFirstName']
                 ?? $row['firstName']
+                ?? $row['first_name']
                 ?? ''));
             $lastName = trim((string) ($employee['EMP_LASTNAME']
+                ?? $employee['EMP_LAST_NAME']
+                ?? $employee['EMP_LNAME']
+                ?? $employee['LAST_NAME']
                 ?? $employee['empLastName']
                 ?? $employee['lastName']
+                ?? $employee['last_name']
                 ?? $row['EMP_LASTNAME']
+                ?? $row['EMP_LAST_NAME']
+                ?? $row['EMP_LNAME']
+                ?? $row['LAST_NAME']
                 ?? $row['empLastName']
                 ?? $row['lastName']
+                ?? $row['last_name']
                 ?? ''));
             if ($name === '') {
                 $fullName = trim(trim($firstName) . ' ' . trim($lastName));
@@ -315,48 +455,134 @@ function load_hrms_employee_details(array $employeeCodes, int $chunkSize = 100):
 }
 
 function load_logged_in_badges(
-    string $startDateTime,
-    string $endDateTime,
+    string $startDateParam,
+    string $endDateParam,
     string $deviceSnParam,
-    bool $includeHrmsDetails = false
+    bool $includeHrmsDetails = false,
+    int $page = 1,
+    int $pageSize = 10,
+    bool $fetchAll = false,
+    string $badgeNumberFilter = '',
+    int $hrmsChunkSize = 100,
+    int $apiTimeoutSeconds = 20,
+    int $apiRetries = 1
 ): array {
-    $result = attendance_api_get('attendance/badges/with-names', [
-        'startDate' => $startDateTime,
-        'endDate' => $endDateTime,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-    ], 20);
-    if (!$result['ok'] || !is_array($result['data'])) {
-        return [
-            'ok' => false,
-            'rows' => [],
-            'total' => 0,
-            'error' => $result['error'] ?? 'request_failed',
-        ];
+    $badgeDetails = [];
+    $total = 0;
+    $page = max(1, $page);
+    $pageSize = max(1, $pageSize);
+    $pageSize = min($pageSize, 200);
+    $currentPage = $page;
+    $badgeNumberFilter = trim($badgeNumberFilter);
+    $originalFetchAll = $fetchAll;
+    if ($badgeNumberFilter !== '') {
+        $fetchAll = true;
     }
-    $rows = $result['data']['rows'] ?? null;
-    if (!is_array($rows)) {
-        $rows = [];
+
+    $apiTimeoutSeconds = max(1, $apiTimeoutSeconds);
+    $apiRetries = max(1, $apiRetries);
+    while (true) {
+        $result = fetch_logged_badges_page(
+            $startDateParam,
+            $endDateParam,
+            $deviceSnParam,
+            $currentPage,
+            $pageSize,
+            $badgeNumberFilter,
+            $apiTimeoutSeconds,
+            $apiRetries
+        );
+        if (!$result['ok'] || !is_array($result['data'])) {
+            return [
+                'ok' => false,
+                'rows' => [],
+                'total' => 0,
+                'error' => $result['error'] ?? 'request_failed',
+                'status' => $result['status'] ?? null,
+                'url' => $result['url'] ?? null,
+            ];
+        }
+        $rows = $result['data']['rows'] ?? null;
+        if (!is_array($rows)) {
+            $rows = [];
+        }
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $badge = trim((string) ($row['badgeNumber'] ?? ''));
+            if ($badge === '') {
+                continue;
+            }
+            $utimeName = trim((string) ($row['name'] ?? ''));
+            $details = $badgeDetails[$badge] ?? [
+                'utimeName' => '',
+                'firstLoginTime' => '',
+                'lastLoginTime' => '',
+                'firstLoginDeviceSn' => '',
+                'lastLoginDeviceSn' => '',
+                'firstLoginProjectId' => '',
+                'firstLoginProjectName' => '',
+                'lastLoginProjectId' => '',
+                'lastLoginProjectName' => '',
+            ];
+            if ($utimeName !== '' && $details['utimeName'] === '') {
+                $details['utimeName'] = $utimeName;
+            }
+            $firstLoginTime = trim((string) ($row['firstLoginTime'] ?? ''));
+            if ($details['firstLoginTime'] === '' && $firstLoginTime !== '') {
+                $details['firstLoginTime'] = $firstLoginTime;
+            }
+            $lastLoginTime = trim((string) ($row['lastLoginTime'] ?? ''));
+            if ($details['lastLoginTime'] === '' && $lastLoginTime !== '') {
+                $details['lastLoginTime'] = $lastLoginTime;
+            }
+            $firstLoginDeviceSn = trim((string) ($row['firstLoginDeviceSn'] ?? ''));
+            if ($details['firstLoginDeviceSn'] === '' && $firstLoginDeviceSn !== '') {
+                $details['firstLoginDeviceSn'] = $firstLoginDeviceSn;
+            }
+            $lastLoginDeviceSn = trim((string) ($row['lastLoginDeviceSn'] ?? ''));
+            if ($details['lastLoginDeviceSn'] === '' && $lastLoginDeviceSn !== '') {
+                $details['lastLoginDeviceSn'] = $lastLoginDeviceSn;
+            }
+            $firstLoginProjectId = trim((string) ($row['firstLoginProjectId'] ?? ''));
+            if ($details['firstLoginProjectId'] === '' && $firstLoginProjectId !== '') {
+                $details['firstLoginProjectId'] = $firstLoginProjectId;
+            }
+            $firstLoginProjectName = trim((string) ($row['firstLoginProjectName'] ?? ''));
+            if ($details['firstLoginProjectName'] === '' && $firstLoginProjectName !== '') {
+                $details['firstLoginProjectName'] = $firstLoginProjectName;
+            }
+            $lastLoginProjectId = trim((string) ($row['lastLoginProjectId'] ?? ''));
+            if ($details['lastLoginProjectId'] === '' && $lastLoginProjectId !== '') {
+                $details['lastLoginProjectId'] = $lastLoginProjectId;
+            }
+            $lastLoginProjectName = trim((string) ($row['lastLoginProjectName'] ?? ''));
+            if ($details['lastLoginProjectName'] === '' && $lastLoginProjectName !== '') {
+                $details['lastLoginProjectName'] = $lastLoginProjectName;
+            }
+            $badgeDetails[$badge] = $details;
+        }
+
+        $total = (int) ($result['data']['total'] ?? $total);
+        if (!$fetchAll) {
+            break;
+        }
+        if (count($rows) < 1) {
+            break;
+        }
+        if ($total > 0 && ($currentPage * $pageSize) >= $total) {
+            break;
+        }
+        $currentPage++;
     }
-    $badgeRows = [];
-    foreach ($rows as $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-        $badge = trim((string) ($row['badgeNumber'] ?? ''));
-        if ($badge === '') {
-            continue;
-        }
-        $name = trim((string) ($row['name'] ?? ''));
-        if (!isset($badgeRows[$badge]) || ($badgeRows[$badge] === '' && $name !== '')) {
-            $badgeRows[$badge] = $name;
-        }
-    }
-    $badgeNumbers = array_keys($badgeRows);
+
+    $badgeNumbers = array_keys($badgeDetails);
     sort($badgeNumbers, SORT_NATURAL);
     $detailsMap = [];
     $hrmsOk = true;
     if ($includeHrmsDetails && !empty($badgeNumbers)) {
-        $detailsResult = load_hrms_employee_details($badgeNumbers);
+        $detailsResult = load_hrms_employee_details($badgeNumbers, max(1, $hrmsChunkSize));
         $hrmsOk = $detailsResult['ok'];
         if ($detailsResult['ok'] && isset($detailsResult['map']) && is_array($detailsResult['map'])) {
             $detailsMap = $detailsResult['map'];
@@ -364,65 +590,63 @@ function load_logged_in_badges(
     }
     $list = [];
     foreach ($badgeNumbers as $badge) {
-        $name = $badgeRows[$badge] ?? '';
+        $apiDetails = $badgeDetails[$badge] ?? [];
+        $utimeName = trim((string) ($apiDetails['utimeName'] ?? ($apiDetails['name'] ?? '')));
+        $hrmsName = '';
+        $firstLoginTime = trim((string) ($apiDetails['firstLoginTime'] ?? ''));
+        $lastLoginTime = trim((string) ($apiDetails['lastLoginTime'] ?? ''));
+        $firstLoginDeviceSn = trim((string) ($apiDetails['firstLoginDeviceSn'] ?? ''));
+        $lastLoginDeviceSn = trim((string) ($apiDetails['lastLoginDeviceSn'] ?? ''));
+        $firstLoginProjectId = trim((string) ($apiDetails['firstLoginProjectId'] ?? ''));
+        $firstLoginProjectName = trim((string) ($apiDetails['firstLoginProjectName'] ?? ''));
+        $lastLoginProjectId = trim((string) ($apiDetails['lastLoginProjectId'] ?? ''));
+        $lastLoginProjectName = trim((string) ($apiDetails['lastLoginProjectName'] ?? ''));
         $department = '';
-        $departmentCode = '';
         $designation = '';
-        $designationCode = '';
-        $status = '';
-        $companyCode = '';
-        $firstName = '';
-        $lastName = '';
-        $workTypeCode = '';
-        $workTypeDescription = '';
-        $todayWorking = null;
-        $onEleave = null;
-        $leaveCode = '';
-        $leaveDescription = '';
         if (isset($detailsMap[$badge]) && is_array($detailsMap[$badge])) {
             $details = $detailsMap[$badge];
             $hrmsName = trim((string) ($details['name'] ?? ''));
-            if ($hrmsName !== '') {
-                $name = $hrmsName;
-            }
             $department = trim((string) ($details['department'] ?? ''));
-            $departmentCode = trim((string) ($details['departmentCode'] ?? ''));
             $designation = trim((string) ($details['designation'] ?? ''));
-            $designationCode = trim((string) ($details['designationCode'] ?? ''));
-            $status = trim((string) ($details['status'] ?? ''));
-            $companyCode = trim((string) ($details['companyCode'] ?? ''));
-            $firstName = trim((string) ($details['firstName'] ?? ''));
-            $lastName = trim((string) ($details['lastName'] ?? ''));
-            $workTypeCode = trim((string) ($details['workTypeCode'] ?? ''));
-            $workTypeDescription = trim((string) ($details['workTypeDescription'] ?? ''));
-            $todayWorking = $details['todayWorking'] ?? null;
-            $onEleave = $details['onEleave'] ?? null;
-            $leaveCode = trim((string) ($details['leaveCode'] ?? ''));
-            $leaveDescription = trim((string) ($details['leaveDescription'] ?? ''));
         }
         $list[] = [
             'badgeNumber' => $badge,
-            'name' => $name,
-            'firstName' => $firstName,
-            'lastName' => $lastName,
-            'companyCode' => $companyCode,
-            'departmentCode' => $departmentCode,
+            'utimeName' => $utimeName,
+            'hrmsName' => $hrmsName,
             'department' => $department,
-            'designationCode' => $designationCode,
             'designation' => $designation,
-            'status' => $status,
-            'workTypeCode' => $workTypeCode,
-            'workTypeDescription' => $workTypeDescription,
-            'todayWorking' => $todayWorking,
-            'onEleave' => $onEleave,
-            'leaveCode' => $leaveCode,
-            'leaveDescription' => $leaveDescription,
+            'firstLoginTime' => $firstLoginTime,
+            'lastLoginTime' => $lastLoginTime,
+            'firstLoginDeviceSn' => $firstLoginDeviceSn,
+            'lastLoginDeviceSn' => $lastLoginDeviceSn,
+            'firstLoginProjectId' => $firstLoginProjectId,
+            'firstLoginProjectName' => $firstLoginProjectName,
+            'lastLoginProjectId' => $lastLoginProjectId,
+            'lastLoginProjectName' => $lastLoginProjectName,
         ];
+    }
+
+    if ($badgeNumberFilter !== '') {
+        $needle = strtolower($badgeNumberFilter);
+        $list = array_values(array_filter($list, function (array $row) use ($needle) {
+            $badge = strtolower(trim((string) ($row['badgeNumber'] ?? '')));
+            if ($badge === '') {
+                return false;
+            }
+            return strpos($badge, $needle) !== false;
+        }));
+        $total = count($list);
+        if (!$originalFetchAll) {
+            $offset = max(0, ($page - 1) * $pageSize);
+            $list = array_slice($list, $offset, $pageSize);
+        }
     }
     return [
         'ok' => true,
         'rows' => $list,
-        'total' => count($list),
+        'total' => $total > 0 ? $total : count($list),
+        'page' => $page,
+        'pageSize' => $pageSize,
         'hrmsOk' => $hrmsOk,
         'error' => null,
     ];
@@ -633,12 +857,26 @@ if ($startDate > $endDate) {
     $startDate = $endDate;
     $endDate = $tmp;
 }
-$startDateTime = $startDate . 'T00:00:00+00:00';
-$endDateTime = $endDate . 'T24:00:00+00:00';
+$endDateExclusive = $endDate;
+$endDateCursor = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
+if ($endDateCursor instanceof DateTimeImmutable) {
+    $endDateExclusive = $endDateCursor->modify('+1 day')->format('Y-m-d');
+}
+$startDateParam = $startDate;
+$endDateParam = $endDateExclusive;
 
 $deviceSnInput = trim((string) ($_GET['deviceSn'] ?? ''));
 $projectId = trim((string) ($_GET['projectId'] ?? ''));
 $employeeCode = trim((string) ($_GET['employeeCode'] ?? ''));
+$badgeNumberFilter = trim((string) ($_GET['badgeNumber'] ?? ''));
+$loggedBadgesPage = max(1, (int) ($_GET['page'] ?? 1));
+$loggedBadgesPageSize = (int) ($_GET['pageSize'] ?? 10);
+if ($loggedBadgesPageSize < 1) {
+    $loggedBadgesPageSize = 10;
+}
+if ($loggedBadgesPageSize > 200) {
+    $loggedBadgesPageSize = 200;
+}
 
 $isAjax = ($_GET['ajax'] ?? '') === '1';
 $ajaxSection = strtolower(trim((string) ($_GET['ajax_section'] ?? '')));
@@ -719,6 +957,8 @@ if ($deviceScope === 'none') {
 }
 $exportType = strtolower(trim((string) ($_GET['export'] ?? '')));
 if ($exportType !== '') {
+    @set_time_limit(0);
+    @ini_set('max_execution_time', '0');
     if ($deviceScope === 'none' && $exportType !== 'hrms-active-employees') {
         export_error($deviceScopeNote !== '' ? $deviceScopeNote : 'No devices matched the selected filter.');
     }
@@ -729,56 +969,176 @@ if ($exportType !== '') {
     $filenameTag = safe_filename($rangeTag);
 
     if ($exportType === 'logged-in-badges') {
-        $loggedBadgesResult = load_logged_in_badges($startDateTime, $endDateTime, $deviceSnParam, true);
-        if (!$loggedBadgesResult['ok']) {
-            export_error('Unable to load UTime badge list for the selected range.');
-        }
-        $rows = [];
-        foreach ($loggedBadgesResult['rows'] as $row) {
-            $todayWorkingFlag = normalize_bool_flag($row['todayWorking'] ?? null);
-            $onEleaveFlag = normalize_bool_flag($row['onEleave'] ?? null);
-            $rows[] = [
-                $row['badgeNumber'],
-                $row['name'] ?? '',
-                $row['department'] ?? '',
-                $row['designation'] ?? '',
-                $row['status'] ?? '',
-                $row['workTypeCode'] ?? '',
-                $row['workTypeDescription'] ?? '',
-                $row['companyCode'] ?? '',
-                $row['departmentCode'] ?? '',
-                $row['designationCode'] ?? '',
-                $row['firstName'] ?? '',
-                $row['lastName'] ?? '',
-                ($todayWorkingFlag === true ? 'Yes' : ($todayWorkingFlag === false ? 'No' : '')),
-                ($onEleaveFlag === true ? 'Yes' : ($onEleaveFlag === false ? 'No' : '')),
-                $row['leaveCode'] ?? '',
-                $row['leaveDescription'] ?? '',
-            ];
-        }
         $filename = 'logged-in-badges-' . $filenameTag . '.csv';
-        csv_download(
-            $filename,
-            [
-                'BadgeNumber',
-                'EmployeeName',
-                'Department',
-                'Designation',
-                'Status',
-                'WorkTypeCode',
-                'WorkTypeDescription',
-                'CompanyCode',
-                'DepartmentCode',
-                'DesignationCode',
-                'FirstName',
-                'LastName',
-                'TodayWorking',
-                'OnEleave',
-                'LeaveCode',
-                'LeaveDescription',
-            ],
-            $rows
+        $exportPageSize = 100;
+        $exportHrmsChunkSize = 200;
+        $exportTimeoutSeconds = 60;
+        $exportRetries = 2;
+        $output = csv_stream_begin($filename, [
+            'Employee Code (utime)',
+            'Name (utime)',
+            'Name (hrms)',
+            'Department (hrms)',
+            'Designation (hrms)',
+            'First Punch time (utime)',
+            'First Punch device (utime)',
+            'FP Project ID',
+            'FP project name',
+            'Last Punch time (utime)',
+            'Last Punch device (utime)',
+            'LP project id',
+            'LP project name',
+        ]);
+        if ($output === false) {
+            export_error('Unable to open export stream.');
+        }
+        csv_stream_flush($output);
+
+        $firstResult = fetch_logged_badges_page(
+            $startDateParam,
+            $endDateParam,
+            $deviceSnParam,
+            1,
+            $exportPageSize,
+            $badgeNumberFilter,
+            $exportTimeoutSeconds,
+            $exportRetries
         );
+        if (!$firstResult['ok'] || !is_array($firstResult['data'])) {
+            $details = 'Unable to load UTime badge list for the selected range.';
+            if (!empty($firstResult['error'])) {
+                $details .= ' Error: ' . $firstResult['error'] . '.';
+            }
+            if (!empty($firstResult['status'])) {
+                $details .= ' Status: ' . $firstResult['status'] . '.';
+            }
+            if (!empty($firstResult['url'])) {
+                $details .= ' URL: ' . $firstResult['url'] . '.';
+            }
+            fputcsv($output, ['ERROR', $details]);
+            csv_stream_flush($output);
+            if (is_resource($output)) {
+                fclose($output);
+            }
+            exit;
+        }
+
+        $page = 1;
+        $total = (int) ($firstResult['data']['total'] ?? 0);
+        $badgeNeedle = strtolower($badgeNumberFilter);
+        $seenBadges = [];
+        $currentResult = $firstResult;
+        $exportError = null;
+
+        while (true) {
+            $dataRows = $currentResult['data']['rows'] ?? [];
+            if (!is_array($dataRows)) {
+                $dataRows = [];
+            }
+
+            $pageBadges = [];
+            $pageRows = [];
+            foreach ($dataRows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $badge = trim((string) ($row['badgeNumber'] ?? ''));
+                if ($badge === '') {
+                    continue;
+                }
+                if ($badgeNeedle !== '' && strpos(strtolower($badge), $badgeNeedle) === false) {
+                    continue;
+                }
+                if (isset($seenBadges[$badge])) {
+                    continue;
+                }
+                $seenBadges[$badge] = true;
+                $pageBadges[] = $badge;
+                $pageRows[] = [
+                    'badgeNumber' => $badge,
+                    'utimeName' => trim((string) ($row['name'] ?? '')),
+                    'firstLoginTime' => trim((string) ($row['firstLoginTime'] ?? '')),
+                    'lastLoginTime' => trim((string) ($row['lastLoginTime'] ?? '')),
+                    'firstLoginDeviceSn' => trim((string) ($row['firstLoginDeviceSn'] ?? '')),
+                    'lastLoginDeviceSn' => trim((string) ($row['lastLoginDeviceSn'] ?? '')),
+                    'firstLoginProjectId' => trim((string) ($row['firstLoginProjectId'] ?? '')),
+                    'firstLoginProjectName' => trim((string) ($row['firstLoginProjectName'] ?? '')),
+                    'lastLoginProjectId' => trim((string) ($row['lastLoginProjectId'] ?? '')),
+                    'lastLoginProjectName' => trim((string) ($row['lastLoginProjectName'] ?? '')),
+                ];
+            }
+
+            $detailsMap = [];
+            if (!empty($pageBadges)) {
+                $detailsResult = load_hrms_employee_details($pageBadges, $exportHrmsChunkSize);
+                if ($detailsResult['ok'] && isset($detailsResult['map']) && is_array($detailsResult['map'])) {
+                    $detailsMap = $detailsResult['map'];
+                }
+            }
+
+            foreach ($pageRows as $row) {
+                $badge = $row['badgeNumber'];
+                $details = $detailsMap[$badge] ?? [];
+                $hrmsName = trim((string) ($details['name'] ?? ''));
+                $department = trim((string) ($details['department'] ?? ''));
+                $designation = trim((string) ($details['designation'] ?? ''));
+                fputcsv($output, [
+                    $badge,
+                    $row['utimeName'],
+                    $hrmsName,
+                    $department,
+                    $designation,
+                    $row['firstLoginTime'],
+                    $row['firstLoginDeviceSn'],
+                    $row['firstLoginProjectId'],
+                    $row['firstLoginProjectName'],
+                    $row['lastLoginTime'],
+                    $row['lastLoginDeviceSn'],
+                    $row['lastLoginProjectId'],
+                    $row['lastLoginProjectName'],
+                ]);
+            }
+            csv_stream_flush($output);
+
+            if (count($dataRows) < 1) {
+                break;
+            }
+            if ($total > 0 && ($page * $exportPageSize) >= $total) {
+                break;
+            }
+            $page++;
+            $currentResult = fetch_logged_badges_page(
+                $startDateParam,
+                $endDateParam,
+                $deviceSnParam,
+                $page,
+                $exportPageSize,
+                $badgeNumberFilter,
+                $exportTimeoutSeconds,
+                $exportRetries
+            );
+            if (!$currentResult['ok'] || !is_array($currentResult['data'])) {
+                $exportError = 'UTime request failed';
+                if (!empty($currentResult['error'])) {
+                    $exportError .= ' (' . $currentResult['error'] . ')';
+                }
+                if (!empty($currentResult['status'])) {
+                    $exportError .= ' status ' . $currentResult['status'];
+                }
+                if (!empty($currentResult['url'])) {
+                    $exportError .= ' url ' . $currentResult['url'];
+                }
+                break;
+            }
+        }
+
+        if ($exportError !== null) {
+            fputcsv($output, ['ERROR', $exportError]);
+            csv_stream_flush($output);
+        }
+        if (is_resource($output)) {
+            fclose($output);
+        }
         exit;
     }
 
@@ -851,11 +1211,21 @@ if ($isAjax && $ajaxSection === 'logged-badges') {
     $loggedBadgesRows = [];
     $loggedBadgesCount = 0;
     $loggedBadgesNote = '';
+    $loggedBadgesPage = max(1, $loggedBadgesPage);
     if ($deviceScope === 'none') {
         $loggedBadgesOk = true;
         $loggedBadgesNote = $deviceScopeNote;
     } else {
-        $loggedBadgesResult = load_logged_in_badges($startDateTime, $endDateTime, $deviceSnParam, true);
+        $loggedBadgesResult = load_logged_in_badges(
+            $startDateParam,
+            $endDateParam,
+            $deviceSnParam,
+            true,
+            $loggedBadgesPage,
+            $loggedBadgesPageSize,
+            false,
+            $badgeNumberFilter
+        );
         if ($loggedBadgesResult['ok']) {
             $loggedBadgesOk = true;
             $loggedBadgesRows = $loggedBadgesResult['rows'];
@@ -869,6 +1239,8 @@ if ($isAjax && $ajaxSection === 'logged-badges') {
             'note' => $loggedBadgesNote,
             'count' => $loggedBadgesCount,
             'rows' => $loggedBadgesRows,
+            'page' => $loggedBadgesPage,
+            'pageSize' => $loggedBadgesPageSize,
         ],
     ];
 
@@ -878,15 +1250,216 @@ if ($isAjax && $ajaxSection === 'logged-badges') {
     exit;
 }
 
-if ($isAjax) {
+if ($isAjax && $ajaxSection === 'active-devices') {
+    $apiErrors = [];
+    $deviceCountsOk = false;
+    $deviceCounts = [];
+    if ($deviceScope === 'none') {
+        $deviceCountsOk = true;
+    } else {
+        $deviceCountsResult = attendance_api_get('attendance/counts', [
+            'groupBy' => 'deviceSn',
+            'startDate' => $startDateParam,
+            'endDate' => $endDateParam,
+        ]);
+        if ($deviceCountsResult['ok'] && is_array($deviceCountsResult['data'])) {
+            $deviceCountsOk = true;
+            foreach ($deviceCountsResult['data'] as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $sn = trim((string) ($row['value'] ?? ''));
+                if ($sn === '') {
+                    continue;
+                }
+                if (!empty($deviceSnList) && !in_array($sn, $deviceSnList, true)) {
+                    continue;
+                }
+                $deviceCounts[$sn] = (int) ($row['total'] ?? 0);
+            }
+        } else {
+            $apiErrors[] = 'Project counts';
+        }
+    }
+
+    arsort($deviceCounts);
+    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
+    $activeDeviceCount = $projectSummary['count'];
+    $activeDeviceMeta = $projectSummary['meta'];
+    if ($deviceScope === 'none') {
+        $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
+    }
+    if (!$deviceCountsOk) {
+        $activeDeviceMeta = 'Project counts unavailable';
+    }
+
+    $payload = [
+        'errors' => array_values(array_unique($apiErrors)),
+        'activeDevices' => [
+            'activeDeviceCountText' => $deviceCountsOk ? (string) $activeDeviceCount : '-',
+            'activeDeviceMeta' => $deviceCountsOk ? $activeDeviceMeta : 'Project counts unavailable',
+        ],
+    ];
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+if ($isAjax && $ajaxSection === 'device-status') {
+    $apiErrors = [];
+    $deviceStatusOk = false;
+    $deviceStatusTotal = 0;
+    $deviceStatusCounts = [
+        'online' => 0,
+        'offline' => 0,
+        'unknown' => 0,
+    ];
+    $deviceStatusStartDate = $startDate;
+    $deviceStatusEndDate = $endDate;
+    $deviceStatusEnd = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
+    if ($deviceStatusEnd instanceof DateTimeImmutable) {
+        $deviceStatusEndDate = $deviceStatusEnd->modify('+1 day')->format('Y-m-d');
+    }
+    if ($deviceScope !== 'none') {
+        $deviceStatusResult = attendance_api_get('devices/status/counts', [
+            'startDate' => $deviceStatusStartDate,
+            'endDate' => $deviceStatusEndDate,
+            'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
+        ]);
+        if ($deviceStatusResult['ok'] && is_array($deviceStatusResult['data'])) {
+            $deviceStatusData = $deviceStatusResult['data'];
+            if (isset($deviceStatusData['counts']) && is_array($deviceStatusData['counts'])) {
+                $deviceStatusData = $deviceStatusData['counts'];
+            }
+            $hasCounts = array_key_exists('totalActive', $deviceStatusData)
+                || array_key_exists('totalInactive', $deviceStatusData)
+                || array_key_exists('totalUnknown', $deviceStatusData)
+                || array_key_exists('active', $deviceStatusData)
+                || array_key_exists('inactive', $deviceStatusData)
+                || array_key_exists('online', $deviceStatusData)
+                || array_key_exists('offline', $deviceStatusData)
+                || array_key_exists('unknown', $deviceStatusData)
+                || array_key_exists('total', $deviceStatusData);
+            if ($hasCounts) {
+                $deviceStatusOk = true;
+                $deviceStatusCounts['online'] = (int) ($deviceStatusData['totalActive'] ?? ($deviceStatusData['active'] ?? ($deviceStatusData['online'] ?? 0)));
+                $deviceStatusCounts['offline'] = (int) ($deviceStatusData['totalInactive'] ?? ($deviceStatusData['inactive'] ?? ($deviceStatusData['offline'] ?? 0)));
+                $deviceStatusCounts['unknown'] = (int) ($deviceStatusData['totalUnknown'] ?? ($deviceStatusData['unknown'] ?? 0));
+                $deviceStatusTotal = (int) ($deviceStatusData['total']
+                    ?? ($deviceStatusCounts['online'] + $deviceStatusCounts['offline'] + $deviceStatusCounts['unknown']));
+            }
+        }
+    }
+    if ($deviceScope !== 'none' && !$deviceStatusOk) {
+        $apiErrors[] = 'Online/total devices';
+    }
+    $deviceStatusScope = $deviceScopeLabel;
+    $deviceStatusRatio = $deviceStatusOk ? ($deviceStatusCounts['online'] . ' / ' . $deviceStatusTotal) : '-';
+    $deviceStatusMeta = $deviceStatusOk
+        ? ('Offline: ' . $deviceStatusCounts['offline'] . ' | Unknown: ' . $deviceStatusCounts['unknown'] . ' | ' . $deviceStatusScope)
+        : 'Status data unavailable';
+    if ($deviceScope === 'none') {
+        $deviceStatusOk = true;
+        $deviceStatusRatio = '0 / 0';
+        $deviceStatusMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
+    }
+
+    $payload = [
+        'errors' => array_values(array_unique($apiErrors)),
+        'deviceStatus' => [
+            'deviceStatusRatio' => $deviceStatusRatio,
+            'deviceStatusMeta' => $deviceStatusMeta,
+        ],
+    ];
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+if ($isAjax && $ajaxSection === 'badge-ratio') {
+    $apiErrors = [];
     $badgeCountOk = false;
     $uniqueBadgeCount = 0;
     if ($deviceScope === 'none') {
         $badgeCountOk = true;
     } else {
         $badgeCountResult = attendance_api_get('attendance/badges/count', [
-            'startDate' => $startDateTime,
-            'endDate' => $endDateTime,
+            'startDate' => $startDateParam,
+            'endDate' => $endDateParam,
+            'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
+        ]);
+        if ($badgeCountResult['ok'] && is_array($badgeCountResult['data'])) {
+            $badgeCountOk = true;
+            $uniqueBadgeCount = (int) ($badgeCountResult['data']['total'] ?? 0);
+        } else {
+            $apiErrors[] = 'Logged in / active employees';
+        }
+    }
+
+    $activeEmployeesOk = false;
+    $activeEmployeesCount = 0;
+    if ($showActiveEmployeesRatio) {
+        $activeEmployeesResult = hrms_api_get('/api/employees/active/count');
+        if ($activeEmployeesResult['ok'] && is_array($activeEmployeesResult['data'])) {
+            $activeEmployeesOk = true;
+            $activeEmployeesCount = (int) ($activeEmployeesResult['data']['count'] ?? ($activeEmployeesResult['data']['total'] ?? 0));
+        } else {
+            $activeEmployeesFallback = hrms_api_get('/api/employees/active');
+            if ($activeEmployeesFallback['ok'] && is_array($activeEmployeesFallback['data'])) {
+                $activeEmployeesOk = true;
+                $activeEmployeesCount = (int) ($activeEmployeesFallback['data']['count'] ?? 0);
+                if ($activeEmployeesCount === 0) {
+                    $employees = $activeEmployeesFallback['data']['employees'] ?? null;
+                    if (is_array($employees)) {
+                        $activeEmployeesCount = count($employees);
+                    }
+                }
+            } else {
+                $apiErrors[] = 'HRMS active count';
+            }
+        }
+    }
+
+    $badgeCoveragePercent = null;
+    if ($showActiveEmployeesRatio && $badgeCountOk && $activeEmployeesOk && $activeEmployeesCount > 0) {
+        $badgeCoveragePercent = (int) round(($uniqueBadgeCount / $activeEmployeesCount) * 100);
+    }
+    $badgeRatioText = $badgeCountOk
+        ? ($showActiveEmployeesRatio && $activeEmployeesOk ? $uniqueBadgeCount . ' / ' . $activeEmployeesCount : (string) $uniqueBadgeCount)
+        : '-';
+    $badgeCoverageLabel = $showActiveEmployeesRatio
+        ? ($badgeCoveragePercent !== null ? $badgeCoveragePercent . '% logged in' : 'Coverage n/a')
+        : 'Unique badges in range';
+    $badgeCardTitle = $showActiveEmployeesRatio ? 'Logged in / active employees' : 'Logged in employees';
+
+    $payload = [
+        'errors' => array_values(array_unique($apiErrors)),
+        'badgeRatio' => [
+            'badgeRatioText' => $badgeRatioText,
+            'badgeCardTitle' => $badgeCardTitle,
+            'badgeCoverageLabel' => $badgeCoverageLabel,
+        ],
+    ];
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+if ($isAjax && $ajaxSection === 'summary') {
+    $badgeCountOk = false;
+    $uniqueBadgeCount = 0;
+    if ($deviceScope === 'none') {
+        $badgeCountOk = true;
+    } else {
+        $badgeCountResult = attendance_api_get('attendance/badges/count', [
+            'startDate' => $startDateParam,
+            'endDate' => $endDateParam,
             'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
         ]);
         if ($badgeCountResult['ok'] && is_array($badgeCountResult['data'])) {
@@ -940,8 +1513,8 @@ if ($isAjax) {
     if ($deviceScope === 'selected') {
         $dailyResult = attendance_api_get('attendance/daily/by-devices', [
             'deviceSn' => $deviceSnParam,
-            'startDate' => $startDate,
-            'endDate' => $endDate,
+            'startDate' => $startDateParam,
+            'endDate' => $endDateParam,
         ]);
         if ($dailyResult['ok'] && is_array($dailyResult['data'])) {
             $dailyOk = true;
@@ -990,8 +1563,8 @@ if ($isAjax) {
     } else {
         $deviceCountsResult = attendance_api_get('attendance/counts', [
             'groupBy' => 'deviceSn',
-            'startDate' => $startDateTime,
-            'endDate' => $endDateTime,
+            'startDate' => $startDateParam,
+            'endDate' => $endDateParam,
         ]);
         if ($deviceCountsResult['ok'] && is_array($deviceCountsResult['data'])) {
             $deviceCountsOk = true;
@@ -1014,7 +1587,15 @@ if ($isAjax) {
     }
 
     arsort($deviceCounts);
-    $activeDeviceCount = count($deviceCounts);
+    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
+    $activeDeviceCount = $projectSummary['count'];
+    $activeDeviceMeta = $projectSummary['meta'];
+    if ($deviceScope === 'none') {
+        $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
+    }
+    if (!$deviceCountsOk) {
+        $activeDeviceMeta = 'Project counts unavailable';
+    }
 
     $deviceStatusOk = false;
     $deviceStatusTotal = 0;
@@ -1082,6 +1663,7 @@ if ($isAjax) {
             'deviceStatusRatio' => $deviceStatusRatio,
             'deviceStatusMeta' => $deviceStatusMeta,
             'activeDeviceCountText' => $deviceCountsOk ? (string) $activeDeviceCount : '-',
+            'activeDeviceMeta' => $deviceCountsOk ? $activeDeviceMeta : 'Project counts unavailable',
         ],
         'daily' => [
             'note' => $dailyNote !== '' ? $dailyNote : $dailyLabel,
@@ -1135,6 +1717,9 @@ $dailyMax = 0;
 $deviceCountsOk = false;
 $deviceCounts = [];
 $activeDeviceCount = 0;
+$activeDeviceMeta = $deviceScope === 'none'
+    ? ($deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.')
+    : 'Loading project counts...';
 
 $deviceStatusOk = false;
 $deviceStatusTotal = 0;
@@ -1282,10 +1867,10 @@ include __DIR__ . '/include/layout_top.php';
         <div class="small-box bg-warning dash-card" style="animation-delay: 0.2s;">
           <div class="inner">
             <h3 id="activeDeviceCount"><?= $deviceCountsOk ? h((string) $activeDeviceCount) : '-' ?></h3>
-            <p>Active devices</p>
+            <p>Projects with punches</p>
           </div>
           <div class="icon"><i class="fas fa-microchip"></i></div>
-          <div class="small text-white-50 px-3 pb-2">Devices with punches</div>
+          <div id="activeDeviceMeta" class="small text-white-50 px-3 pb-2"><?= h($activeDeviceMeta) ?></div>
         </div>
       </div>
     </div>
@@ -1304,7 +1889,7 @@ include __DIR__ . '/include/layout_top.php';
             <div class="form-group col-md-3">
               <label for="endDate">End date</label>
               <input id="endDate" name="endDate" class="form-control" type="date" value="<?= h($endDate) ?>">
-              <div class="filter-help">Time range: 00:00:00 to 24:00:00</div>
+              <div class="filter-help">Range uses start date through end date (end date +1 day for API).</div>
             </div>
             <div class="form-group col-md-6">
               <label for="projectId">Project</label>
@@ -1354,6 +1939,9 @@ include __DIR__ . '/include/layout_top.php';
           'projectId' => $projectId,
           'deviceSn' => $deviceSnInput,
       ];
+      if ($badgeNumberFilter !== '') {
+          $exportParams['badgeNumber'] = $badgeNumberFilter;
+      }
       $exportBaseUrl = admin_url('Attendance_Dashboard.php');
       $exportLoggedInUrl = $exportBaseUrl . '?' . build_query(array_merge($exportParams, [
           'export' => 'logged-in-badges',
@@ -1391,67 +1979,66 @@ include __DIR__ . '/include/layout_top.php';
             <span id="loggedBadgesMeta" class="text-muted small"><?= h($loggedBadgesMeta) ?></span>
           </div>
           <div class="card-body">
+            <div class="d-flex flex-wrap justify-content-end mb-3">
+              <label class="sr-only" for="loggedBadgesSearch">Badge number</label>
+              <div class="input-group input-group-sm" style="max-width: 280px; width: 100%;">
+                <input id="loggedBadgesSearch" class="form-control" type="text" placeholder="Badge number" autocomplete="off" value="<?= h($badgeNumberFilter) ?>">
+                <div class="input-group-append">
+                  <button id="loggedBadgesSearchBtn" class="btn btn-outline-secondary" type="button">Search</button>
+                  <button id="loggedBadgesSearchClear" class="btn btn-outline-secondary" type="button">Clear</button>
+                </div>
+              </div>
+            </div>
             <div id="loggedBadgesTableWrapper" class="table-responsive<?= !empty($loggedBadgesRows) ? '' : ' d-none' ?>">
               <table class="table table-sm table-striped mb-0">
                 <thead>
                   <tr>
-                    <th>Badge number</th>
-                    <th>Employee name</th>
-                    <th>Department</th>
-                    <th>Designation</th>
-                    <th>Status</th>
-                    <th>Work type code</th>
-                    <th>Work type description</th>
-                    <th>Company code</th>
-                    <th>Department code</th>
-                    <th>Designation code</th>
-                    <th>First name</th>
-                    <th>Last name</th>
-                    <th>Today working</th>
-                    <th>On eLeave</th>
-                    <th>Leave code</th>
-                    <th>Leave description</th>
+                    <th>Employee Code (utime)</th>
+                    <th>Name (utime)</th>
+                    <th>Name (hrms)</th>
+                    <th>Department (hrms)</th>
+                    <th>Designation (hrms)</th>
+                    <th>First Punch time (utime)</th>
+                    <th>First Punch device (utime)</th>
+                    <th>FP Project ID</th>
+                    <th>FP project name</th>
+                    <th>Last Punch time (utime)</th>
+                    <th>Last Punch device (utime)</th>
+                    <th>LP project id</th>
+                    <th>LP project name</th>
                   </tr>
                 </thead>
                 <tbody id="loggedBadgesTableBody">
                   <?php foreach ($loggedBadgesRows as $row): ?>
                     <?php
                       $badgeNumber = trim((string) ($row['badgeNumber'] ?? ''));
-                      $employeeName = trim((string) ($row['name'] ?? ''));
+                      $utimeName = trim((string) ($row['utimeName'] ?? ''));
+                      $hrmsName = trim((string) ($row['hrmsName'] ?? ''));
                       $department = trim((string) ($row['department'] ?? ''));
                       $designation = trim((string) ($row['designation'] ?? ''));
-                      $status = trim((string) ($row['status'] ?? ''));
-                      $workTypeCode = trim((string) ($row['workTypeCode'] ?? ''));
-                      $workTypeDescription = trim((string) ($row['workTypeDescription'] ?? ''));
-                      $companyCode = trim((string) ($row['companyCode'] ?? ''));
-                      $departmentCode = trim((string) ($row['departmentCode'] ?? ''));
-                      $designationCode = trim((string) ($row['designationCode'] ?? ''));
-                      $firstName = trim((string) ($row['firstName'] ?? ''));
-                      $lastName = trim((string) ($row['lastName'] ?? ''));
-                      $todayWorking = $row['todayWorking'] ?? null;
-                      $onEleave = $row['onEleave'] ?? null;
-                      $leaveCode = trim((string) ($row['leaveCode'] ?? ''));
-                      $leaveDescription = trim((string) ($row['leaveDescription'] ?? ''));
-                      $todayWorkingText = $todayWorking === true ? 'Yes' : ($todayWorking === false ? 'No' : '-');
-                      $onEleaveText = $onEleave === true ? 'Yes' : ($onEleave === false ? 'No' : '-');
+                      $firstLoginTime = trim((string) ($row['firstLoginTime'] ?? ''));
+                      $lastLoginTime = trim((string) ($row['lastLoginTime'] ?? ''));
+                      $firstLoginDeviceSn = trim((string) ($row['firstLoginDeviceSn'] ?? ''));
+                      $lastLoginDeviceSn = trim((string) ($row['lastLoginDeviceSn'] ?? ''));
+                      $firstLoginProjectId = trim((string) ($row['firstLoginProjectId'] ?? ''));
+                      $firstLoginProjectName = trim((string) ($row['firstLoginProjectName'] ?? ''));
+                      $lastLoginProjectId = trim((string) ($row['lastLoginProjectId'] ?? ''));
+                      $lastLoginProjectName = trim((string) ($row['lastLoginProjectName'] ?? ''));
                     ?>
                     <tr>
                       <td><?= h($badgeNumber) ?></td>
-                      <td><?= h($employeeName !== '' ? $employeeName : '-') ?></td>
+                      <td><?= h($utimeName !== '' ? $utimeName : '-') ?></td>
+                      <td><?= h($hrmsName !== '' ? $hrmsName : '-') ?></td>
                       <td><?= h($department !== '' ? $department : '-') ?></td>
                       <td><?= h($designation !== '' ? $designation : '-') ?></td>
-                      <td><?= h($status !== '' ? $status : '-') ?></td>
-                      <td><?= h($workTypeCode !== '' ? $workTypeCode : '-') ?></td>
-                      <td><?= h($workTypeDescription !== '' ? $workTypeDescription : '-') ?></td>
-                      <td><?= h($companyCode !== '' ? $companyCode : '-') ?></td>
-                      <td><?= h($departmentCode !== '' ? $departmentCode : '-') ?></td>
-                      <td><?= h($designationCode !== '' ? $designationCode : '-') ?></td>
-                      <td><?= h($firstName !== '' ? $firstName : '-') ?></td>
-                      <td><?= h($lastName !== '' ? $lastName : '-') ?></td>
-                      <td><?= h($todayWorkingText) ?></td>
-                      <td><?= h($onEleaveText) ?></td>
-                      <td><?= h($leaveCode !== '' ? $leaveCode : '-') ?></td>
-                      <td><?= h($leaveDescription !== '' ? $leaveDescription : '-') ?></td>
+                      <td><?= h($firstLoginTime !== '' ? $firstLoginTime : '-') ?></td>
+                      <td><?= h($firstLoginDeviceSn !== '' ? $firstLoginDeviceSn : '-') ?></td>
+                      <td><?= h($firstLoginProjectId !== '' ? $firstLoginProjectId : '-') ?></td>
+                      <td><?= h($firstLoginProjectName !== '' ? $firstLoginProjectName : '-') ?></td>
+                      <td><?= h($lastLoginTime !== '' ? $lastLoginTime : '-') ?></td>
+                      <td><?= h($lastLoginDeviceSn !== '' ? $lastLoginDeviceSn : '-') ?></td>
+                      <td><?= h($lastLoginProjectId !== '' ? $lastLoginProjectId : '-') ?></td>
+                      <td><?= h($lastLoginProjectName !== '' ? $lastLoginProjectName : '-') ?></td>
                     </tr>
                   <?php endforeach; ?>
                 </tbody>
@@ -1460,9 +2047,17 @@ include __DIR__ . '/include/layout_top.php';
             <p id="loggedBadgesEmpty" class="text-muted mb-0<?= !empty($loggedBadgesRows) ? ' d-none' : '' ?>">
               <?= h($loggedBadgesEmptyText) ?>
             </p>
-            <div id="loggedBadgesPagination" class="d-flex justify-content-between align-items-center mt-3 d-none">
+            <div id="loggedBadgesPagination" class="d-flex flex-wrap justify-content-between align-items-center mt-3 d-none">
               <button id="loggedBadgesPrev" class="btn btn-sm btn-outline-secondary" type="button">Prev</button>
-              <span id="loggedBadgesPageInfo" class="text-muted small"></span>
+              <div class="d-flex align-items-center">
+                <span id="loggedBadgesPageInfo" class="text-muted small mr-3"></span>
+                <div class="input-group input-group-sm" style="width: 120px;">
+                  <input id="loggedBadgesPageInput" class="form-control" type="number" min="1" placeholder="Page">
+                  <div class="input-group-append">
+                    <button id="loggedBadgesGo" class="btn btn-outline-secondary" type="button">Go</button>
+                  </div>
+                </div>
+              </div>
               <button id="loggedBadgesNext" class="btn btn-sm btn-outline-secondary" type="button">Next</button>
             </div>
           </div>
@@ -1567,27 +2162,6 @@ include __DIR__ . '/include/layout_top.php';
       }
       return `${month} ${parts[2]}`;
     };
-    const formatFlag = (value) => {
-      if (value === true) {
-        return 'Yes';
-      }
-      if (value === false) {
-        return 'No';
-      }
-      const text = String(value ?? '').trim();
-      if (text === '') {
-        return '-';
-      }
-      const lower = text.toLowerCase();
-      if (['1', 'true', 'yes', 'y'].includes(lower)) {
-        return 'Yes';
-      }
-      if (['0', 'false', 'no', 'n'].includes(lower)) {
-        return 'No';
-      }
-      return text;
-    };
-
     const baseUrl = '<?= h(admin_url('Attendance_Dashboard.php')) ?>';
     const renderHrmsSnapshot = (hrms) => {
       const hrmsContent = document.getElementById('hrmsSnapshotContent');
@@ -1650,8 +2224,36 @@ include __DIR__ . '/include/layout_top.php';
       count: 0,
       page: 1,
       pageSize: 10,
+      badgeQuery: '',
+      cache: {},
+      inflight: {},
     };
     let loggedBadgesBound = false;
+
+    const normalizeBadgeQuery = (value) => String(value ?? '').trim();
+    const loggedBadgesCacheKey = (page, pageSize, badgeQuery = loggedBadgesState.badgeQuery) => {
+      const normalized = normalizeBadgeQuery(badgeQuery).toLowerCase();
+      return `${page}:${pageSize}:${normalized}`;
+    };
+    const getLoggedBadgesCache = (page, pageSize, badgeQuery) => loggedBadgesState.cache[loggedBadgesCacheKey(page, pageSize, badgeQuery)];
+    const setLoggedBadgesCache = (page, pageSize, payload, badgeQuery) => {
+      loggedBadgesState.cache[loggedBadgesCacheKey(page, pageSize, badgeQuery)] = payload;
+    };
+    const isLoggedBadgesInflight = (page, pageSize, badgeQuery) => !!loggedBadgesState.inflight[loggedBadgesCacheKey(page, pageSize, badgeQuery)];
+    const setLoggedBadgesInflight = (page, pageSize, value, badgeQuery) => {
+      const key = loggedBadgesCacheKey(page, pageSize, badgeQuery);
+      if (value) {
+        loggedBadgesState.inflight[key] = true;
+      } else {
+        delete loggedBadgesState.inflight[key];
+      }
+    };
+    const loggedBadgesSearchInput = document.getElementById('loggedBadgesSearch');
+    const loggedBadgesSearchBtn = document.getElementById('loggedBadgesSearchBtn');
+    const loggedBadgesSearchClear = document.getElementById('loggedBadgesSearchClear');
+    if (loggedBadgesSearchInput) {
+      loggedBadgesState.badgeQuery = normalizeBadgeQuery(loggedBadgesSearchInput.value);
+    }
 
     const renderLoggedBadgesPage = (page) => {
       const metaEl = document.getElementById('loggedBadgesMeta');
@@ -1662,6 +2264,7 @@ include __DIR__ . '/include/layout_top.php';
       const prevBtn = document.getElementById('loggedBadgesPrev');
       const nextBtn = document.getElementById('loggedBadgesNext');
       const pageInfoEl = document.getElementById('loggedBadgesPageInfo');
+      const pageInput = document.getElementById('loggedBadgesPageInput');
       if (!metaEl || !tableWrapper || !tableBody || !emptyEl || !paginationEl || !pageInfoEl) {
         return;
       }
@@ -1669,54 +2272,56 @@ include __DIR__ . '/include/layout_top.php';
       const note = loggedBadgesState.note;
       const ok = loggedBadgesState.ok;
       const count = loggedBadgesState.count;
+      const pageSize = loggedBadgesState.pageSize;
+      const totalCount = count > 0 ? count : rows.length;
 
       if (ok) {
-        metaEl.textContent = note !== '' ? note : `${count} badges`;
+        metaEl.textContent = note !== '' ? note : `${totalCount} badges`;
       } else {
         metaEl.textContent = 'Unable to load badges';
       }
 
       if (ok && rows.length) {
-        const totalPages = Math.max(1, Math.ceil(rows.length / loggedBadgesState.pageSize));
+        const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
         const safePage = Math.min(Math.max(page, 1), totalPages);
         loggedBadgesState.page = safePage;
-        const startIndex = (safePage - 1) * loggedBadgesState.pageSize;
-        const pageRows = rows.slice(startIndex, startIndex + loggedBadgesState.pageSize);
+        if (pageInput) {
+          pageInput.min = '1';
+          pageInput.max = String(totalPages);
+          pageInput.value = String(safePage);
+        }
+        const pageRows = rows;
         tableBody.innerHTML = pageRows.map((row) => {
           const badge = String((row && row.badgeNumber) || '').trim();
-          const name = String((row && row.name) || '').trim();
+          const utimeName = String((row && row.utimeName) || '').trim();
+          const hrmsName = String((row && row.hrmsName) || '').trim();
           const department = String((row && row.department) || '').trim();
           const designation = String((row && row.designation) || '').trim();
-          const status = String((row && row.status) || '').trim();
-          const workTypeCode = String((row && row.workTypeCode) || '').trim();
-          const workTypeDescription = String((row && row.workTypeDescription) || '').trim();
-          const companyCode = String((row && row.companyCode) || '').trim();
-          const departmentCode = String((row && row.departmentCode) || '').trim();
-          const designationCode = String((row && row.designationCode) || '').trim();
-          const firstName = String((row && row.firstName) || '').trim();
-          const lastName = String((row && row.lastName) || '').trim();
-          const todayWorkingText = formatFlag(row && row.todayWorking);
-          const onEleaveText = formatFlag(row && row.onEleave);
-          const leaveCode = String((row && row.leaveCode) || '').trim();
-          const leaveDescription = String((row && row.leaveDescription) || '').trim();
-          const nameText = name !== '' ? name : '-';
+          const firstLoginTime = String((row && row.firstLoginTime) || '').trim();
+          const lastLoginTime = String((row && row.lastLoginTime) || '').trim();
+          const firstLoginDeviceSn = String((row && row.firstLoginDeviceSn) || '').trim();
+          const lastLoginDeviceSn = String((row && row.lastLoginDeviceSn) || '').trim();
+          const firstLoginProjectId = String((row && row.firstLoginProjectId) || '').trim();
+          const firstLoginProjectName = String((row && row.firstLoginProjectName) || '').trim();
+          const lastLoginProjectId = String((row && row.lastLoginProjectId) || '').trim();
+          const lastLoginProjectName = String((row && row.lastLoginProjectName) || '').trim();
+          const utimeNameText = utimeName !== '' ? utimeName : '-';
+          const hrmsNameText = hrmsName !== '' ? hrmsName : '-';
           const departmentText = department !== '' ? department : '-';
           const designationText = designation !== '' ? designation : '-';
-          const statusText = status !== '' ? status : '-';
-          const workTypeCodeText = workTypeCode !== '' ? workTypeCode : '-';
-          const workTypeDescText = workTypeDescription !== '' ? workTypeDescription : '-';
-          const companyCodeText = companyCode !== '' ? companyCode : '-';
-          const departmentCodeText = departmentCode !== '' ? departmentCode : '-';
-          const designationCodeText = designationCode !== '' ? designationCode : '-';
-          const firstNameText = firstName !== '' ? firstName : '-';
-          const lastNameText = lastName !== '' ? lastName : '-';
-          const leaveCodeText = leaveCode !== '' ? leaveCode : '-';
-          const leaveDescText = leaveDescription !== '' ? leaveDescription : '-';
-          return `<tr><td>${escapeHtml(badge)}</td><td>${escapeHtml(nameText)}</td><td>${escapeHtml(departmentText)}</td><td>${escapeHtml(designationText)}</td><td>${escapeHtml(statusText)}</td><td>${escapeHtml(workTypeCodeText)}</td><td>${escapeHtml(workTypeDescText)}</td><td>${escapeHtml(companyCodeText)}</td><td>${escapeHtml(departmentCodeText)}</td><td>${escapeHtml(designationCodeText)}</td><td>${escapeHtml(firstNameText)}</td><td>${escapeHtml(lastNameText)}</td><td>${escapeHtml(todayWorkingText)}</td><td>${escapeHtml(onEleaveText)}</td><td>${escapeHtml(leaveCodeText)}</td><td>${escapeHtml(leaveDescText)}</td></tr>`;
+          const firstLoginTimeText = firstLoginTime !== '' ? firstLoginTime : '-';
+          const lastLoginTimeText = lastLoginTime !== '' ? lastLoginTime : '-';
+          const firstLoginDeviceSnText = firstLoginDeviceSn !== '' ? firstLoginDeviceSn : '-';
+          const lastLoginDeviceSnText = lastLoginDeviceSn !== '' ? lastLoginDeviceSn : '-';
+          const firstLoginProjectIdText = firstLoginProjectId !== '' ? firstLoginProjectId : '-';
+          const firstLoginProjectNameText = firstLoginProjectName !== '' ? firstLoginProjectName : '-';
+          const lastLoginProjectIdText = lastLoginProjectId !== '' ? lastLoginProjectId : '-';
+          const lastLoginProjectNameText = lastLoginProjectName !== '' ? lastLoginProjectName : '-';
+          return `<tr><td>${escapeHtml(badge)}</td><td>${escapeHtml(utimeNameText)}</td><td>${escapeHtml(hrmsNameText)}</td><td>${escapeHtml(departmentText)}</td><td>${escapeHtml(designationText)}</td><td>${escapeHtml(firstLoginTimeText)}</td><td>${escapeHtml(firstLoginDeviceSnText)}</td><td>${escapeHtml(firstLoginProjectIdText)}</td><td>${escapeHtml(firstLoginProjectNameText)}</td><td>${escapeHtml(lastLoginTimeText)}</td><td>${escapeHtml(lastLoginDeviceSnText)}</td><td>${escapeHtml(lastLoginProjectIdText)}</td><td>${escapeHtml(lastLoginProjectNameText)}</td></tr>`;
         }).join('');
         tableWrapper.classList.remove('d-none');
         emptyEl.classList.add('d-none');
-        if (rows.length > loggedBadgesState.pageSize) {
+        if (totalCount > pageSize) {
           paginationEl.classList.remove('d-none');
         } else {
           paginationEl.classList.add('d-none');
@@ -1727,9 +2332,11 @@ include __DIR__ . '/include/layout_top.php';
         if (nextBtn) {
           nextBtn.disabled = safePage >= totalPages;
         }
-        const startLabel = startIndex + 1;
-        const endLabel = Math.min(startIndex + loggedBadgesState.pageSize, rows.length);
-        pageInfoEl.textContent = `Showing ${startLabel}-${endLabel} of ${rows.length}`;
+        const startLabel = totalCount > 0 ? ((safePage - 1) * pageSize + 1) : 0;
+        const endLabel = totalCount > 0 ? Math.min(startLabel + pageRows.length - 1, totalCount) : 0;
+        pageInfoEl.textContent = totalCount > 0
+          ? `Showing ${startLabel}-${endLabel} of ${totalCount} | Page ${safePage} of ${totalPages}`
+          : 'Showing 0';
       } else {
         tableBody.innerHTML = '';
         tableWrapper.classList.add('d-none');
@@ -1742,6 +2349,10 @@ include __DIR__ . '/include/layout_top.php';
         emptyEl.textContent = emptyText;
         emptyEl.classList.remove('d-none');
         paginationEl.classList.add('d-none');
+        pageInfoEl.textContent = '';
+        if (pageInput) {
+          pageInput.value = '';
+        }
       }
     };
 
@@ -1752,25 +2363,93 @@ include __DIR__ . '/include/layout_top.php';
       loggedBadgesState.count = Number.isFinite(Number(badges.count))
         ? Number(badges.count)
         : loggedBadgesState.rows.length;
-      loggedBadgesState.page = 1;
+      if (loggedBadgesState.count === 0 && loggedBadgesState.rows.length > 0) {
+        loggedBadgesState.count = loggedBadgesState.rows.length;
+      }
+      const nextPage = Number(badges.page);
+      if (Number.isFinite(nextPage) && nextPage > 0) {
+        loggedBadgesState.page = nextPage;
+      } else if (!loggedBadgesState.page) {
+        loggedBadgesState.page = 1;
+      }
+      const nextPageSize = Number(badges.pageSize);
+      if (Number.isFinite(nextPageSize) && nextPageSize > 0) {
+        loggedBadgesState.pageSize = nextPageSize;
+      }
+
+      setLoggedBadgesCache(loggedBadgesState.page, loggedBadgesState.pageSize, {
+        ok: loggedBadgesState.ok,
+        note: loggedBadgesState.note,
+        count: loggedBadgesState.count,
+        rows: loggedBadgesState.rows,
+        page: loggedBadgesState.page,
+        pageSize: loggedBadgesState.pageSize,
+      }, loggedBadgesState.badgeQuery);
 
       if (!loggedBadgesBound) {
         const prevBtn = document.getElementById('loggedBadgesPrev');
         const nextBtn = document.getElementById('loggedBadgesNext');
+        const pageInput = document.getElementById('loggedBadgesPageInput');
+        const goBtn = document.getElementById('loggedBadgesGo');
+        const applySearch = (value) => {
+          const nextQuery = normalizeBadgeQuery(value);
+          if (nextQuery === loggedBadgesState.badgeQuery) {
+            return;
+          }
+          loggedBadgesState.badgeQuery = nextQuery;
+          loggedBadgesState.cache = {};
+          loggedBadgesState.inflight = {};
+          requestLoggedBadgesPage(1);
+        };
         if (prevBtn) {
           prevBtn.addEventListener('click', () => {
-            renderLoggedBadgesPage(loggedBadgesState.page - 1);
+            requestLoggedBadgesPage(loggedBadgesState.page - 1);
           });
         }
         if (nextBtn) {
           nextBtn.addEventListener('click', () => {
-            renderLoggedBadgesPage(loggedBadgesState.page + 1);
+            requestLoggedBadgesPage(loggedBadgesState.page + 1);
+          });
+        }
+        if (pageInput && goBtn) {
+          const submitPage = () => {
+            const value = Number.parseInt(pageInput.value, 10);
+            if (Number.isFinite(value)) {
+              requestLoggedBadgesPage(value);
+            }
+          };
+          goBtn.addEventListener('click', submitPage);
+          pageInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              submitPage();
+            }
+          });
+        }
+        if (loggedBadgesSearchInput && loggedBadgesSearchBtn) {
+          const submitSearch = () => applySearch(loggedBadgesSearchInput.value);
+          loggedBadgesSearchBtn.addEventListener('click', submitSearch);
+          loggedBadgesSearchInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              submitSearch();
+            }
+          });
+        }
+        if (loggedBadgesSearchClear) {
+          loggedBadgesSearchClear.addEventListener('click', () => {
+            if (loggedBadgesSearchInput) {
+              loggedBadgesSearchInput.value = '';
+              loggedBadgesSearchInput.focus();
+            }
+            applySearch('');
           });
         }
         loggedBadgesBound = true;
       }
 
       renderLoggedBadgesPage(loggedBadgesState.page);
+      prefetchNextLoggedBadges();
     };
 
     const initialLoggedBadges = <?= json_encode(
@@ -1779,6 +2458,8 @@ include __DIR__ . '/include/layout_top.php';
             'note' => $loggedBadgesNote,
             'count' => $loggedBadgesCount,
             'rows' => $loggedBadgesRows,
+            'page' => $loggedBadgesPage,
+            'pageSize' => $loggedBadgesPageSize,
         ],
         JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESCAPED_SLASHES
     ) ?>;
@@ -1847,18 +2528,41 @@ include __DIR__ . '/include/layout_top.php';
       }
     }
 
-    renderLoggedBadges(initialLoggedBadges || {});
-
     const baseParams = new URLSearchParams(window.location.search);
     baseParams.delete('ajax_section');
+    baseParams.delete('badgeNumber');
     baseParams.set('ajax', '1');
 
-    const fetchSummary = () => {
-      const summaryParams = new URLSearchParams(baseParams);
-      summaryParams.set('ajax_section', 'summary');
-      const summaryUrl = baseUrl + '?' + summaryParams.toString();
+    const panelErrors = new Set();
+    const updateErrorBox = () => {
+      if (!errorBox) {
+        return;
+      }
+      if (!panelErrors.size) {
+        errorBox.classList.add('d-none');
+        return;
+      }
+      errorBox.textContent = `Some data panels could not be refreshed: ${Array.from(panelErrors).join(', ')}.`;
+      errorBox.classList.remove('d-none');
+    };
+    const setPanelError = (label, hasError) => {
+      if (!label) {
+        return;
+      }
+      if (hasError) {
+        panelErrors.add(label);
+      } else {
+        panelErrors.delete(label);
+      }
+      updateErrorBox();
+    };
 
-      fetch(summaryUrl, { credentials: 'same-origin' })
+    const fetchActiveDevices = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'active-devices');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
         .then((response) => {
           if (!response.ok) {
             throw new Error('Request failed');
@@ -1866,64 +2570,93 @@ include __DIR__ . '/include/layout_top.php';
           return response.json();
         })
         .then((data) => {
-          const summary = data.summary || {};
-          setText('badgeRatioText', summary.badgeRatioText || '-');
-          setText('badgeCardTitle', summary.badgeCardTitle || 'Logged in employees');
-          setText('badgeCoverageLabel', summary.badgeCoverageLabel || '');
-          setText('deviceStatusRatio', summary.deviceStatusRatio || '-');
-          setText('deviceStatusMeta', summary.deviceStatusMeta || '');
-          setText('activeDeviceCount', summary.activeDeviceCountText || '-');
-
-          const daily = data.daily || {};
-          const series = Array.isArray(daily.series) ? daily.series : [];
-          setText('dailyTrendNote', daily.note || '');
-          const chartEl = document.getElementById('dailyTrendChart');
-          const placeholderEl = document.getElementById('dailyTrendPlaceholder');
-          if (chartEl && placeholderEl) {
-            if (series.length) {
-              const max = series.reduce((acc, row) => Math.max(acc, Number(row.total) || 0), 0);
-              chartEl.innerHTML = series.map((row) => {
-                const total = Number(row.total) || 0;
-                const height = max > 0 ? Math.max(Math.round((total / max) * 100), 4) : 0;
-                const label = formatMonthDay(row.date);
-                return `
-                  <div class="trend-bar" style="height: ${height}%">
-                    <span class="trend-value">${escapeHtml(total)}</span>
-                    <span class="trend-label">${escapeHtml(label)}</span>
-                  </div>
-                `;
-              }).join('');
-              chartEl.classList.remove('d-none');
-              placeholderEl.classList.add('d-none');
-            } else {
-              placeholderEl.textContent = 'No daily totals available for the selected range.';
-              placeholderEl.classList.remove('d-none');
-              chartEl.classList.add('d-none');
-            }
-          }
-
+          const activeDevices = (data && data.activeDevices) || {};
+          setText('activeDeviceCount', activeDevices.activeDeviceCountText || '-');
+          setText('activeDeviceMeta', activeDevices.activeDeviceMeta || '');
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          if (errorBox) {
-            if (errors.length) {
-              errorBox.textContent = `Some data panels could not be refreshed: ${errors.join(', ')}.`;
-              errorBox.classList.remove('d-none');
-            } else {
-              errorBox.classList.add('d-none');
-            }
-          }
+          setPanelError('Project counts', errors.length > 0);
         })
         .catch(() => {
-          if (errorBox) {
-            errorBox.textContent = 'Unable to load dashboard data. Please refresh the page.';
-            errorBox.classList.remove('d-none');
-          }
+          setText('activeDeviceCount', '-');
+          setText('activeDeviceMeta', 'Project counts unavailable');
+          setPanelError('Project counts', true);
         });
     };
 
-    const fetchLoggedBadges = () => {
+    const fetchDeviceStatus = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'device-status');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const deviceStatus = (data && data.deviceStatus) || {};
+          setText('deviceStatusRatio', deviceStatus.deviceStatusRatio || '-');
+          setText('deviceStatusMeta', deviceStatus.deviceStatusMeta || '');
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Online/total devices', errors.length > 0);
+        })
+        .catch(() => {
+          setText('deviceStatusRatio', '-');
+          setText('deviceStatusMeta', 'Status data unavailable');
+          setPanelError('Online/total devices', true);
+        });
+    };
+
+    const fetchBadgeRatio = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'badge-ratio');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const badgeRatio = (data && data.badgeRatio) || {};
+          setText('badgeRatioText', badgeRatio.badgeRatioText || '-');
+          setText('badgeCardTitle', badgeRatio.badgeCardTitle || 'Logged in employees');
+          setText('badgeCoverageLabel', badgeRatio.badgeCoverageLabel || '');
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Logged in / active employees', errors.length > 0);
+        })
+        .catch(() => {
+          setText('badgeRatioText', '-');
+          setText('badgeCardTitle', 'Logged in employees');
+          setText('badgeCoverageLabel', 'Coverage n/a');
+          setPanelError('Logged in / active employees', true);
+        });
+    };
+
+    const fetchLoggedBadges = (page = loggedBadgesState.page, pageSize = loggedBadgesState.pageSize, options = {}) => {
+      const prefetch = options.prefetch === true;
+      const badgeQuery = loggedBadgesState.badgeQuery;
+      if (prefetch && isLoggedBadgesInflight(page, pageSize, badgeQuery)) {
+        return;
+      }
       const badgesParams = new URLSearchParams(baseParams);
       badgesParams.set('ajax_section', 'logged-badges');
+      badgesParams.set('page', String(page));
+      badgesParams.set('pageSize', String(pageSize));
+      if (badgeQuery !== '') {
+        badgesParams.set('badgeNumber', badgeQuery);
+      } else {
+        badgesParams.delete('badgeNumber');
+      }
       const badgesUrl = baseUrl + '?' + badgesParams.toString();
+
+      if (prefetch) {
+        setLoggedBadgesInflight(page, pageSize, true, badgeQuery);
+      }
 
       fetch(badgesUrl, { credentials: 'same-origin' })
         .then((response) => {
@@ -1933,15 +2666,75 @@ include __DIR__ . '/include/layout_top.php';
           return response.json();
         })
         .then((data) => {
-          renderLoggedBadges((data && data.loggedBadges) || {});
+          const loggedBadges = (data && data.loggedBadges) || {};
+          if (!Number.isFinite(Number(loggedBadges.page))) {
+            loggedBadges.page = page;
+          }
+          if (!Number.isFinite(Number(loggedBadges.pageSize))) {
+            loggedBadges.pageSize = pageSize;
+          }
+          if (prefetch) {
+            if (loggedBadges.ok !== false) {
+              setLoggedBadgesCache(loggedBadges.page, loggedBadges.pageSize, loggedBadges, badgeQuery);
+            }
+            return;
+          }
+          renderLoggedBadges(loggedBadges);
+          setPanelError('Logged in badges', loggedBadges.ok === false);
         })
         .catch(() => {
-          renderLoggedBadges({ ok: false });
+          if (prefetch) {
+            return;
+          }
+          renderLoggedBadges({ ok: false, page, pageSize });
+          setPanelError('Logged in badges', true);
+        })
+        .finally(() => {
+          if (prefetch) {
+            setLoggedBadgesInflight(page, pageSize, false, badgeQuery);
+          }
         });
     };
 
-    fetchSummary();
-    fetchLoggedBadges();
+    const prefetchNextLoggedBadges = () => {
+      const totalCount = loggedBadgesState.count > 0 ? loggedBadgesState.count : loggedBadgesState.rows.length;
+      const totalPages = Math.max(1, Math.ceil(totalCount / loggedBadgesState.pageSize));
+      const nextPage = loggedBadgesState.page + 1;
+      if (nextPage > totalPages) {
+        return;
+      }
+      if (getLoggedBadgesCache(nextPage, loggedBadgesState.pageSize, loggedBadgesState.badgeQuery)) {
+        return;
+      }
+      fetchLoggedBadges(nextPage, loggedBadgesState.pageSize, { prefetch: true });
+    };
+
+    const requestLoggedBadgesPage = (page) => {
+      const requested = Number(page);
+      if (!Number.isFinite(requested)) {
+        return;
+      }
+      const totalCount = loggedBadgesState.count > 0 ? loggedBadgesState.count : loggedBadgesState.rows.length;
+      const totalPages = Math.max(1, Math.ceil(totalCount / loggedBadgesState.pageSize));
+      const safePage = Math.min(Math.max(Math.floor(requested), 1), totalPages);
+      const cached = getLoggedBadgesCache(safePage, loggedBadgesState.pageSize, loggedBadgesState.badgeQuery);
+      if (cached) {
+        renderLoggedBadges(cached);
+        return;
+      }
+      loggedBadgesState.page = safePage;
+      loggedBadgesState.note = 'Loading logged in badges...';
+      loggedBadgesState.rows = [];
+      renderLoggedBadgesPage(safePage);
+      fetchLoggedBadges(safePage, loggedBadgesState.pageSize);
+    };
+
+    renderLoggedBadges(initialLoggedBadges || {});
+
+    fetchActiveDevices();
+    fetchDeviceStatus();
+    fetchBadgeRatio();
+    fetchLoggedBadges(loggedBadgesState.page, loggedBadgesState.pageSize);
   })();
 </script>
 

@@ -55,9 +55,22 @@
   "fromDate": "ISO-8601 string",
   "toDate": "ISO-8601 string",
   "rows": [
-    { "badgeNumber": "string|null", "name": "string|null" }
+    {
+      "badgeNumber": "string|null",
+      "name": "string|null",
+      "firstLoginTime": "ISO-8601 string|null",
+      "lastLoginTime": "ISO-8601 string|null",
+      "firstLoginDeviceSn": "string|null",
+      "lastLoginDeviceSn": "string|null",
+      "firstLoginProjectId": "integer|null",
+      "firstLoginProjectName": "string|null",
+      "lastLoginProjectId": "integer|null",
+      "lastLoginProjectName": "string|null"
+    }
   ],
-  "total": "integer"
+  "total": "integer",
+  "page": "integer",
+  "pageSize": "integer"
 }
 
 ## Attendance badges notes
@@ -74,12 +87,13 @@
 
 ## Attendance Dashboard data URLs (Attendance_Dashboard.php)
 Attendance API base: http://192.168.32.33:3003/v2
-- Logged in badges (table + CSV): GET http://192.168.32.33:3003/v2/attendance/badges/with-names?startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT24:00:00+00:00&deviceSn=DEVICE_SN_1,DEVICE_SN_2
-- Logged in badge count (KPI): GET http://192.168.32.33:3003/v2/attendance/badges/count?startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT24:00:00+00:00&deviceSn=DEVICE_SN_1,DEVICE_SN_2
+- Logged in badges (table): GET http://192.168.32.33:3003/v2/attendance/badges/with-names?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&deviceSn=DEVICE_SN_1,DEVICE_SN_2&page=1&pageSize=10
+- Logged in badge count (KPI): GET http://192.168.32.33:3003/v2/attendance/badges/count?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&deviceSn=DEVICE_SN_1,DEVICE_SN_2
 - Daily totals (API call still runs if device filter set): GET http://192.168.32.33:3003/v2/attendance/daily/by-devices?deviceSn=DEVICE_SN_1,DEVICE_SN_2&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
-- Device punches by device (active device count): GET http://192.168.32.33:3003/v2/attendance/counts?groupBy=deviceSn&startDate=YYYY-MM-DDT00:00:00+00:00&endDate=YYYY-MM-DDT24:00:00+00:00
+- Device punches by device (active device count): GET http://192.168.32.33:3003/v2/attendance/counts?groupBy=deviceSn&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 - Online/total devices: GET http://192.168.32.33:3003/v2/devices/status/counts?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&deviceSn=DEVICE_SN_1,DEVICE_SN_2
 - UTime onboarded users (exports): GET http://192.168.32.33:3003/v2/onboarded/users?deviceSn=DEVICE_SN_1,DEVICE_SN_2
+Note: UTime date ranges are sent with `endDate` = selected end date + 1 day (end date exclusive).
 
 HRMS API base: http://192.168.34.1:3000
 - HRMS active count: GET http://192.168.34.1:3000/api/employees/active/count
