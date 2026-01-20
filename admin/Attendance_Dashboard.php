@@ -22,6 +22,53 @@ function normalize_date(?string $value, string $fallback): string {
     return $dt->format('Y-m-d');
 }
 
+function parse_display_datetime(string $value): ?DateTimeImmutable {
+    $value = trim($value);
+    if ($value === '') {
+        return null;
+    }
+    try {
+        $dt = new DateTimeImmutable($value);
+    } catch (Exception $e) {
+        return null;
+    }
+    try {
+        $tzName = date_default_timezone_get() ?: 'UTC';
+        $tz = new DateTimeZone($tzName);
+        $dt = $dt->setTimezone($tz);
+    } catch (Exception $e) {
+        // Use original timezone when local timezone is unavailable.
+    }
+    return $dt;
+}
+
+function format_display_date(?string $value): string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '';
+    }
+    $dt = parse_display_datetime($value);
+    if (!$dt) {
+        return $value;
+    }
+    return $dt->format('d M Y');
+}
+
+function format_display_datetime(?string $value): string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return '';
+    }
+    $dt = parse_display_datetime($value);
+    if (!$dt) {
+        return $value;
+    }
+    if (!preg_match('/\\d{1,2}:\\d{2}/', $value)) {
+        return $dt->format('d M Y');
+    }
+    return $dt->format('d M Y, h:i A');
+}
+
 function build_query(array $params): string {
     $filtered = [];
     foreach ($params as $key => $value) {
@@ -595,6 +642,8 @@ function load_logged_in_badges(
         $hrmsName = '';
         $firstLoginTime = trim((string) ($apiDetails['firstLoginTime'] ?? ''));
         $lastLoginTime = trim((string) ($apiDetails['lastLoginTime'] ?? ''));
+        $firstLoginTime = format_display_datetime($firstLoginTime);
+        $lastLoginTime = format_display_datetime($lastLoginTime);
         $firstLoginDeviceSn = trim((string) ($apiDetails['firstLoginDeviceSn'] ?? ''));
         $lastLoginDeviceSn = trim((string) ($apiDetails['lastLoginDeviceSn'] ?? ''));
         $firstLoginProjectId = trim((string) ($apiDetails['firstLoginProjectId'] ?? ''));
@@ -843,6 +892,10 @@ $attendanceEnd = $endDate . 'T23:59:59+00:00';
             $holidayDates[$dateKey] = true;
         }
         $summary['holidayCount'] = count($holidayDates);
+    }
+
+    if (!empty($summary['lastAttendance'])) {
+        $summary['lastAttendance'] = format_display_date($summary['lastAttendance']);
     }
 
     return ['summary' => $summary, 'error' => null];
@@ -1764,6 +1817,9 @@ $quickRanges = [
     ],
 ];
 
+$displayStartDate = format_display_date($startDate);
+$displayEndDate = format_display_date($endDate);
+
 include __DIR__ . '/include/layout_top.php';
 
 ?>
@@ -1820,7 +1876,7 @@ include __DIR__ . '/include/layout_top.php';
         <h1>Attendance Dashboard</h1>
       </div>
       <div class="col-sm-5 text-sm-right">
-        <span class="badge badge-primary">Range: <?= h($startDate) ?> to <?= h($endDate) ?></span>
+        <span class="badge badge-primary">Range: <?= h($displayStartDate) ?> to <?= h($displayEndDate) ?></span>
       </div>
     </div>
   </div>
