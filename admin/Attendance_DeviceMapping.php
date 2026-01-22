@@ -59,26 +59,22 @@ function build_device_map_sync_row(array $row): ?array {
     if ($createdAt === null) {
         $createdAt = gmdate(DATE_ATOM);
     }
-
-    $payload = [
-        'deviceSn' => $deviceSn,
-        'createdAt' => $createdAt,
-    ];
-
     $deviceName = trim((string) ($row['device_name'] ?? ''));
-    if ($deviceName !== '') {
-        $payload['deviceName'] = $deviceName;
-    }
-    if (array_key_exists('project_id', $row) && $row['project_id'] !== null) {
-        $payload['projectId'] = (int) $row['project_id'];
-    }
-
+    $projectId = array_key_exists('project_id', $row)
+        ? ($row['project_id'] !== null ? (int) $row['project_id'] : null)
+        : null;
     $updatedAt = format_iso8601($row['updated_at'] ?? null);
-    if ($updatedAt !== null) {
-        $payload['updatedAt'] = $updatedAt;
+    if ($updatedAt === null) {
+        $updatedAt = $createdAt;
     }
 
-    return $payload;
+    return [
+        'deviceSn' => $deviceSn,
+        'deviceName' => $deviceName !== '' ? $deviceName : null,
+        'projectId' => $projectId,
+        'createdAt' => $createdAt,
+        'updatedAt' => $updatedAt,
+    ];
 }
 
 function device_display_name(array $device): string {
@@ -153,21 +149,41 @@ if ($isAjax && $action === 'update-mapping') {
 
     if ($deviceExists) {
         if ($projectId === null) {
-            $stmt = $bd->prepare(
-                'UPDATE gcc_attendance_master.device_project_map SET project_id = NULL WHERE device_sn = ?'
-            );
+            if ($deviceName !== '') {
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.device_project_map SET project_id = NULL, device_name = ? WHERE device_sn = ?'
+                );
+            } else {
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.device_project_map SET project_id = NULL WHERE device_sn = ?'
+                );
+            }
             if (!$stmt) {
                 json_response(['ok' => false, 'message' => 'Unable to update mapping.']);
             }
-            $stmt->bind_param('s', $deviceSn);
+            if ($deviceName !== '') {
+                $stmt->bind_param('ss', $deviceName, $deviceSn);
+            } else {
+                $stmt->bind_param('s', $deviceSn);
+            }
         } else {
-            $stmt = $bd->prepare(
-                'UPDATE gcc_attendance_master.device_project_map SET project_id = ? WHERE device_sn = ?'
-            );
+            if ($deviceName !== '') {
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.device_project_map SET project_id = ?, device_name = ? WHERE device_sn = ?'
+                );
+            } else {
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.device_project_map SET project_id = ? WHERE device_sn = ?'
+                );
+            }
             if (!$stmt) {
                 json_response(['ok' => false, 'message' => 'Unable to update mapping.']);
             }
-            $stmt->bind_param('is', $projectId, $deviceSn);
+            if ($deviceName !== '') {
+                $stmt->bind_param('iss', $projectId, $deviceName, $deviceSn);
+            } else {
+                $stmt->bind_param('is', $projectId, $deviceSn);
+            }
         }
         if (!$stmt->execute()) {
             $stmt->close();
@@ -1920,7 +1936,14 @@ include __DIR__ . '/include/layout_top.php';
     })
       .done((response) => {
         if (response && response.ok) {
-          setStatus('Mapping saved.', 'success');
+          const sync = response.sync || null;
+          if (sync && sync.ok === false) {
+            const detail = sync.status ? `status ${sync.status}` : (sync.error || '');
+            const suffix = detail ? ` (${detail})` : '';
+            setStatus(`Mapping saved locally, sync failed${suffix}.`, 'error');
+          } else {
+            setStatus('Mapping saved.', 'success');
+          }
           refreshLaneState($fromList);
           refreshLaneState($toList);
           updateSelectForDevice(deviceSn, toProjectId);
