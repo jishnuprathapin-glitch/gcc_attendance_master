@@ -50,6 +50,36 @@ function load_device_mapping_row(mysqli $bd, string $deviceSn): ?array {
     ];
 }
 
+function load_all_device_mapping_rows(mysqli $bd): array {
+    $rows = [];
+    $result = $bd->query(
+        'SELECT device_sn, device_name, project_id, created_at, updated_at ' .
+        'FROM gcc_attendance_master.device_project_map'
+    );
+    if (!$result) {
+        return $rows;
+    }
+    while ($row = $result->fetch_assoc()) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $rows[] = $row;
+    }
+    $result->free();
+    return $rows;
+}
+
+function build_device_map_sync_rows(mysqli $bd): array {
+    $rows = [];
+    foreach (load_all_device_mapping_rows($bd) as $row) {
+        $payload = build_device_map_sync_row($row);
+        if ($payload) {
+            $rows[] = $payload;
+        }
+    }
+    return $rows;
+}
+
 function build_device_map_sync_row(array $row): ?array {
     $deviceSn = trim((string) ($row['device_sn'] ?? ''));
     if ($deviceSn === '') {
@@ -220,12 +250,10 @@ if ($isAjax && $action === 'update-mapping') {
     $syncPayload = null;
     $syncResult = null;
     $syncError = null;
-    $row = load_device_mapping_row($bd, $deviceSn);
-    if (is_array($row)) {
-        $syncPayload = build_device_map_sync_row($row);
-    }
-    if ($syncPayload) {
-        $syncResult = attendance_api_post_json('/device-project-map/upsert', [$syncPayload], 10);
+    $syncRows = build_device_map_sync_rows($bd);
+    if (!empty($syncRows)) {
+        $syncPayload = $syncRows;
+        $syncResult = attendance_api_post_json('/device-project-map/upsert', $syncRows, 20);
     } else {
         $syncError = 'sync_payload_unavailable';
     }
@@ -238,6 +266,7 @@ if ($isAjax && $action === 'update-mapping') {
             'ok' => $syncResult['ok'] ?? false,
             'status' => $syncResult['status'] ?? null,
             'error' => $syncResult['error'] ?? $syncError,
+            'received' => is_array($syncPayload) ? count($syncPayload) : ($syncPayload ? 1 : 0),
         ],
     ]);
 }
@@ -305,7 +334,6 @@ if ($isAjax && $action === 'onboard-devices') {
     $updated = 0;
     $skipped = 0;
     $errors = [];
-    $syncDeviceSn = [];
 
     foreach ($deviceRows as $row) {
         $deviceSn = $row['deviceSn'];
@@ -331,7 +359,6 @@ if ($isAjax && $action === 'onboard-devices') {
                 $updateStmt->bind_param('ss', $deviceName, $deviceSn);
                 if ($updateStmt->execute()) {
                     $updated++;
-                    $syncDeviceSn[] = $deviceSn;
                 } else {
                     $errors[] = 'Unable to update device ' . $deviceSn;
                 }
@@ -344,7 +371,6 @@ if ($isAjax && $action === 'onboard-devices') {
         $insertStmt->bind_param('ss', $deviceSn, $deviceName);
         if ($insertStmt->execute()) {
             $inserted++;
-            $syncDeviceSn[] = $deviceSn;
         } else {
             $errors[] = 'Unable to insert device ' . $deviceSn;
         }
@@ -354,21 +380,10 @@ if ($isAjax && $action === 'onboard-devices') {
     $insertStmt->close();
     $updateStmt->close();
 
-    $syncRows = [];
-    foreach ($syncDeviceSn as $sn) {
-        $row = load_device_mapping_row($bd, $sn);
-        if (!is_array($row)) {
-            continue;
-        }
-        $payload = build_device_map_sync_row($row);
-        if ($payload) {
-            $syncRows[] = $payload;
-        }
-    }
-
+    $syncRows = build_device_map_sync_rows($bd);
     $syncResult = null;
     if (!empty($syncRows)) {
-        $syncResult = attendance_api_post_json('/device-project-map/upsert', $syncRows, 12);
+        $syncResult = attendance_api_post_json('/device-project-map/upsert', $syncRows, 20);
     }
 
     $hasErrors = !empty($errors);
