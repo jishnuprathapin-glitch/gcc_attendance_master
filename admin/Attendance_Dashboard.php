@@ -282,7 +282,7 @@ function build_project_device_employee_meta(array $deviceSummary, array $employe
         return 'No devices with punches';
     }
 
-    return 'Devices/Employees: ' . implode(' | ', $parts);
+    return implode(' | ', $parts);
 }
 
 function hrms_date_key(?string $value, ?DateTimeZone $localTz = null): ?string {
@@ -1468,6 +1468,7 @@ if ($isAjax && $ajaxSection === 'active-devices') {
     $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
     $activeDeviceCount = $projectSummary['count'];
     $activeDeviceMeta = $projectSummary['meta'];
+    $activeDeviceMetaIsList = false;
 
     $employeeCountsOk = false;
     $employeeSummary = ['count' => 0, 'meta' => '', 'projects' => []];
@@ -1499,6 +1500,7 @@ if ($isAjax && $ajaxSection === 'active-devices') {
         $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
     } elseif ($deviceCountsOk && $employeeCountsOk) {
         $activeDeviceMeta = build_project_device_employee_meta($projectSummary, $employeeSummary);
+        $activeDeviceMetaIsList = ($activeDeviceMeta !== 'No devices with punches');
     } elseif ($deviceCountsOk) {
         $activeDeviceMeta = 'Devices: ' . $projectSummary['meta'] . ' | Employees: unavailable';
     } elseif ($employeeCountsOk) {
@@ -1507,10 +1509,19 @@ if ($isAjax && $ajaxSection === 'active-devices') {
         $activeDeviceMeta = 'Project counts unavailable';
     }
 
+    $activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
+    $activeDeviceLabel = $activeDeviceCountText !== '-'
+        ? ($activeDeviceCountText . ' Projects with punches')
+        : 'Projects with punches';
+    if ($activeDeviceMetaIsList) {
+        $activeDeviceLabel .= ' (Devices/Employees:)';
+    }
+
     $payload = [
         'errors' => array_values(array_unique($apiErrors)),
         'activeDevices' => [
-            'activeDeviceCountText' => $deviceCountsOk ? (string) $activeDeviceCount : '-',
+            'activeDeviceCountText' => $activeDeviceCountText,
+            'activeDeviceLabel' => $activeDeviceLabel,
             'activeDeviceMeta' => $activeDeviceMeta,
         ],
     ];
@@ -1804,6 +1815,7 @@ if ($isAjax && $ajaxSection === 'summary') {
     $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
     $activeDeviceCount = $projectSummary['count'];
     $activeDeviceMeta = $projectSummary['meta'];
+    $activeDeviceMetaIsList = false;
 
     $employeeCountsOk = false;
     $employeeSummary = ['count' => 0, 'meta' => '', 'projects' => []];
@@ -1835,12 +1847,21 @@ if ($isAjax && $ajaxSection === 'summary') {
         $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
     } elseif ($deviceCountsOk && $employeeCountsOk) {
         $activeDeviceMeta = build_project_device_employee_meta($projectSummary, $employeeSummary);
+        $activeDeviceMetaIsList = ($activeDeviceMeta !== 'No devices with punches');
     } elseif ($deviceCountsOk) {
         $activeDeviceMeta = 'Devices: ' . $projectSummary['meta'] . ' | Employees: unavailable';
     } elseif ($employeeCountsOk) {
         $activeDeviceMeta = 'Employees: ' . $employeeSummary['meta'] . ' | Devices: unavailable';
     } else {
         $activeDeviceMeta = 'Project counts unavailable';
+    }
+
+    $activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
+    $activeDeviceLabel = $activeDeviceCountText !== '-'
+        ? ($activeDeviceCountText . ' Projects with punches')
+        : 'Projects with punches';
+    if ($activeDeviceMetaIsList) {
+        $activeDeviceLabel .= ' (Devices/Employees:)';
     }
 
     $deviceStatusOk = false;
@@ -1908,7 +1929,8 @@ if ($isAjax && $ajaxSection === 'summary') {
             'badgeCoverageLabel' => $badgeCoverageLabel,
             'deviceStatusRatio' => $deviceStatusRatio,
             'deviceStatusMeta' => $deviceStatusMeta,
-            'activeDeviceCountText' => $deviceCountsOk ? (string) $activeDeviceCount : '-',
+            'activeDeviceCountText' => $activeDeviceCountText,
+            'activeDeviceLabel' => $activeDeviceLabel,
             'activeDeviceMeta' => $activeDeviceMeta,
         ],
         'daily' => [
@@ -1966,6 +1988,10 @@ $activeDeviceCount = 0;
 $activeDeviceMeta = $deviceScope === 'none'
     ? ($deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.')
     : 'Loading project counts...';
+$activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
+$activeDeviceLabel = $activeDeviceCountText !== '-'
+    ? ($activeDeviceCountText . ' Projects with punches')
+    : 'Projects with punches';
 
 $deviceStatusOk = false;
 $deviceStatusTotal = 0;
@@ -2116,10 +2142,7 @@ include __DIR__ . '/include/layout_top.php';
         <div class="info-box dash-card" style="animation-delay: 0.2s;">
           <span class="info-box-icon bg-warning"><i class="fas fa-microchip"></i></span>
           <div class="info-box-content">
-            <span class="info-box-text">Projects with punches</span>
-            <span id="activeDeviceCount" class="info-box-number">
-              <?= $deviceCountsOk ? h((string) $activeDeviceCount) : '-' ?>
-            </span>
+            <span id="activeDeviceLabel" class="info-box-text"><?= h($activeDeviceLabel) ?></span>
             <div id="activeDeviceMeta" class="text-muted small"><?= h($activeDeviceMeta) ?></div>
           </div>
         </div>
@@ -2823,12 +2846,14 @@ include __DIR__ . '/include/layout_top.php';
         .then((data) => {
           const activeDevices = (data && data.activeDevices) || {};
           setText('activeDeviceCount', activeDevices.activeDeviceCountText || '-');
+          setText('activeDeviceLabel', activeDevices.activeDeviceLabel || 'Projects with punches');
           setText('activeDeviceMeta', activeDevices.activeDeviceMeta || '');
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
           setPanelError('Project counts', errors.length > 0);
         })
         .catch(() => {
           setText('activeDeviceCount', '-');
+          setText('activeDeviceLabel', 'Projects with punches');
           setText('activeDeviceMeta', 'Project counts unavailable');
           setPanelError('Project counts', true);
         });
