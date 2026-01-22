@@ -360,16 +360,16 @@ include __DIR__ . '/include/layout_top.php';
 
 <style>
   .mapping-page {
-    --p1: #219ebc;
-    --p2: #8ecae6;
-    --p3: #ffffff;
-    --p4: #ffffff;
-    --p5: #ffffff;
-    --ink-strong: #0b1f3a;
-    --ink-muted: rgba(11, 31, 58, 0.72);
-    --border-strong: var(--p1);
-    --border-soft: rgba(33, 158, 188, 0.35);
-    background: #ffffff;
+    --p1: #007bff;
+    --p2: #17a2b8;
+    --p3: #f8f9fa;
+    --p4: #e9ecef;
+    --p5: #f8f9fa;
+    --ink-strong: #343a40;
+    --ink-muted: #6c757d;
+    --border-strong: #dee2e6;
+    --border-soft: #e9ecef;
+    background: var(--p3);
   }
 
   .content-header h1 {
@@ -378,14 +378,14 @@ include __DIR__ . '/include/layout_top.php';
 
   .content-header .badge-primary {
     background: var(--p1);
-    border: 1px solid var(--border-strong);
+    border: 1px solid var(--p1);
     color: #ffffff;
   }
 
   .mapping-page .card {
     border-radius: 0.98rem;
     border: 1px solid var(--border-strong);
-    box-shadow: 0 6px 16px rgba(11, 31, 58, 0.12);
+    box-shadow: 0 0 1px rgba(0, 0, 0, 0.13), 0 1px 3px rgba(0, 0, 0, 0.2);
   }
 
   .mapping-intro {
@@ -405,7 +405,7 @@ include __DIR__ . '/include/layout_top.php';
 
   .mapping-pill {
     border: 1px solid var(--border-strong);
-    background: #ffffff;
+    background: var(--p3);
     color: var(--ink-strong);
     font-weight: 600;
     font-size: 0.85rem;
@@ -438,7 +438,7 @@ include __DIR__ . '/include/layout_top.php';
 
   .mapping-toolbar .form-control:focus {
     border-color: var(--p1);
-    box-shadow: 0 0 0 0.1rem rgba(33, 158, 188, 0.2);
+    box-shadow: 0 0 0 0.1rem rgba(0, 123, 255, 0.2);
   }
 
   .mapping-toolbar-actions > * {
@@ -507,8 +507,8 @@ include __DIR__ . '/include/layout_top.php';
     gap: var(--lane-col-gap);
     padding: 0.29rem;
     border-radius: 0.94rem;
-    border: 2px solid var(--p1);
-    background: #ffffff;
+    border: 1px solid var(--border-strong);
+    background: var(--p3);
     margin: 0 auto;
   }
 
@@ -525,24 +525,24 @@ include __DIR__ . '/include/layout_top.php';
   }
 
   .device-lane {
-    --lane-header-bg: var(--p2);
-    --lane-header-text: #ffffff;
-    --lane-sub-text: rgba(255, 255, 255, 0.88);
-    --lane-border: var(--p1);
-    --lane-chip-bg: #ffb703;
-    --lane-chip-text: #1b1b1b;
-    --lane-chip-border: var(--p1);
+    --lane-header-bg: var(--p3);
+    --lane-header-text: var(--ink-strong);
+    --lane-sub-text: var(--ink-muted);
+    --lane-border: var(--border-strong);
+    --lane-chip-bg: color(xyz 0.31 0.4 0.55);
+    --lane-chip-text: #ffffff;
+    --lane-chip-border: #ab7373;
     --lane-body-bg: #ffffff;
-    --lane-card-accent: var(--p1);
-    --lane-empty-bg: #ffffff;
+    --lane-card-accent: #396559;
+    --lane-empty-bg: var(--p3);
     background: var(--lane-body-bg);
-    border: 2px solid var(--lane-border);
-    border-left: 5px solid var(--lane-border);
+    border: 1px solid var(--lane-border);
+    border-left: 4px solid #518b8a;
     border-radius: 0.51rem;
     display: inline-flex;
     flex-direction: column;
     min-height: 126px;
-    box-shadow: 0 6px 14px rgba(0, 78, 100, 0.12);
+    box-shadow: 0 0 1px rgba(0, 0, 0, 0.13), 0 1px 3px rgba(0, 0, 0, 0.2);
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
     width: 100%;
     margin: 0;
@@ -552,8 +552,8 @@ include __DIR__ . '/include/layout_top.php';
   }
 
   .device-lane.is-drop-target {
-    border-color: var(--lane-border);
-    box-shadow: 0 0 0 2px rgba(33, 158, 188, 0.2), 0 8px 18px rgba(33, 158, 188, 0.16);
+    border-color: var(--p1);
+    box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.2), 0 8px 18px rgba(0, 123, 255, 0.18);
   }
 
   .device-lane.is-filtered-out {
@@ -589,11 +589,11 @@ include __DIR__ . '/include/layout_top.php';
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
     margin-right: 0.28rem;
-    box-shadow: 0 6px 12px rgba(61, 143, 160, 0.24);
+    box-shadow: 0 2px 6px rgba(0, 123, 255, 0.25);
   }
 
   .project-name {
-    color: currentColor;
+    color: rgb(144 151 107);
     font-weight: 600;
   }
 
@@ -639,7 +639,7 @@ include __DIR__ . '/include/layout_top.php';
     padding: 0.09rem 0.26rem;
     border-color: var(--lane-border);
     color: var(--ink-strong);
-    background: var(--p5);
+    background: var(--p3);
   }
 
   .device-list {
@@ -670,7 +670,7 @@ include __DIR__ . '/include/layout_top.php';
     padding: 0.22rem 0.42rem;
     margin-bottom: 0.22rem;
     cursor: move;
-    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
     transition: transform 0.15s ease, box-shadow 0.15s ease;
     text-align: center;
     border-left: 3px solid var(--lane-card-accent);

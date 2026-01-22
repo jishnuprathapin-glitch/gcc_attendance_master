@@ -115,15 +115,21 @@ function build_project_device_summary(array $deviceCounts, array $deviceMap, int
         if (isset($deviceMap[$sn]) && is_array($deviceMap[$sn])) {
             $projectId = $deviceMap[$sn]['project_id'] ?? null;
             $projectKey = $projectId !== null ? (string) $projectId : 'unassigned';
-            $projectName = trim((string) ($deviceMap[$sn]['project_name'] ?? ''));
             $projectCode = trim((string) ($deviceMap[$sn]['pro_code'] ?? ''));
-            $projectLabel = trim(($projectCode !== '' ? $projectCode . ' ' : '') . $projectName);
-            if ($projectLabel === '') {
-                $projectLabel = $projectKey !== 'unassigned' ? ('Project ' . $projectKey) : 'Unassigned';
+            if ($projectKey === 'unassigned') {
+                $projectLabel = 'Unassigned';
+            } elseif ($projectCode !== '') {
+                $projectLabel = $projectCode;
+            } else {
+                $projectLabel = 'Project ' . $projectKey;
             }
         }
         if (!isset($projectCounts[$projectKey])) {
-            $projectCounts[$projectKey] = ['label' => $projectLabel, 'count' => 0];
+            $projectCounts[$projectKey] = [
+                'key' => $projectKey,
+                'label' => $projectLabel,
+                'count' => 0,
+            ];
         }
         $projectCounts[$projectKey]['count']++;
     }
@@ -138,10 +144,8 @@ function build_project_device_summary(array $deviceCounts, array $deviceMap, int
     });
 
     $totalProjects = count($projects);
-    $limit = max(1, $limit);
-    $topProjects = array_slice($projects, 0, $limit);
     $parts = [];
-    foreach ($topProjects as $project) {
+    foreach ($projects as $project) {
         $label = $project['label'] !== '' ? $project['label'] : 'Project';
         $parts[] = $label . ': ' . $project['count'];
     }
@@ -149,16 +153,136 @@ function build_project_device_summary(array $deviceCounts, array $deviceMap, int
         $meta = 'No devices with punches';
     } else {
         $meta = implode(' | ', $parts);
-        $remaining = $totalProjects - count($topProjects);
-        if ($remaining > 0) {
-            $meta .= ' | +' . $remaining . ' more';
-        }
     }
 
     return [
         'count' => $totalProjects,
         'meta' => $meta,
+        'projects' => $projects,
     ];
+}
+
+function build_project_badge_summary(array $badgeRows, array $projectCodeById, array $deviceMap): array {
+    $projectCounts = [];
+    foreach ($badgeRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $projectId = trim((string) ($row['lastLoginProjectId'] ?? ''));
+        if ($projectId === '') {
+            $projectId = trim((string) ($row['firstLoginProjectId'] ?? ''));
+        }
+        if ($projectId === '') {
+            $deviceSn = trim((string) ($row['lastLoginDeviceSn'] ?? ''));
+            if ($deviceSn === '') {
+                $deviceSn = trim((string) ($row['firstLoginDeviceSn'] ?? ''));
+            }
+            if ($deviceSn !== '' && isset($deviceMap[$deviceSn]) && is_array($deviceMap[$deviceSn])) {
+                $mappedId = $deviceMap[$deviceSn]['project_id'] ?? null;
+                if ($mappedId !== null) {
+                    $projectId = (string) $mappedId;
+                }
+            }
+        }
+
+        $projectKey = $projectId !== '' ? $projectId : 'unassigned';
+        if ($projectKey === 'unassigned') {
+            $projectLabel = 'Unassigned';
+        } else {
+            $projectCode = trim((string) ($projectCodeById[$projectKey] ?? ''));
+            $projectLabel = $projectCode !== '' ? $projectCode : ('Project ' . $projectKey);
+        }
+
+        if (!isset($projectCounts[$projectKey])) {
+            $projectCounts[$projectKey] = [
+                'key' => $projectKey,
+                'label' => $projectLabel,
+                'count' => 0,
+            ];
+        }
+        $projectCounts[$projectKey]['count']++;
+    }
+
+    $projects = array_values($projectCounts);
+    usort($projects, function (array $a, array $b): int {
+        $diff = $b['count'] <=> $a['count'];
+        if ($diff !== 0) {
+            return $diff;
+        }
+        return strcmp($a['label'], $b['label']);
+    });
+
+    $totalProjects = count($projects);
+    $parts = [];
+    foreach ($projects as $project) {
+        $label = $project['label'] !== '' ? $project['label'] : 'Project';
+        $parts[] = $label . ': ' . $project['count'];
+    }
+    if ($totalProjects === 0) {
+        $meta = 'No logged in employees';
+    } else {
+        $meta = implode(' | ', $parts);
+    }
+
+    return [
+        'count' => $totalProjects,
+        'meta' => $meta,
+        'projects' => $projects,
+    ];
+}
+
+function build_project_device_employee_meta(array $deviceSummary, array $employeeSummary): string {
+    $deviceProjects = $deviceSummary['projects'] ?? [];
+    $employeeProjects = $employeeSummary['projects'] ?? [];
+
+    $employeeByKey = [];
+    foreach ($employeeProjects as $project) {
+        $key = (string) ($project['key'] ?? '');
+        if ($key === '') {
+            $key = (string) ($project['label'] ?? '');
+        }
+        $employeeByKey[$key] = $project;
+    }
+
+    $parts = [];
+    foreach ($deviceProjects as $project) {
+        $key = (string) ($project['key'] ?? '');
+        if ($key === '') {
+            $key = (string) ($project['label'] ?? '');
+        }
+        $label = (string) ($project['label'] ?? '');
+        if ($label === '') {
+            $label = 'Project';
+        }
+        $deviceCount = (int) ($project['count'] ?? 0);
+        $employeeCount = 0;
+        if (isset($employeeByKey[$key])) {
+            $employeeCount = (int) ($employeeByKey[$key]['count'] ?? 0);
+            unset($employeeByKey[$key]);
+        }
+        $parts[] = $label . ' ' . $deviceCount . '/' . $employeeCount;
+    }
+
+    if (!empty($employeeByKey)) {
+        $remaining = array_values($employeeByKey);
+        usort($remaining, function (array $a, array $b): int {
+            $diff = $b['count'] <=> $a['count'];
+            if ($diff !== 0) {
+                return $diff;
+            }
+            return strcmp($a['label'], $b['label']);
+        });
+        foreach ($remaining as $project) {
+            $label = $project['label'] !== '' ? $project['label'] : 'Project';
+            $parts[] = $label . ' 0/' . (int) ($project['count'] ?? 0);
+        }
+    }
+
+    if (empty($parts)) {
+        return 'No devices with punches';
+    }
+
+    return 'Devices/Employees: ' . implode(' | ', $parts);
 }
 
 function hrms_date_key(?string $value, ?DateTimeZone $localTz = null): ?string {
@@ -951,12 +1075,17 @@ if ($isAjax && $ajaxSection === 'hrms') {
 $deviceMap = [];
 $devicesByProject = [];
 $projects = [];
+$projectCodeById = [];
 
 if (isset($bd) && $bd instanceof mysqli) {
     $projectResult = $bd->query('SELECT id, name, pro_code FROM gcc_it.projects ORDER BY pro_code');
     if ($projectResult) {
         while ($row = $projectResult->fetch_assoc()) {
             $projects[] = $row;
+            $projectId = (string) ($row['id'] ?? '');
+            if ($projectId !== '') {
+                $projectCodeById[$projectId] = trim((string) ($row['pro_code'] ?? ''));
+            }
         }
         $projectResult->free();
     }
@@ -1339,10 +1468,42 @@ if ($isAjax && $ajaxSection === 'active-devices') {
     $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
     $activeDeviceCount = $projectSummary['count'];
     $activeDeviceMeta = $projectSummary['meta'];
+
+    $employeeCountsOk = false;
+    $employeeSummary = ['count' => 0, 'meta' => '', 'projects' => []];
+    if ($deviceScope === 'none') {
+        $employeeCountsOk = true;
+    } else {
+        $loggedBadgesAll = load_logged_in_badges(
+            $startDateParam,
+            $endDateParam,
+            $deviceSnParam,
+            false,
+            1,
+            200,
+            true
+        );
+        if ($loggedBadgesAll['ok']) {
+            $employeeCountsOk = true;
+            $employeeSummary = build_project_badge_summary(
+                $loggedBadgesAll['rows'],
+                $projectCodeById,
+                $deviceMap
+            );
+        } else {
+            $apiErrors[] = 'Employee counts';
+        }
+    }
+
     if ($deviceScope === 'none') {
         $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
-    }
-    if (!$deviceCountsOk) {
+    } elseif ($deviceCountsOk && $employeeCountsOk) {
+        $activeDeviceMeta = build_project_device_employee_meta($projectSummary, $employeeSummary);
+    } elseif ($deviceCountsOk) {
+        $activeDeviceMeta = 'Devices: ' . $projectSummary['meta'] . ' | Employees: unavailable';
+    } elseif ($employeeCountsOk) {
+        $activeDeviceMeta = 'Employees: ' . $employeeSummary['meta'] . ' | Devices: unavailable';
+    } else {
         $activeDeviceMeta = 'Project counts unavailable';
     }
 
@@ -1350,7 +1511,7 @@ if ($isAjax && $ajaxSection === 'active-devices') {
         'errors' => array_values(array_unique($apiErrors)),
         'activeDevices' => [
             'activeDeviceCountText' => $deviceCountsOk ? (string) $activeDeviceCount : '-',
-            'activeDeviceMeta' => $deviceCountsOk ? $activeDeviceMeta : 'Project counts unavailable',
+            'activeDeviceMeta' => $activeDeviceMeta,
         ],
     ];
 
@@ -1643,10 +1804,42 @@ if ($isAjax && $ajaxSection === 'summary') {
     $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
     $activeDeviceCount = $projectSummary['count'];
     $activeDeviceMeta = $projectSummary['meta'];
+
+    $employeeCountsOk = false;
+    $employeeSummary = ['count' => 0, 'meta' => '', 'projects' => []];
+    if ($deviceScope === 'none') {
+        $employeeCountsOk = true;
+    } else {
+        $loggedBadgesAll = load_logged_in_badges(
+            $startDateParam,
+            $endDateParam,
+            $deviceSnParam,
+            false,
+            1,
+            200,
+            true
+        );
+        if ($loggedBadgesAll['ok']) {
+            $employeeCountsOk = true;
+            $employeeSummary = build_project_badge_summary(
+                $loggedBadgesAll['rows'],
+                $projectCodeById,
+                $deviceMap
+            );
+        } else {
+            $apiErrors[] = 'Employee counts';
+        }
+    }
+
     if ($deviceScope === 'none') {
         $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
-    }
-    if (!$deviceCountsOk) {
+    } elseif ($deviceCountsOk && $employeeCountsOk) {
+        $activeDeviceMeta = build_project_device_employee_meta($projectSummary, $employeeSummary);
+    } elseif ($deviceCountsOk) {
+        $activeDeviceMeta = 'Devices: ' . $projectSummary['meta'] . ' | Employees: unavailable';
+    } elseif ($employeeCountsOk) {
+        $activeDeviceMeta = 'Employees: ' . $employeeSummary['meta'] . ' | Devices: unavailable';
+    } else {
         $activeDeviceMeta = 'Project counts unavailable';
     }
 
@@ -1716,7 +1909,7 @@ if ($isAjax && $ajaxSection === 'summary') {
             'deviceStatusRatio' => $deviceStatusRatio,
             'deviceStatusMeta' => $deviceStatusMeta,
             'activeDeviceCountText' => $deviceCountsOk ? (string) $activeDeviceCount : '-',
-            'activeDeviceMeta' => $deviceCountsOk ? $activeDeviceMeta : 'Project counts unavailable',
+            'activeDeviceMeta' => $activeDeviceMeta,
         ],
         'daily' => [
             'note' => $dailyNote !== '' ? $dailyNote : $dailyLabel,
