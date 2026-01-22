@@ -1082,9 +1082,9 @@ if (isset($bd) && $bd instanceof mysqli) {
     if ($projectResult) {
         while ($row = $projectResult->fetch_assoc()) {
             $projects[] = $row;
-            $projectId = (string) ($row['id'] ?? '');
-            if ($projectId !== '') {
-                $projectCodeById[$projectId] = trim((string) ($row['pro_code'] ?? ''));
+            $projectRowId = (string) ($row['id'] ?? '');
+            if ($projectRowId !== '') {
+                $projectCodeById[$projectRowId] = trim((string) ($row['pro_code'] ?? ''));
             }
         }
         $projectResult->free();
@@ -2113,13 +2113,15 @@ include __DIR__ . '/include/layout_top.php';
         </div>
       </div>
       <div class="col-lg-4 col-md-6">
-        <div class="small-box bg-warning dash-card" style="animation-delay: 0.2s;">
-          <div class="inner">
-            <h3 id="activeDeviceCount"><?= $deviceCountsOk ? h((string) $activeDeviceCount) : '-' ?></h3>
-            <p>Projects with punches</p>
+        <div class="info-box dash-card" style="animation-delay: 0.2s;">
+          <span class="info-box-icon bg-warning"><i class="fas fa-microchip"></i></span>
+          <div class="info-box-content">
+            <span class="info-box-text">Projects with punches</span>
+            <span id="activeDeviceCount" class="info-box-number">
+              <?= $deviceCountsOk ? h((string) $activeDeviceCount) : '-' ?>
+            </span>
+            <div id="activeDeviceMeta" class="text-muted small"><?= h($activeDeviceMeta) ?></div>
           </div>
-          <div class="icon"><i class="fas fa-microchip"></i></div>
-          <div id="activeDeviceMeta" class="small text-white-50 px-3 pb-2"><?= h($activeDeviceMeta) ?></div>
         </div>
       </div>
     </div>
