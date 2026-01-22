@@ -81,6 +81,18 @@ function build_device_map_sync_row(array $row): ?array {
     return $payload;
 }
 
+function device_display_name(array $device): string {
+    $alias = trim((string) ($device['alias'] ?? ''));
+    if ($alias !== '') {
+        return $alias;
+    }
+    $terminalName = trim((string) ($device['terminalName'] ?? ''));
+    if ($terminalName !== '') {
+        return $terminalName;
+    }
+    return 'Unnamed device';
+}
+
 function json_response(array $payload): void {
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store');
@@ -214,9 +226,160 @@ if ($isAjax && $action === 'update-mapping') {
     ]);
 }
 
+if ($isAjax && $action === 'onboard-devices') {
+    if (!verify_csrf($_POST['csrf'] ?? null)) {
+        json_response(['ok' => false, 'message' => 'Invalid request token.']);
+    }
+    if (!isset($bd) || !($bd instanceof mysqli)) {
+        json_response(['ok' => false, 'message' => 'Database connection not available.']);
+    }
+
+    $rawDevices = (string) ($_POST['devices'] ?? '');
+    $decoded = json_decode($rawDevices, true);
+    if (!is_array($decoded)) {
+        json_response(['ok' => false, 'message' => 'Invalid device payload.']);
+    }
+
+    $deviceRows = [];
+    foreach ($decoded as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $deviceSn = trim((string) ($row['deviceSn'] ?? $row['sn'] ?? ''));
+        if ($deviceSn === '') {
+            continue;
+        }
+        $deviceName = trim((string) ($row['deviceName'] ?? $row['name'] ?? $row['alias'] ?? $row['terminalName'] ?? ''));
+        $deviceRows[] = [
+            'deviceSn' => $deviceSn,
+            'deviceName' => $deviceName,
+        ];
+    }
+
+    if (empty($deviceRows)) {
+        json_response(['ok' => false, 'message' => 'No devices selected.']);
+    }
+
+    $selectStmt = $bd->prepare(
+        'SELECT device_name FROM gcc_attendance_master.device_project_map WHERE device_sn = ?'
+    );
+    $insertStmt = $bd->prepare(
+        'INSERT INTO gcc_attendance_master.device_project_map (device_sn, device_name, project_id) ' .
+        'VALUES (?, ?, NULL)'
+    );
+    $updateStmt = $bd->prepare(
+        'UPDATE gcc_attendance_master.device_project_map SET device_name = ? WHERE device_sn = ?'
+    );
+
+    if (!$selectStmt || !$insertStmt || !$updateStmt) {
+        if ($selectStmt) {
+            $selectStmt->close();
+        }
+        if ($insertStmt) {
+            $insertStmt->close();
+        }
+        if ($updateStmt) {
+            $updateStmt->close();
+        }
+        json_response(['ok' => false, 'message' => 'Unable to prepare onboarding statement.']);
+    }
+
+    $received = count($deviceRows);
+    $inserted = 0;
+    $updated = 0;
+    $skipped = 0;
+    $errors = [];
+    $syncDeviceSn = [];
+
+    foreach ($deviceRows as $row) {
+        $deviceSn = $row['deviceSn'];
+        $deviceName = $row['deviceName'];
+
+        $existingName = null;
+        $selectStmt->bind_param('s', $deviceSn);
+        if (!$selectStmt->execute()) {
+            $errors[] = 'Unable to check device ' . $deviceSn;
+            continue;
+        }
+        $selectStmt->store_result();
+        $exists = $selectStmt->num_rows > 0;
+        if ($exists) {
+            $selectStmt->bind_result($existingName);
+            $selectStmt->fetch();
+        }
+        $selectStmt->free_result();
+
+        if ($exists) {
+            $existingName = trim((string) ($existingName ?? ''));
+            if ($deviceName !== '' && $deviceName !== $existingName) {
+                $updateStmt->bind_param('ss', $deviceName, $deviceSn);
+                if ($updateStmt->execute()) {
+                    $updated++;
+                    $syncDeviceSn[] = $deviceSn;
+                } else {
+                    $errors[] = 'Unable to update device ' . $deviceSn;
+                }
+            } else {
+                $skipped++;
+            }
+            continue;
+        }
+
+        $insertStmt->bind_param('ss', $deviceSn, $deviceName);
+        if ($insertStmt->execute()) {
+            $inserted++;
+            $syncDeviceSn[] = $deviceSn;
+        } else {
+            $errors[] = 'Unable to insert device ' . $deviceSn;
+        }
+    }
+
+    $selectStmt->close();
+    $insertStmt->close();
+    $updateStmt->close();
+
+    $syncRows = [];
+    foreach ($syncDeviceSn as $sn) {
+        $row = load_device_mapping_row($bd, $sn);
+        if (!is_array($row)) {
+            continue;
+        }
+        $payload = build_device_map_sync_row($row);
+        if ($payload) {
+            $syncRows[] = $payload;
+        }
+    }
+
+    $syncResult = null;
+    if (!empty($syncRows)) {
+        $syncResult = attendance_api_post_json('/device-project-map/upsert', $syncRows, 12);
+    }
+
+    $hasErrors = !empty($errors);
+    json_response([
+        'ok' => !$hasErrors,
+        'message' => $hasErrors ? 'Some devices could not be onboarded.' : 'Devices onboarded.',
+        'received' => $received,
+        'inserted' => $inserted,
+        'updated' => $updated,
+        'skipped' => $skipped,
+        'errors' => $errors,
+        'sync' => [
+            'ok' => $syncResult['ok'] ?? false,
+            'status' => $syncResult['status'] ?? null,
+            'error' => $syncResult['error'] ?? null,
+            'received' => count($syncRows),
+        ],
+    ]);
+}
+
 $projects = [];
 $projectMap = [];
 $devicesByProject = [];
+$onboardedDeviceSn = [];
+$onboardedDevices = [];
+$projectLabelById = ['unassigned' => 'Unassigned'];
+$projectSelectOptions = [['value' => 'unassigned', 'label' => 'Unassigned']];
 $loadError = null;
 
 if (isset($bd) && $bd instanceof mysqli) {
@@ -243,6 +406,13 @@ if (isset($bd) && $bd instanceof mysqli) {
             if ($deviceSn === '') {
                 continue;
             }
+            $onboardedDeviceSn[$deviceSn] = true;
+            $onboardedDevices[] = [
+                'device_sn' => $deviceSn,
+                'device_name' => $row['device_name'] ?? '',
+                'project_id' => $row['project_id'],
+            ];
+
             $projectId = $row['project_id'] !== null ? (string) $row['project_id'] : '';
             if ($projectId === '' || !isset($projectMap[$projectId])) {
                 $projectId = 'unassigned';
@@ -282,6 +452,8 @@ foreach ($projects as $project) {
     if ($projectCode !== '') {
         $label = $projectCode . ' - ' . $labelName;
     }
+    $projectLabelById[$projectId] = $label;
+    $projectSelectOptions[] = ['value' => $projectId, 'label' => $label];
     $lanes[] = [
         'id' => $projectId,
         'label' => $label,
@@ -303,6 +475,51 @@ foreach ($lanes as $lane) {
 }
 $projectCount = max(0, count($lanes) - 1);
 
+$availableDevices = [];
+$availableDevicesError = null;
+if (isset($bd) && $bd instanceof mysqli) {
+    $deviceApiResult = attendance_api_get('/devices', [], 15);
+    if (!$deviceApiResult['ok'] || !is_array($deviceApiResult['data'])) {
+        $availableDevicesError = 'Unable to load devices from attendance API.';
+    } else {
+        foreach ($deviceApiResult['data'] as $device) {
+            if (!is_array($device)) {
+                continue;
+            }
+            $deviceSn = trim((string) ($device['sn'] ?? ''));
+            if ($deviceSn === '' || isset($onboardedDeviceSn[$deviceSn])) {
+                continue;
+            }
+            $alias = trim((string) ($device['alias'] ?? ''));
+            $terminalName = trim((string) ($device['terminalName'] ?? ''));
+            $labelParts = [];
+            if ($alias !== '') {
+                $labelParts[] = $alias;
+            }
+            if ($terminalName !== '' && $terminalName !== $alias) {
+                $labelParts[] = $terminalName;
+            }
+            $displayName = $labelParts ? implode(' / ', $labelParts) : device_display_name($device);
+            $availableDevices[] = [
+                'sn' => $deviceSn,
+                'name' => $displayName,
+                'alias' => $alias,
+                'terminalName' => $terminalName,
+            ];
+        }
+        usort($availableDevices, function (array $a, array $b): int {
+            return strcmp($a['sn'], $b['sn']);
+        });
+    }
+} else {
+    $availableDevicesError = 'Database connection not available.';
+}
+
+$hasAvailableDevices = !empty($availableDevices);
+$showOnboardControls = $hasAvailableDevices && !$availableDevicesError;
+$showOnboardEmpty = !$availableDevicesError && !$hasAvailableDevices;
+$hasOnboardedDevices = !empty($onboardedDevices);
+
 include __DIR__ . '/include/layout_top.php';
 
 ?>
@@ -314,7 +531,7 @@ include __DIR__ . '/include/layout_top.php';
         <h1>Device to project mapping</h1>
       </div>
       <div class="col-sm-6 text-sm-right">
-        <span class="badge badge-primary">Drag and drop mapping</span>
+        <span class="badge badge-primary">Drag or select mapping</span>
       </div>
     </div>
     <?php include __DIR__ . '/include/admin_nav.php'; ?>
@@ -331,7 +548,7 @@ include __DIR__ . '/include/layout_top.php';
       <div class="card-body d-flex flex-column flex-lg-row justify-content-between">
         <div>
           <div class="font-weight-bold">How it works</div>
-          <div class="text-muted">Drag devices into a project container to update the mapping. Changes save automatically.</div>
+          <div class="text-muted">Drag devices into a project container or use the dropdowns below to update mappings. Changes save automatically and sync.</div>
           <div class="mapping-intro-meta mt-2">
             <span class="badge badge-light mapping-pill">
               <i class="fas fa-arrows-alt mr-1"></i>Drag to assign
@@ -388,6 +605,71 @@ include __DIR__ . '/include/layout_top.php';
           data-unassigned-devices="<?= h((string) $unassignedCount) ?>"
         >
           Projects: <?= h((string) $projectCount) ?> | Devices: <?= h((string) $deviceTotal) ?> | Unassigned: <?= h((string) $unassignedCount) ?>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mapping-onboard">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h3 class="card-title mb-0">Onboard new devices</h3>
+        <span class="text-muted small">Attendance API</span>
+      </div>
+      <div class="card-body">
+        <?php if ($availableDevicesError): ?>
+          <div id="onboardError" class="alert alert-warning mb-0"><?= h($availableDevicesError) ?></div>
+        <?php endif; ?>
+        <p id="onboardEmptyMessage" class="text-muted mb-0" <?= $showOnboardEmpty ? '' : 'hidden' ?>>All devices are already onboarded.</p>
+        <div id="onboardControls" <?= $showOnboardControls ? '' : 'hidden' ?>>
+          <div class="form-row align-items-end">
+            <div class="col-lg-5 col-md-6">
+              <label for="onboardSearchInput" class="small font-weight-bold text-muted">Search available devices</label>
+              <input id="onboardSearchInput" type="search" class="form-control form-control-sm" placeholder="Serial number or name">
+            </div>
+            <div class="col-lg-3 col-md-6 mt-3 mt-md-0">
+              <span id="onboardSummary" class="small text-muted d-inline-block mt-md-4">
+                Showing <?= h((string) count($availableDevices)) ?> of <?= h((string) count($availableDevices)) ?> | Selected 0
+              </span>
+            </div>
+            <div class="col-lg-4 col-md-12 mt-3 mt-lg-0 text-lg-right">
+              <button type="button" id="onboardSelectedBtn" class="btn btn-sm btn-primary">Onboard selected</button>
+            </div>
+          </div>
+          <div class="table-responsive mt-3">
+            <table class="table table-sm table-striped table-hover" id="onboardTable">
+              <thead>
+                <tr>
+                  <th style="width: 36px;">
+                    <div class="custom-control custom-checkbox">
+                      <input type="checkbox" class="custom-control-input" id="onboardSelectAll">
+                      <label class="custom-control-label" for="onboardSelectAll"></label>
+                    </div>
+                  </th>
+                  <th>Device SN</th>
+                  <th>Device name</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($availableDevices as $device): ?>
+                  <?php
+                  $deviceSn = (string) ($device['sn'] ?? '');
+                  $deviceName = (string) ($device['name'] ?? '');
+                  $deviceSearch = strtolower(trim($deviceSn . ' ' . $deviceName));
+                  $deviceId = preg_replace('/[^A-Za-z0-9_-]+/', '_', $deviceSn);
+                  ?>
+                  <tr class="onboard-row" data-device-sn="<?= h($deviceSn) ?>" data-device-name="<?= h($deviceName) ?>" data-device-search="<?= h($deviceSearch) ?>">
+                    <td>
+                      <div class="custom-control custom-checkbox">
+                        <input type="checkbox" class="custom-control-input onboard-checkbox" id="onboard-<?= h($deviceId) ?>">
+                        <label class="custom-control-label" for="onboard-<?= h($deviceId) ?>"></label>
+                      </div>
+                    </td>
+                    <td class="text-monospace small"><?= h($deviceSn) ?></td>
+                    <td><?= h($deviceName !== '' ? $deviceName : 'Unnamed device') ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -455,6 +737,50 @@ include __DIR__ . '/include/layout_top.php';
           </div>
         </div>
       <?php endforeach; ?>
+    </div>
+
+    <div class="card mapping-manual">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h3 class="card-title mb-0">Manual mapping</h3>
+        <span class="text-muted small">Dropdown updates</span>
+      </div>
+      <div class="card-body">
+        <p id="manualEmptyMessage" class="text-muted mb-0" <?= $hasOnboardedDevices ? 'hidden' : '' ?>>No onboarded devices yet.</p>
+        <div id="manualMappingForm" class="form-row align-items-end" <?= $hasOnboardedDevices ? '' : 'hidden' ?>>
+          <div class="col-lg-5 col-md-6">
+            <label for="manualDeviceSelect" class="small font-weight-bold text-muted">Device</label>
+            <select id="manualDeviceSelect" class="form-control form-control-sm">
+              <?php foreach ($onboardedDevices as $device): ?>
+                <?php
+                $deviceSn = trim((string) ($device['device_sn'] ?? ''));
+                $deviceNameRaw = trim((string) ($device['device_name'] ?? ''));
+                $deviceNameLabel = $deviceNameRaw !== '' ? $deviceNameRaw : 'Unnamed device';
+                $projectValue = $device['project_id'] !== null ? (string) $device['project_id'] : 'unassigned';
+                if ($projectValue === '' || !isset($projectLabelById[$projectValue])) {
+                    $projectValue = 'unassigned';
+                }
+                $optionLabel = $deviceSn . ' - ' . $deviceNameLabel;
+                ?>
+                <option value="<?= h($deviceSn) ?>" data-device-name="<?= h($deviceNameRaw) ?>" data-project-id="<?= h($projectValue) ?>">
+                  <?= h($optionLabel) ?>
+                </option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="col-lg-4 col-md-4 mt-3 mt-md-0">
+            <label for="manualProjectSelect" class="small font-weight-bold text-muted">Project</label>
+            <select id="manualProjectSelect" class="form-control form-control-sm">
+              <?php foreach ($projectSelectOptions as $option): ?>
+                <option value="<?= h($option['value']) ?>"><?= h($option['label']) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="col-lg-3 col-md-2 mt-3 mt-md-0">
+            <button type="button" id="manualApplyBtn" class="btn btn-sm btn-primary btn-block">Update mapping</button>
+          </div>
+        </div>
+        <div id="manualMappingHint" class="text-muted small mt-2" <?= $hasOnboardedDevices ? '' : 'hidden' ?>>Select a device to load its current project.</div>
+      </div>
     </div>
   </div>
 </section>
@@ -558,6 +884,19 @@ include __DIR__ . '/include/layout_top.php';
     gap: 0.65rem;
   }
 
+  .mapping-onboard,
+  .mapping-manual {
+    margin-top: 1rem;
+  }
+
+  .mapping-onboard .table {
+    margin-bottom: 0;
+  }
+
+  .onboard-row.is-hidden {
+    display: none;
+  }
+
   .mapping-fullscreen-control {
     display: flex;
     justify-content: flex-end;
@@ -572,7 +911,9 @@ include __DIR__ . '/include/layout_top.php';
 
   body.mapping-fullscreen .content-header,
   body.mapping-fullscreen .mapping-intro,
-  body.mapping-fullscreen .mapping-toolbar {
+  body.mapping-fullscreen .mapping-toolbar,
+  body.mapping-fullscreen .mapping-onboard,
+  body.mapping-fullscreen .mapping-manual {
     display: none;
   }
 
@@ -854,6 +1195,19 @@ include __DIR__ . '/include/layout_top.php';
   const collapseAllBtn = document.getElementById('collapseAll');
   const expandAllBtn = document.getElementById('expandAll');
   const resetFiltersBtn = document.getElementById('resetFilters');
+  const onboardSearchInput = document.getElementById('onboardSearchInput');
+  const onboardSelectAll = document.getElementById('onboardSelectAll');
+  const onboardTable = document.getElementById('onboardTable');
+  const onboardSummary = document.getElementById('onboardSummary');
+  const onboardSubmitBtn = document.getElementById('onboardSelectedBtn');
+  const onboardControls = document.getElementById('onboardControls');
+  const onboardEmptyMessage = document.getElementById('onboardEmptyMessage');
+  const manualDeviceSelect = document.getElementById('manualDeviceSelect');
+  const manualProjectSelect = document.getElementById('manualProjectSelect');
+  const manualApplyBtn = document.getElementById('manualApplyBtn');
+  const manualEmptyMessage = document.getElementById('manualEmptyMessage');
+  const manualMappingForm = document.getElementById('manualMappingForm');
+  const manualMappingHint = document.getElementById('manualMappingHint');
   let statusTimer = null;
   let controlsReady = false;
   let cssFullscreen = false;
@@ -920,6 +1274,130 @@ include __DIR__ . '/include/layout_top.php';
 
   const normalizeText = (value) => {
     return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  };
+
+  const escapeSelector = (value) => {
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+      return window.CSS.escape(String(value));
+    }
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  };
+
+  const updateSelectForDevice = (deviceSn, projectId) => {
+    if (!deviceSn) {
+      return;
+    }
+    const safeSn = escapeSelector(deviceSn);
+    const value = projectId && String(projectId).trim() !== '' ? String(projectId) : 'unassigned';
+
+    const select = document.querySelector(`.device-project-select[data-device-sn="${safeSn}"]`);
+    if (select) {
+      select.value = value;
+      select.dataset.current = value;
+      const row = select.closest('tr');
+      if (row) {
+        const deviceName = row.dataset.deviceName || '';
+        const optionLabel = select.options[select.selectedIndex]
+          ? select.options[select.selectedIndex].textContent
+          : '';
+        row.dataset.deviceSearch = normalizeText(`${deviceSn} ${deviceName} ${optionLabel}`);
+      }
+    }
+
+    if (manualDeviceSelect) {
+      const option = manualDeviceSelect.querySelector(`option[value="${safeSn}"]`);
+      if (option) {
+        option.dataset.projectId = value;
+        if (manualDeviceSelect.value === deviceSn && manualProjectSelect) {
+          const safeProjectId = escapeSelector(value);
+          const exists = manualProjectSelect.querySelector(`option[value="${safeProjectId}"]`);
+          manualProjectSelect.value = exists ? value : 'unassigned';
+        }
+      }
+    }
+  };
+
+  const setVisibility = (element, visible) => {
+    if (!element) {
+      return;
+    }
+    element.hidden = !visible;
+  };
+
+  const normalizeDeviceName = (deviceName) => {
+    const trimmed = String(deviceName || '').trim();
+    return trimmed !== '' ? trimmed : 'Unnamed device';
+  };
+
+  const ensureManualOption = (deviceSn, deviceName) => {
+    if (!manualDeviceSelect || !deviceSn) {
+      return null;
+    }
+    const safeSn = escapeSelector(deviceSn);
+    const existing = manualDeviceSelect.querySelector(`option[value="${safeSn}"]`);
+    const rawName = String(deviceName || '').trim();
+    const nameLabel = normalizeDeviceName(rawName);
+    const optionLabel = `${deviceSn} - ${nameLabel}`;
+    if (existing) {
+      existing.dataset.deviceName = rawName;
+      if (!existing.dataset.projectId) {
+        existing.dataset.projectId = 'unassigned';
+      }
+      existing.textContent = optionLabel;
+      return existing;
+    }
+    const option = document.createElement('option');
+    option.value = deviceSn;
+    option.dataset.deviceName = rawName;
+    option.dataset.projectId = 'unassigned';
+    option.textContent = optionLabel;
+    manualDeviceSelect.appendChild(option);
+    return option;
+  };
+
+  const ensureDeviceCard = (deviceSn, deviceName) => {
+    if (!deviceSn) {
+      return null;
+    }
+    const safeSn = escapeSelector(deviceSn);
+    const existing = document.querySelector(`.device-card[data-device-sn="${safeSn}"]`);
+    const rawName = String(deviceName || '').trim();
+    const nameLabel = normalizeDeviceName(rawName);
+    const searchText = normalizeText(`${deviceSn} ${rawName}`);
+
+    if (existing) {
+      existing.dataset.deviceName = rawName;
+      existing.dataset.deviceSearch = searchText;
+      const nameEl = existing.querySelector('.device-name');
+      if (nameEl) {
+        nameEl.textContent = nameLabel;
+      }
+      return existing;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'device-card';
+    card.dataset.deviceSn = deviceSn;
+    card.dataset.deviceName = rawName;
+    card.dataset.deviceSearch = searchText;
+
+    const codeEl = document.createElement('div');
+    codeEl.className = 'device-code';
+    codeEl.textContent = deviceSn;
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'device-name';
+    nameEl.textContent = nameLabel;
+
+    card.appendChild(codeEl);
+    card.appendChild(nameEl);
+    return card;
+  };
+
+  const showManualMapping = () => {
+    setVisibility(manualMappingForm, true);
+    setVisibility(manualMappingHint, true);
+    setVisibility(manualEmptyMessage, false);
   };
 
   let layoutHandle = null;
@@ -1019,7 +1497,8 @@ include __DIR__ . '/include/layout_top.php';
     summaryEl.textContent = `Showing ${filters.visibleProjects} projects | ${filters.visibleDevices} devices (of ${totalDevices})`;
   };
 
-  const applyFilters = () => {
+  const applyFilters = (options = {}) => {
+    const shouldLayout = options.layout !== false;
     const deviceTerm = normalizeText(deviceSearchInput ? deviceSearchInput.value : '');
     const projectTerm = normalizeText(projectSearchInput ? projectSearchInput.value : '');
     const hideEmpty = toggleEmptyInput ? toggleEmptyInput.checked : false;
@@ -1081,7 +1560,50 @@ include __DIR__ . '/include/layout_top.php';
       visibleProjects,
       visibleDevices,
     });
-    scheduleLayout();
+    if (shouldLayout) {
+      scheduleLayout();
+    }
+  };
+
+  const syncManualSelection = () => {
+    if (!manualDeviceSelect || !manualProjectSelect) {
+      return;
+    }
+    const option = manualDeviceSelect.options[manualDeviceSelect.selectedIndex];
+    if (!option) {
+      return;
+    }
+    const projectId = option.dataset.projectId || 'unassigned';
+    const safeProjectId = escapeSelector(projectId);
+    const exists = manualProjectSelect.querySelector(`option[value="${safeProjectId}"]`);
+    manualProjectSelect.value = exists ? projectId : 'unassigned';
+  };
+
+  const filterOnboardTable = () => {
+    if (!onboardTable) {
+      return;
+    }
+    const term = normalizeText(onboardSearchInput ? onboardSearchInput.value : '');
+    const rows = Array.from(onboardTable.querySelectorAll('tbody tr'));
+    let visible = 0;
+    let selected = 0;
+
+    rows.forEach((row) => {
+      const search = normalizeText(row.dataset.deviceSearch || '');
+      const match = term === '' || search.includes(term);
+      row.classList.toggle('is-hidden', !match);
+      if (match) {
+        visible += 1;
+        const checkbox = row.querySelector('.onboard-checkbox');
+        if (checkbox && checkbox.checked) {
+          selected += 1;
+        }
+      }
+    });
+
+    if (onboardSummary) {
+      onboardSummary.textContent = `Showing ${visible} of ${rows.length} | Selected ${selected}`;
+    }
   };
 
   if (fullscreenToggleBtn) {
@@ -1158,6 +1680,190 @@ include __DIR__ . '/include/layout_top.php';
       });
     }
 
+    if (manualDeviceSelect) {
+      manualDeviceSelect.addEventListener('change', syncManualSelection);
+      syncManualSelection();
+    }
+    if (manualApplyBtn) {
+      manualApplyBtn.addEventListener('click', () => {
+        if (!manualDeviceSelect || !manualProjectSelect) {
+          return;
+        }
+        const deviceSn = manualDeviceSelect.value || '';
+        const option = manualDeviceSelect.options[manualDeviceSelect.selectedIndex];
+        const deviceName = option ? (option.dataset.deviceName || '') : '';
+        const nextProjectId = manualProjectSelect.value || 'unassigned';
+        const prevProjectId = option ? (option.dataset.projectId || 'unassigned') : 'unassigned';
+
+        if (deviceSn === '' || nextProjectId === prevProjectId) {
+          return;
+        }
+
+        const jq = window.jQuery;
+        if (!jq || !jq.ajax) {
+          setStatus('Mapping save failed. Please try again.', 'error');
+          return;
+        }
+
+        manualApplyBtn.disabled = true;
+        const safeSn = escapeSelector(deviceSn);
+        const $item = jq(`.device-card[data-device-sn="${safeSn}"]`);
+        const $fromList = $item && $item.length ? $item.closest('.device-list') : null;
+        const $toList = jq(`.device-list[data-project-id="${escapeSelector(nextProjectId)}"]`);
+
+        if ($item && $item.length && $toList && $toList.length) {
+          $item.detach().appendTo($toList);
+        }
+
+        const request = saveMapping($item, {
+          ajax: 1,
+          action: 'update-mapping',
+          deviceSn: deviceSn,
+          deviceName: deviceName,
+          projectId: nextProjectId,
+          csrf: csrfToken,
+        }, $fromList, $toList);
+
+        if (request && request.always) {
+          request.always(() => {
+            manualApplyBtn.disabled = false;
+          });
+        } else {
+          manualApplyBtn.disabled = false;
+        }
+      });
+    }
+    if (onboardSearchInput) {
+      onboardSearchInput.addEventListener('input', filterOnboardTable);
+    }
+    if (onboardSelectAll) {
+      onboardSelectAll.addEventListener('change', () => {
+        const rows = onboardTable ? Array.from(onboardTable.querySelectorAll('tbody tr')) : [];
+        rows.forEach((row) => {
+          if (row.classList.contains('is-hidden')) {
+            return;
+          }
+          const checkbox = row.querySelector('.onboard-checkbox');
+          if (checkbox) {
+            checkbox.checked = onboardSelectAll.checked;
+          }
+        });
+        filterOnboardTable();
+      });
+    }
+    if (onboardTable) {
+      onboardTable.addEventListener('change', (event) => {
+        const target = event.target;
+        if (target && target.classList.contains('onboard-checkbox')) {
+          filterOnboardTable();
+        }
+      });
+    }
+    if (onboardSubmitBtn) {
+      onboardSubmitBtn.addEventListener('click', () => {
+        if (!onboardTable) {
+          return;
+        }
+        const rows = Array.from(onboardTable.querySelectorAll('tbody tr'));
+        const selected = rows.filter((row) => {
+          const checkbox = row.querySelector('.onboard-checkbox');
+          return checkbox && checkbox.checked;
+        });
+        if (!selected.length) {
+          setStatus('Select devices to onboard.', 'error');
+          return;
+        }
+        const devices = selected.map((row) => {
+          return {
+            deviceSn: row.dataset.deviceSn || '',
+            deviceName: row.dataset.deviceName || '',
+          };
+        }).filter((row) => row.deviceSn !== '');
+
+        if (!devices.length) {
+          setStatus('Select devices to onboard.', 'error');
+          return;
+        }
+
+        const jq = window.jQuery;
+        if (!jq || !jq.ajax) {
+          setStatus('Onboarding failed. Please try again.', 'error');
+          return;
+        }
+
+        onboardSubmitBtn.disabled = true;
+        setStatus('Onboarding devices...', 'loading');
+        jq.ajax({
+          url: baseUrl,
+          method: 'POST',
+          dataType: 'json',
+          data: {
+            ajax: 1,
+            action: 'onboard-devices',
+            csrf: csrfToken,
+            devices: JSON.stringify(devices),
+          },
+        })
+          .done((response) => {
+            if (response && response.ok) {
+              const inserted = Number(response.inserted || 0);
+              const message = inserted
+                ? `Onboarded ${inserted} device(s).`
+                : 'Devices already onboarded.';
+              setStatus(message, 'success');
+              const unassignedList = document.querySelector('.device-list[data-project-id="unassigned"]');
+              const $unassignedList = jq && unassignedList ? jq(unassignedList) : null;
+
+              selected.forEach((row) => {
+                const deviceSn = row.dataset.deviceSn || '';
+                const deviceName = row.dataset.deviceName || '';
+                if (deviceSn === '') {
+                  row.remove();
+                  return;
+                }
+                const card = ensureDeviceCard(deviceSn, deviceName);
+                if (card && unassignedList && !card.closest('.device-list')) {
+                  unassignedList.appendChild(card);
+                }
+                ensureManualOption(deviceSn, deviceName);
+                row.remove();
+              });
+
+              if ($unassignedList) {
+                refreshLaneState($unassignedList);
+              }
+              showManualMapping();
+              if (manualDeviceSelect && manualDeviceSelect.options.length && manualDeviceSelect.selectedIndex < 0) {
+                manualDeviceSelect.selectedIndex = 0;
+              }
+              syncManualSelection();
+              applyFilters({ layout: false });
+              filterOnboardTable();
+
+              if (onboardSelectAll) {
+                onboardSelectAll.checked = false;
+                onboardSelectAll.indeterminate = false;
+              }
+              if (onboardTable) {
+                const remainingRows = onboardTable.querySelectorAll('tbody tr').length;
+                const hasRows = remainingRows > 0;
+                setVisibility(onboardControls, hasRows);
+                setVisibility(onboardEmptyMessage, !hasRows);
+              }
+            } else {
+              const message = response && response.message ? response.message : 'Unable to onboard devices.';
+              setStatus(message, 'error');
+            }
+          })
+          .fail(() => {
+            setStatus('Unable to onboard devices.', 'error');
+          })
+          .always(() => {
+            onboardSubmitBtn.disabled = false;
+          });
+      });
+    }
+
     document.addEventListener('click', (event) => {
       const toggle = event.target.closest('.lane-toggle');
       if (!toggle) {
@@ -1173,6 +1879,7 @@ include __DIR__ . '/include/layout_top.php';
     });
 
     applyFilters();
+    filterOnboardTable();
 
     window.addEventListener('resize', scheduleLayout);
   };
@@ -1191,14 +1898,21 @@ include __DIR__ . '/include/layout_top.php';
   const saveMapping = ($item, payload, $fromList, $toList) => {
     const jq = window.jQuery;
     if (!jq || !jq.ajax) {
-      setStatus('Mapping save failed. Please reload the page.', 'error');
-      return;
+      setStatus('Mapping save failed. Please try again.', 'error');
+      return null;
     }
-    $item.addClass('is-saving');
+    const hasItem = $item && $item.length;
+    const deviceSn = hasItem ? $item.data('device-sn') : (payload.deviceSn || '');
+    const fromProjectId = $fromList && $fromList.length ? ($fromList.data('project-id') || 'unassigned') : 'unassigned';
+    const toProjectId = $toList && $toList.length ? ($toList.data('project-id') || 'unassigned') : (payload.projectId || 'unassigned');
+
+    if (hasItem) {
+      $item.addClass('is-saving');
+    }
     refreshLaneState($fromList);
     refreshLaneState($toList);
     setStatus('Saving mapping...', 'loading');
-    jq.ajax({
+    const request = jq.ajax({
       url: baseUrl,
       method: 'POST',
       dataType: 'json',
@@ -1209,28 +1923,35 @@ include __DIR__ . '/include/layout_top.php';
           setStatus('Mapping saved.', 'success');
           refreshLaneState($fromList);
           refreshLaneState($toList);
+          updateSelectForDevice(deviceSn, toProjectId);
         } else {
           const message = response && response.message ? response.message : 'Unable to save mapping.';
           setStatus(message, 'error');
-          if ($fromList && $fromList.length) {
+          if (hasItem && $fromList && $fromList.length) {
             $item.detach().appendTo($fromList);
             refreshLaneState($fromList);
             refreshLaneState($toList);
           }
+          updateSelectForDevice(deviceSn, fromProjectId);
         }
       })
       .fail(() => {
         setStatus('Unable to save mapping.', 'error');
-        if ($fromList && $fromList.length) {
+        if (hasItem && $fromList && $fromList.length) {
           $item.detach().appendTo($fromList);
           refreshLaneState($fromList);
           refreshLaneState($toList);
         }
+        updateSelectForDevice(deviceSn, fromProjectId);
       })
       .always(() => {
-        $item.removeClass('is-saving');
-        applyFilters();
+        if (hasItem) {
+          $item.removeClass('is-saving');
+        }
+        applyFilters({ layout: false });
       });
+
+    return request;
   };
 
   const initBoard = () => {
@@ -1258,7 +1979,6 @@ include __DIR__ . '/include/layout_top.php';
           boardEl.classList.remove('is-dragging');
         }
         jq('.device-lane').removeClass('is-drop-target');
-        scheduleLayout();
       },
       over: function () {
         jq(this).closest('.device-lane').addClass('is-drop-target');
@@ -1287,7 +2007,6 @@ include __DIR__ . '/include/layout_top.php';
           projectId: projectId,
           csrf: csrfToken,
         }, $fromList, $toList);
-        applyFilters();
       },
     }).disableSelection();
     return true;
