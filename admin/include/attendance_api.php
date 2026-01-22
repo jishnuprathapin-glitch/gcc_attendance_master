@@ -103,6 +103,91 @@ function attendance_api_get(string $path, array $query = [], int $timeoutSeconds
     ];
 }
 
+function attendance_api_post_json(string $path, array $payload, int $timeoutSeconds = 8): array {
+    $base = attendance_api_base();
+    $path = '/' . ltrim($path, '/');
+    $url = $base . $path;
+
+    $body = json_encode($payload);
+    if ($body === false) {
+        return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'json_encode_failed', 'url' => $url];
+    }
+
+    $responseBody = null;
+    $status = null;
+    $error = null;
+
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        if ($ch === false) {
+            return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'curl_init_failed', 'url' => $url];
+        }
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeoutSeconds);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $timeoutSeconds);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Accept: application/json',
+            'Content-Type: application/json',
+        ]);
+        $responseBody = curl_exec($ch);
+        if ($responseBody === false) {
+            $error = curl_error($ch);
+        }
+        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+    } else {
+        $context = stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'timeout' => $timeoutSeconds,
+                'header' => "Accept: application/json\r\nContent-Type: application/json\r\n",
+                'content' => $body,
+            ],
+        ]);
+        $responseBody = @file_get_contents($url, false, $context);
+        if ($responseBody === false) {
+            $error = 'request_failed';
+        } elseif (isset($http_response_header) && is_array($http_response_header)) {
+            foreach ($http_response_header as $line) {
+                if (preg_match('/HTTP\/\S+\s+(\d+)/', $line, $matches)) {
+                    $status = (int) $matches[1];
+                    break;
+                }
+            }
+        }
+    }
+
+    if ($error !== null) {
+        return ['ok' => false, 'status' => $status, 'data' => null, 'error' => $error, 'url' => $url];
+    }
+
+    $data = null;
+    $trimmed = trim((string) $responseBody);
+    if ($trimmed !== '') {
+        $data = json_decode($trimmed, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            return [
+                'ok' => false,
+                'status' => $status,
+                'data' => null,
+                'error' => 'invalid_json_response',
+                'url' => $url,
+            ];
+        }
+    }
+
+    $ok = ($status === null || ($status >= 200 && $status < 300));
+    return [
+        'ok' => $ok,
+        'status' => $status,
+        'data' => $data,
+        'error' => $ok ? null : 'http_error',
+        'url' => $url,
+    ];
+}
+
 function employee_attendance_api_base(): string {
     $base = getenv('EMPLOYEE_ATTENDANCE_API_BASE');
     if (!$base) {

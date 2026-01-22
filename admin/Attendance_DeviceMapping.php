@@ -1,8 +1,85 @@
 <?php
 
 require __DIR__ . '/include/bootstrap.php';
+require __DIR__ . '/include/attendance_api.php';
 
 $page_title = 'Device Project Mapping';
+
+function format_iso8601(?string $value): ?string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    $dt = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $value);
+    if (!$dt) {
+        try {
+            $dt = new DateTimeImmutable($value);
+        } catch (Exception $e) {
+            return null;
+        }
+    }
+    return $dt->format(DATE_ATOM);
+}
+
+function load_device_mapping_row(mysqli $bd, string $deviceSn): ?array {
+    $stmt = $bd->prepare(
+        'SELECT device_sn, device_name, project_id, created_at, updated_at ' .
+        'FROM gcc_attendance_master.device_project_map WHERE device_sn = ?'
+    );
+    if (!$stmt) {
+        return null;
+    }
+    $stmt->bind_param('s', $deviceSn);
+    if (!$stmt->execute()) {
+        $stmt->close();
+        return null;
+    }
+    $stmt->bind_result($sn, $name, $projectId, $createdAt, $updatedAt);
+    if (!$stmt->fetch()) {
+        $stmt->close();
+        return null;
+    }
+    $stmt->close();
+
+    return [
+        'device_sn' => $sn,
+        'device_name' => $name,
+        'project_id' => $projectId,
+        'created_at' => $createdAt,
+        'updated_at' => $updatedAt,
+    ];
+}
+
+function build_device_map_sync_row(array $row): ?array {
+    $deviceSn = trim((string) ($row['device_sn'] ?? ''));
+    if ($deviceSn === '') {
+        return null;
+    }
+    $createdAt = format_iso8601($row['created_at'] ?? null);
+    if ($createdAt === null) {
+        $createdAt = gmdate(DATE_ATOM);
+    }
+
+    $payload = [
+        'deviceSn' => $deviceSn,
+        'createdAt' => $createdAt,
+    ];
+
+    $deviceName = trim((string) ($row['device_name'] ?? ''));
+    if ($deviceName !== '') {
+        $payload['deviceName'] = $deviceName;
+    }
+    if (array_key_exists('project_id', $row) && $row['project_id'] !== null) {
+        $payload['projectId'] = (int) $row['project_id'];
+    }
+
+    $updatedAt = format_iso8601($row['updated_at'] ?? null);
+    if ($updatedAt !== null) {
+        $payload['updatedAt'] = $updatedAt;
+    }
+
+    return $payload;
+}
 
 function json_response(array $payload): void {
     header('Content-Type: application/json; charset=utf-8');
@@ -80,7 +157,10 @@ if ($isAjax && $action === 'update-mapping') {
             }
             $stmt->bind_param('is', $projectId, $deviceSn);
         }
-        $stmt->execute();
+        if (!$stmt->execute()) {
+            $stmt->close();
+            json_response(['ok' => false, 'message' => 'Unable to update mapping.']);
+        }
         $stmt->close();
     } else {
         if ($projectId === null) {
@@ -102,14 +182,35 @@ if ($isAjax && $action === 'update-mapping') {
             }
             $stmt->bind_param('ssi', $deviceSn, $deviceName, $projectId);
         }
-        $stmt->execute();
+        if (!$stmt->execute()) {
+            $stmt->close();
+            json_response(['ok' => false, 'message' => 'Unable to save mapping.']);
+        }
         $stmt->close();
+    }
+
+    $syncPayload = null;
+    $syncResult = null;
+    $syncError = null;
+    $row = load_device_mapping_row($bd, $deviceSn);
+    if (is_array($row)) {
+        $syncPayload = build_device_map_sync_row($row);
+    }
+    if ($syncPayload) {
+        $syncResult = attendance_api_post_json('/device-project-map/upsert', [$syncPayload], 10);
+    } else {
+        $syncError = 'sync_payload_unavailable';
     }
 
     json_response([
         'ok' => true,
         'deviceSn' => $deviceSn,
         'projectId' => $projectId,
+        'sync' => [
+            'ok' => $syncResult['ok'] ?? false,
+            'status' => $syncResult['status'] ?? null,
+            'error' => $syncResult['error'] ?? $syncError,
+        ],
     ]);
 }
 
