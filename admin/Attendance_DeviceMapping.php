@@ -1538,6 +1538,7 @@ include __DIR__ . '/include/layout_top.php';
     let visibleDevices = 0;
 
     lanes.forEach((lane) => {
+      const isUnassigned = (lane.dataset.projectId || '') === 'unassigned';
       const label = normalizeText(lane.dataset.projectLabel || '');
       const projectMatch = projectTerm === '' || label.includes(projectTerm);
       const list = lane.querySelector('.device-list');
@@ -1556,7 +1557,7 @@ include __DIR__ . '/include/layout_top.php';
       const hasAny = cards.length > 0;
       const showByDevice = deviceTerm === '' ? true : hasVisible;
       const showByEmpty = hideEmpty ? hasAny : true;
-      const shouldShow = projectMatch && showByDevice && showByEmpty;
+      const shouldShow = isUnassigned ? true : (projectMatch && showByDevice && showByEmpty);
       lane.classList.toggle('is-filtered-out', !shouldShow);
 
       if (list) {
