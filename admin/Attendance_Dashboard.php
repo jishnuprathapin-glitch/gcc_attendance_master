@@ -107,6 +107,28 @@ function normalize_bool_flag($value): ?bool {
     return null;
 }
 
+function format_name_with_code(?string $name, ?string $code, string $fallback): string {
+    $name = trim((string) $name);
+    $code = trim((string) $code);
+    if ($name !== '' && $code !== '') {
+        return $name . ' (' . $code . ')';
+    }
+    if ($name !== '') {
+        return $name;
+    }
+    if ($code !== '') {
+        return $code;
+    }
+    return $fallback;
+}
+
+function format_yes_no(?bool $value): string {
+    if ($value === null) {
+        return 'n/a';
+    }
+    return $value ? 'Yes' : 'No';
+}
+
 function build_project_device_summary(array $deviceCounts, array $deviceMap, int $limit = 3): array {
     $projectCounts = [];
     foreach ($deviceCounts as $sn => $count) {
@@ -866,9 +888,19 @@ function load_hrms_active_employees(): array {
 function build_hrms_summary(string $employeeCode, string $startDate, string $endDate): array {
     $summary = [
         'employeeName' => null,
+        'employeeCode' => $employeeCode !== '' ? $employeeCode : null,
+        'companyCode' => null,
         'department' => null,
+        'departmentCode' => null,
         'designation' => null,
+        'designationCode' => null,
         'status' => null,
+        'workTypeCode' => null,
+        'workTypeDescription' => null,
+        'todayWorking' => null,
+        'onEleave' => null,
+        'leaveCode' => null,
+        'leaveDescription' => null,
         'attendanceDays' => 0,
         'attendanceError' => null,
         'leaveDays' => 0,
@@ -891,13 +923,36 @@ function build_hrms_summary(string $employeeCode, string $startDate, string $end
     $hrmsData = $hrmsResult['data'];
     $employee = $hrmsData['employee'] ?? [];
     if (is_array($employee)) {
+        $employeeCodeValue = trim((string) ($employee['EMP_CODE']
+            ?? $employee['empCode']
+            ?? $employee['employeeCode']
+            ?? $employee['code']
+            ?? ''));
+        if ($employeeCodeValue !== '') {
+            $summary['employeeCode'] = $employeeCodeValue;
+        }
         $employeeName = trim((string) ($employee['EMP_NAME'] ?? ''));
         $summary['employeeName'] = $employeeName !== '' ? $employeeName : $employeeCode;
+        $companyCode = trim((string) ($employee['EMP_COMPCD']
+            ?? $employee['empCompanyCode']
+            ?? $employee['companyCode']
+            ?? ''));
+        $summary['companyCode'] = $companyCode !== '' ? $companyCode : null;
+        $departmentCode = trim((string) ($employee['EMP_DEPT_CD']
+            ?? $employee['empDeptCode']
+            ?? $employee['departmentCode']
+            ?? ''));
+        $summary['departmentCode'] = $departmentCode !== '' ? $departmentCode : null;
         $department = trim((string) ($employee['DEPT_NAME'] ?? ''));
         if ($department === '') {
             $department = trim((string) ($employee['EMP_DEPT_CD'] ?? ''));
         }
         $summary['department'] = $department !== '' ? $department : null;
+        $designationCode = trim((string) ($employee['EMP_DESG_CD']
+            ?? $employee['empDesgCode']
+            ?? $employee['designationCode']
+            ?? ''));
+        $summary['designationCode'] = $designationCode !== '' ? $designationCode : null;
         $designation = trim((string) ($employee['DESG_NAME'] ?? ''));
         if ($designation === '') {
             $designation = trim((string) ($employee['EMP_DESG_CD'] ?? ''));
@@ -905,6 +960,32 @@ function build_hrms_summary(string $employeeCode, string $startDate, string $end
         $summary['designation'] = $designation !== '' ? $designation : null;
         $status = trim((string) ($employee['EMP_STATUS'] ?? ''));
         $summary['status'] = $status !== '' ? $status : null;
+        $workTypeCode = trim((string) ($employee['TD_WT']
+            ?? $employee['workTypeCode']
+            ?? $employee['wtCode']
+            ?? ''));
+        $summary['workTypeCode'] = $workTypeCode !== '' ? $workTypeCode : null;
+        $workTypeDesc = trim((string) ($employee['WT_DESC']
+            ?? $employee['workTypeDescription']
+            ?? $employee['wtDesc']
+            ?? ''));
+        $summary['workTypeDescription'] = $workTypeDesc !== '' ? $workTypeDesc : null;
+        $summary['todayWorking'] = normalize_bool_flag($employee['TODAY_WORKING']
+            ?? $employee['todayWorking']
+            ?? null);
+        $summary['onEleave'] = normalize_bool_flag($employee['ON_ELEAVE']
+            ?? $employee['onEleave']
+            ?? $employee['onEL']
+            ?? null);
+        $leaveCode = trim((string) ($employee['LEAVE_CODE']
+            ?? $employee['leaveCode']
+            ?? ''));
+        $summary['leaveCode'] = $leaveCode !== '' ? $leaveCode : null;
+        $leaveDesc = trim((string) ($employee['LEAVE_DESC']
+            ?? $employee['leaveDescription']
+            ?? $employee['leaveDesc']
+            ?? ''));
+        $summary['leaveDescription'] = $leaveDesc !== '' ? $leaveDesc : null;
     }
 
     $localTz = null;
@@ -1394,6 +1475,10 @@ if ($isAjax && $ajaxSection === 'logged-badges') {
     $loggedBadgesCount = 0;
     $loggedBadgesNote = '';
     $loggedBadgesPage = max(1, $loggedBadgesPage);
+    $includeHrmsDetails = normalize_bool_flag($_GET['includeHrms'] ?? null);
+    if ($includeHrmsDetails === null) {
+        $includeHrmsDetails = true;
+    }
     if ($deviceScope === 'none') {
         $loggedBadgesOk = true;
         $loggedBadgesNote = $deviceScopeNote;
@@ -1402,7 +1487,7 @@ if ($isAjax && $ajaxSection === 'logged-badges') {
             $startDateParam,
             $endDateParam,
             $deviceSnParam,
-            true,
+            $includeHrmsDetails,
             $loggedBadgesPage,
             $loggedBadgesPageSize,
             false,
@@ -2009,9 +2094,19 @@ $deviceStatusMeta = $deviceScope === 'none'
 $hrmsError = null;
 $hrmsSummary = [
     'employeeName' => null,
+    'employeeCode' => null,
+    'companyCode' => null,
     'department' => null,
+    'departmentCode' => null,
     'designation' => null,
+    'designationCode' => null,
     'status' => null,
+    'workTypeCode' => null,
+    'workTypeDescription' => null,
+    'todayWorking' => null,
+    'onEleave' => null,
+    'leaveCode' => null,
+    'leaveDescription' => null,
     'attendanceDays' => 0,
     'leaveDays' => 0,
     'lastAttendance' => null,
@@ -2084,6 +2179,85 @@ include __DIR__ . '/include/layout_top.php';
   .filter-help {
     font-size: 12px;
     color: #6c757d;
+  }
+  .project-punches-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 12px;
+  }
+  .project-punches-count {
+    min-width: 54px;
+    height: 54px;
+    padding: 8px;
+    border-radius: 14px;
+    background: #f1f5f9;
+    border: 1px solid #d7e0ea;
+    color: #1b4f9a;
+    font-size: 22px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .project-punches-title {
+    font-weight: 600;
+  }
+  .project-punches-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+  .project-punches-item {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 10px;
+  }
+  .project-punches-item-title {
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+  .project-punches-item-counts {
+    font-size: 12px;
+    color: #6c757d;
+  }
+  .project-punches-bars {
+    display: grid;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .project-punches-metric {
+    display: grid;
+    gap: 4px;
+  }
+  .project-punches-metric-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #6c757d;
+  }
+  .project-punches-metric-value {
+    font-weight: 600;
+    color: #1f2937;
+  }
+  .project-punches-bar {
+    position: relative;
+    height: 6px;
+    border-radius: 999px;
+    background: #e9edf2;
+    overflow: hidden;
+  }
+  .project-punches-bar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    width: var(--bar-size, 0%);
+    background: var(--bar-color, #1b4f9a);
+    border-radius: inherit;
   }
 </style>
 
@@ -2203,6 +2377,23 @@ include __DIR__ . '/include/layout_top.php';
             </div>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div class="card mb-4 dash-card" style="animation-delay: 0.07s;">
+      <div class="card-header">
+        <h3 class="card-title">Projects with punches</h3>
+      </div>
+      <div class="card-body">
+        <div class="project-punches-summary">
+          <div id="activeDeviceReportCount" class="project-punches-count"><?= h($activeDeviceCountText) ?></div>
+          <div>
+            <div id="activeDeviceReportLabel" class="project-punches-title"><?= h($activeDeviceLabel) ?></div>
+            <div id="activeDeviceReportSub" class="text-muted small"></div>
+          </div>
+        </div>
+        <div id="activeDeviceReportChart" class="project-punches-grid d-none"></div>
+        <div id="activeDeviceReportMeta" class="text-muted small d-none"><?= h($activeDeviceMeta) ?></div>
       </div>
     </div>
 
@@ -2351,7 +2542,7 @@ include __DIR__ . '/include/layout_top.php';
               <input type="hidden" name="startDate" value="<?= h($startDate) ?>">
               <input type="hidden" name="endDate" value="<?= h($endDate) ?>">
               <input type="hidden" name="projectId" value="<?= h($projectId) ?>">
-              <input type="hidden" name="deviceSn" value="<?= h($deviceSnInput) ?>">
+              <input type="hidden" name="deviceSn" value="<?= h($deviceSnParam) ?>">
               <label class="sr-only" for="employeeCode">HRMS employee code</label>
               <div class="input-group">
                 <input id="employeeCode" name="employeeCode" class="form-control" value="<?= h($employeeCode) ?>" placeholder="HRMS employee code">
@@ -2370,12 +2561,70 @@ include __DIR__ . '/include/layout_top.php';
                   <?= h($hrmsError) ?>
                 </div>
               <?php else: ?>
+                <?php
+                  $employeeName = $hrmsSummary['employeeName'] ?? 'Employee';
+                  $employeeCodeLabel = trim((string) ($hrmsSummary['employeeCode'] ?? $employeeCode));
+                  $departmentDisplay = format_name_with_code(
+                      $hrmsSummary['department'] ?? '',
+                      $hrmsSummary['departmentCode'] ?? '',
+                      'Department n/a'
+                  );
+                  $designationDisplay = format_name_with_code(
+                      $hrmsSummary['designation'] ?? '',
+                      $hrmsSummary['designationCode'] ?? '',
+                      'Designation n/a'
+                  );
+                  $statusDisplay = $hrmsSummary['status'] ?? 'n/a';
+                  $companyDisplay = trim((string) ($hrmsSummary['companyCode'] ?? ''));
+                  if ($companyDisplay === '') {
+                      $companyDisplay = 'n/a';
+                  }
+                  $workTypeDisplay = format_name_with_code(
+                      $hrmsSummary['workTypeDescription'] ?? '',
+                      $hrmsSummary['workTypeCode'] ?? '',
+                      'n/a'
+                  );
+                  $todayWorkingDisplay = format_yes_no($hrmsSummary['todayWorking'] ?? null);
+                  $onEleaveDisplay = format_yes_no($hrmsSummary['onEleave'] ?? null);
+                  $leaveDisplay = format_name_with_code(
+                      $hrmsSummary['leaveDescription'] ?? '',
+                      $hrmsSummary['leaveCode'] ?? '',
+                      'n/a'
+                  );
+                ?>
                 <div class="mb-3">
-                  <div class="h5 mb-1"><?= h($hrmsSummary['employeeName'] ?? 'Employee') ?></div>
-                  <div class="text-muted">
-                    <?= h($hrmsSummary['department'] ?? 'Department n/a') ?> | <?= h($hrmsSummary['designation'] ?? 'Designation n/a') ?>
+                  <div class="h5 mb-1">
+                    <?= h($employeeName) ?>
+                    <?php if ($employeeCodeLabel !== ''): ?>
+                      <span class="text-muted small">(<?= h($employeeCodeLabel) ?>)</span>
+                    <?php endif; ?>
                   </div>
-                  <div class="text-muted">Status: <?= h($hrmsSummary['status'] ?? 'n/a') ?></div>
+                  <div class="text-muted">
+                    <?= h($departmentDisplay) ?> | <?= h($designationDisplay) ?>
+                  </div>
+                  <div class="text-muted">Status: <?= h($statusDisplay) ?></div>
+                </div>
+                <div class="row mb-2">
+                  <div class="col-md-4 col-6 mb-2">
+                    <div class="text-muted small">Company</div>
+                    <div class="h6 mb-0"><?= h($companyDisplay) ?></div>
+                  </div>
+                  <div class="col-md-4 col-6 mb-2">
+                    <div class="text-muted small">Work type</div>
+                    <div class="h6 mb-0"><?= h($workTypeDisplay) ?></div>
+                  </div>
+                  <div class="col-md-4 col-6 mb-2">
+                    <div class="text-muted small">Today working</div>
+                    <div class="h6 mb-0"><?= h($todayWorkingDisplay) ?></div>
+                  </div>
+                  <div class="col-md-4 col-6 mb-2">
+                    <div class="text-muted small">On leave</div>
+                    <div class="h6 mb-0"><?= h($onEleaveDisplay) ?></div>
+                  </div>
+                  <div class="col-md-4 col-6 mb-2">
+                    <div class="text-muted small">Leave type</div>
+                    <div class="h6 mb-0"><?= h($leaveDisplay) ?></div>
+                  </div>
                 </div>
                 <div class="row">
                   <div class="col-6 mb-3">
@@ -2399,6 +2648,19 @@ include __DIR__ . '/include/layout_top.php';
                   </div>
                 </div>
               <?php endif; ?>
+              <div class="border-top pt-3 mt-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <h6 class="mb-0">UTime punch details</h6>
+                  <span class="text-muted small">UTime API</span>
+                </div>
+                <div id="utimeSnapshotContent">
+                  <?php if ($employeeCode === ''): ?>
+                    <p class="text-muted mb-0">Enter an employee code above to load UTime punch details.</p>
+                  <?php else: ?>
+                    <p class="text-muted mb-0">Loading UTime details...</p>
+                  <?php endif; ?>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -2423,6 +2685,137 @@ include __DIR__ . '/include/layout_top.php';
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+    };
+    const formatNameWithCode = (name, code, fallback) => {
+      const cleanName = String(name ?? '').trim();
+      const cleanCode = String(code ?? '').trim();
+      if (cleanName && cleanCode) {
+        return `${cleanName} (${cleanCode})`;
+      }
+      if (cleanName) {
+        return cleanName;
+      }
+      if (cleanCode) {
+        return cleanCode;
+      }
+      return fallback;
+    };
+    const formatYesNo = (value) => {
+      if (value === true) {
+        return 'Yes';
+      }
+      if (value === false) {
+        return 'No';
+      }
+      return 'n/a';
+    };
+    const valueOrDash = (value) => {
+      const text = String(value ?? '').trim();
+      return text !== '' ? text : '-';
+    };
+    const updateProjectPunchesSummary = (labelText) => {
+      const countEl = document.getElementById('activeDeviceReportCount');
+      const titleEl = document.getElementById('activeDeviceReportLabel');
+      const subEl = document.getElementById('activeDeviceReportSub');
+      const rawLabel = String(labelText || '');
+      let count = '';
+      let title = rawLabel;
+      let sub = '';
+      const match = rawLabel.match(/^(\d+)\s+(.*)$/);
+      if (match) {
+        count = match[1];
+        title = match[2];
+      }
+      if (title.includes('(Devices/Employees:)')) {
+        title = title.replace('(Devices/Employees:)', '').trim();
+        sub = 'Devices / Employees';
+      }
+      if (countEl) {
+        countEl.textContent = count || '-';
+      }
+      if (titleEl) {
+        titleEl.textContent = title || 'Projects with punches';
+      }
+      if (subEl) {
+        subEl.textContent = sub;
+        subEl.classList.toggle('d-none', !sub);
+      }
+    };
+    const parseProjectPunchesMeta = (metaText) => {
+      const raw = String(metaText || '');
+      if (!raw || raw.includes('unavailable') || raw.includes('No devices')) {
+        return [];
+      }
+      const parts = raw.split(' | ');
+      const rows = [];
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (!trimmed) {
+          continue;
+        }
+        const match = trimmed.match(/^(.*)\s+(\d+)\/(\d+)$/);
+        if (!match) {
+          return [];
+        }
+        rows.push({
+          label: match[1].trim(),
+          devices: Number(match[2]),
+          employees: Number(match[3]),
+        });
+      }
+      return rows;
+    };
+    const renderProjectPunches = (metaText) => {
+      const chart = document.getElementById('activeDeviceReportChart');
+      const fallback = document.getElementById('activeDeviceReportMeta');
+      if (!chart) {
+        return;
+      }
+      chart.innerHTML = '';
+      const rows = parseProjectPunchesMeta(metaText);
+      if (!rows.length) {
+        chart.classList.add('d-none');
+        if (fallback) {
+          fallback.textContent = metaText || '';
+          fallback.classList.toggle('d-none', !(metaText || ''));
+        }
+        return;
+      }
+      const maxDevices = Math.max(...rows.map((row) => row.devices), 0);
+      const maxEmployees = Math.max(...rows.map((row) => row.employees), 0);
+      const fragment = document.createDocumentFragment();
+      rows.forEach((row) => {
+        const item = document.createElement('div');
+        item.className = 'project-punches-item';
+        const devicePct = maxDevices > 0 ? (row.devices / maxDevices) * 100 : 0;
+        const employeePct = maxEmployees > 0 ? (row.employees / maxEmployees) * 100 : 0;
+        item.innerHTML = `
+          <div class="project-punches-item-title">${escapeHtml(row.label)}</div>
+          <div class="project-punches-item-counts">${row.devices} / ${row.employees}</div>
+          <div class="project-punches-bars">
+            <div class="project-punches-metric">
+              <div class="project-punches-metric-label">
+                <span>Devices</span>
+                <span class="project-punches-metric-value">${row.devices}</span>
+              </div>
+              <div class="project-punches-bar" style="--bar-size:${devicePct.toFixed(1)}%; --bar-color:#1b4f9a"></div>
+            </div>
+            <div class="project-punches-metric">
+              <div class="project-punches-metric-label">
+                <span>Employees</span>
+                <span class="project-punches-metric-value">${row.employees}</span>
+              </div>
+              <div class="project-punches-bar" style="--bar-size:${employeePct.toFixed(1)}%; --bar-color:#2f855a"></div>
+            </div>
+          </div>
+        `;
+        fragment.appendChild(item);
+      });
+      chart.appendChild(fragment);
+      chart.classList.remove('d-none');
+      if (fallback) {
+        fallback.classList.add('d-none');
+      }
     };
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const formatMonthDay = (value) => {
@@ -2452,9 +2845,31 @@ include __DIR__ . '/include/layout_top.php';
       }
       const summary = hrms.summary || {};
       const employeeName = summary.employeeName || 'Employee';
-      const department = summary.department || 'Department n/a';
-      const designation = summary.designation || 'Designation n/a';
+      const employeeCode = String(summary.employeeCode ?? '').trim();
+      const departmentDisplay = formatNameWithCode(
+        summary.department,
+        summary.departmentCode,
+        'Department n/a'
+      );
+      const designationDisplay = formatNameWithCode(
+        summary.designation,
+        summary.designationCode,
+        'Designation n/a'
+      );
       const status = summary.status || 'n/a';
+      const companyDisplay = String(summary.companyCode ?? '').trim() || 'n/a';
+      const workTypeDisplay = formatNameWithCode(
+        summary.workTypeDescription,
+        summary.workTypeCode,
+        'n/a'
+      );
+      const todayWorkingText = formatYesNo(summary.todayWorking);
+      const onEleaveText = formatYesNo(summary.onEleave);
+      const leaveDisplay = formatNameWithCode(
+        summary.leaveDescription,
+        summary.leaveCode,
+        'n/a'
+      );
       const attendanceDays = summary.attendanceDays ?? 0;
       const attendanceError = summary.attendanceError || '';
       const leaveDays = summary.leaveDays ?? 0;
@@ -2463,11 +2878,36 @@ include __DIR__ . '/include/layout_top.php';
       const attendanceErrorHtml = attendanceError
         ? `<div class="text-warning small mt-1">${escapeHtml(attendanceError)}</div>`
         : '';
+      const employeeCodeHtml = employeeCode !== ''
+        ? `<span class="text-muted small">(${escapeHtml(employeeCode)})</span>`
+        : '';
       hrmsContent.innerHTML = `
         <div class="mb-3">
-          <div class="h5 mb-1">${escapeHtml(employeeName)}</div>
-          <div class="text-muted">${escapeHtml(department)} | ${escapeHtml(designation)}</div>
+          <div class="h5 mb-1">${escapeHtml(employeeName)} ${employeeCodeHtml}</div>
+          <div class="text-muted">${escapeHtml(departmentDisplay)} | ${escapeHtml(designationDisplay)}</div>
           <div class="text-muted">Status: ${escapeHtml(status)}</div>
+        </div>
+        <div class="row mb-2">
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Company</div>
+            <div class="h6 mb-0">${escapeHtml(companyDisplay)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Work type</div>
+            <div class="h6 mb-0">${escapeHtml(workTypeDisplay)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Today working</div>
+            <div class="h6 mb-0">${escapeHtml(todayWorkingText)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">On leave</div>
+            <div class="h6 mb-0">${escapeHtml(onEleaveText)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Leave type</div>
+            <div class="h6 mb-0">${escapeHtml(leaveDisplay)}</div>
+          </div>
         </div>
         <div class="row">
           <div class="col-6 mb-3">
@@ -2486,6 +2926,112 @@ include __DIR__ . '/include/layout_top.php';
           <div class="col-6">
             <div class="text-muted small">Holidays</div>
             <div class="h6 mb-0">${escapeHtml(holidayCount)}</div>
+          </div>
+        </div>
+      `;
+    };
+    const renderUtimeSnapshotState = (message) => {
+      const utimeContent = document.getElementById('utimeSnapshotContent');
+      if (!utimeContent) {
+        return;
+      }
+      utimeContent.innerHTML = `<p class="text-muted mb-0">${escapeHtml(message)}</p>`;
+    };
+    const renderUtimeSnapshot = (payload, hrmsSummary) => {
+      const utimeContent = document.getElementById('utimeSnapshotContent');
+      if (!utimeContent) {
+        return;
+      }
+      const data = payload || {};
+      if (data.ok === false) {
+        utimeContent.innerHTML = '<div class="alert alert-warning mb-0">Unable to load UTime details.</div>';
+        return;
+      }
+      const rows = Array.isArray(data.rows) ? data.rows : [];
+      if (!rows.length) {
+        const note = data.note || 'No UTime punches found in range.';
+        utimeContent.innerHTML = `<p class="text-muted mb-0">${escapeHtml(note)}</p>`;
+        return;
+      }
+      const row = rows[0] || {};
+      const summary = hrmsSummary || {};
+      const departmentDisplay = formatNameWithCode(
+        summary.department,
+        summary.departmentCode,
+        ''
+      );
+      const designationDisplay = formatNameWithCode(
+        summary.designation,
+        summary.designationCode,
+        ''
+      );
+      const badgeNumber = valueOrDash(row.badgeNumber);
+      const utimeName = valueOrDash(row.utimeName || row.name);
+      const hrmsName = valueOrDash(row.hrmsName || summary.employeeName);
+      const department = valueOrDash(row.department || departmentDisplay);
+      const designation = valueOrDash(row.designation || designationDisplay);
+      const firstLoginTime = valueOrDash(row.firstLoginTime);
+      const firstLoginDevice = valueOrDash(row.firstLoginDeviceSn);
+      const firstLoginProjectId = valueOrDash(row.firstLoginProjectId);
+      const firstLoginProjectName = valueOrDash(row.firstLoginProjectName);
+      const lastLoginTime = valueOrDash(row.lastLoginTime);
+      const lastLoginDevice = valueOrDash(row.lastLoginDeviceSn);
+      const lastLoginProjectId = valueOrDash(row.lastLoginProjectId);
+      const lastLoginProjectName = valueOrDash(row.lastLoginProjectName);
+
+      utimeContent.innerHTML = `
+        <div class="row">
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Employee Code (utime)</div>
+            <div class="h6 mb-0">${escapeHtml(badgeNumber)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Name (utime)</div>
+            <div class="h6 mb-0">${escapeHtml(utimeName)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Name (hrms)</div>
+            <div class="h6 mb-0">${escapeHtml(hrmsName)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Department (hrms)</div>
+            <div class="h6 mb-0">${escapeHtml(department)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Designation (hrms)</div>
+            <div class="h6 mb-0">${escapeHtml(designation)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">First login time (utime)</div>
+            <div class="h6 mb-0">${escapeHtml(firstLoginTime)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">First login device (utime)</div>
+            <div class="h6 mb-0">${escapeHtml(firstLoginDevice)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">FP Project ID</div>
+            <div class="h6 mb-0">${escapeHtml(firstLoginProjectId)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">FP project name</div>
+            <div class="h6 mb-0">${escapeHtml(firstLoginProjectName)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Last login time (utime)</div>
+            <div class="h6 mb-0">${escapeHtml(lastLoginTime)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">Last login device (utime)</div>
+            <div class="h6 mb-0">${escapeHtml(lastLoginDevice)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">LP project id</div>
+            <div class="h6 mb-0">${escapeHtml(lastLoginProjectId)}</div>
+          </div>
+          <div class="col-md-4 col-6 mb-2">
+            <div class="text-muted small">LP project name</div>
+            <div class="h6 mb-0">${escapeHtml(lastLoginProjectName)}</div>
           </div>
         </div>
       `;
@@ -2742,6 +3288,40 @@ include __DIR__ . '/include/layout_top.php';
     const hrmsButton = hrmsForm ? hrmsForm.querySelector('button[type="submit"]') : null;
     const hrmsContent = document.getElementById('hrmsSnapshotContent');
 
+    const fetchUtimeSnapshot = (code, hrmsSummary) => {
+      if (!hrmsForm) {
+        return;
+      }
+      const cleanCode = String(code ?? '').trim();
+      if (cleanCode === '') {
+        renderUtimeSnapshotState('Enter an employee code above to load UTime punch details.');
+        return;
+      }
+      renderUtimeSnapshotState('Loading UTime details...');
+      const formData = new FormData(hrmsForm);
+      formData.set('badgeNumber', cleanCode);
+      formData.set('page', '1');
+      formData.set('pageSize', '1');
+      formData.set('includeHrms', '0');
+      const utimeParams = new URLSearchParams(formData);
+      utimeParams.set('ajax', '1');
+      utimeParams.set('ajax_section', 'logged-badges');
+      const utimeUrl = baseUrl + '?' + utimeParams.toString();
+      fetch(utimeUrl, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          renderUtimeSnapshot((data && data.loggedBadges) || {}, hrmsSummary || {});
+        })
+        .catch(() => {
+          renderUtimeSnapshotState('Unable to load UTime details.');
+        });
+    };
+
     const fetchHrmsSnapshot = (code) => {
       if (!hrmsForm) {
         return;
@@ -2749,6 +3329,7 @@ include __DIR__ . '/include/layout_top.php';
       const cleanCode = String(code ?? '').trim();
       if (cleanCode === '') {
         renderHrmsSnapshot({ enabled: false });
+        renderUtimeSnapshotState('Enter an employee code above to load UTime punch details.');
         return;
       }
       const formData = new FormData(hrmsForm);
@@ -2771,12 +3352,15 @@ include __DIR__ . '/include/layout_top.php';
           return response.json();
         })
         .then((data) => {
-          renderHrmsSnapshot((data && data.hrms) || {});
+          const hrmsPayload = (data && data.hrms) || {};
+          renderHrmsSnapshot(hrmsPayload);
+          fetchUtimeSnapshot(cleanCode, hrmsPayload.summary || {});
         })
         .catch(() => {
           if (hrmsContent) {
             hrmsContent.innerHTML = '<div class="alert alert-warning mb-0">Unable to load HRMS details.</div>';
           }
+          fetchUtimeSnapshot(cleanCode, {});
         })
         .finally(() => {
           if (hrmsButton) {
@@ -2795,11 +3379,7 @@ include __DIR__ . '/include/layout_top.php';
 
       const employeeInput = hrmsForm.querySelector('#employeeCode');
       const initialCode = employeeInput ? String(employeeInput.value ?? '').trim() : '';
-      if (initialCode !== '') {
-        fetchHrmsSnapshot(initialCode);
-      } else {
-        renderHrmsSnapshot({ enabled: false });
-      }
+      fetchHrmsSnapshot(initialCode);
     }
 
     const baseParams = new URLSearchParams(window.location.search);
@@ -2848,6 +3428,8 @@ include __DIR__ . '/include/layout_top.php';
           setText('activeDeviceCount', activeDevices.activeDeviceCountText || '-');
           setText('activeDeviceLabel', activeDevices.activeDeviceLabel || 'Projects with punches');
           setText('activeDeviceMeta', activeDevices.activeDeviceMeta || '');
+          updateProjectPunchesSummary(activeDevices.activeDeviceLabel || 'Projects with punches');
+          renderProjectPunches(activeDevices.activeDeviceMeta || '');
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
           setPanelError('Project counts', errors.length > 0);
         })
@@ -2855,6 +3437,8 @@ include __DIR__ . '/include/layout_top.php';
           setText('activeDeviceCount', '-');
           setText('activeDeviceLabel', 'Projects with punches');
           setText('activeDeviceMeta', 'Project counts unavailable');
+          updateProjectPunchesSummary('Projects with punches');
+          renderProjectPunches('Project counts unavailable');
           setPanelError('Project counts', true);
         });
     };
@@ -3006,6 +3590,10 @@ include __DIR__ . '/include/layout_top.php';
     };
 
     renderLoggedBadges(initialLoggedBadges || {});
+    const initialLabelEl = document.getElementById('activeDeviceLabel');
+    const initialMetaEl = document.getElementById('activeDeviceMeta');
+    updateProjectPunchesSummary(initialLabelEl ? initialLabelEl.textContent : '');
+    renderProjectPunches(initialMetaEl ? initialMetaEl.textContent : '');
 
     fetchActiveDevices();
     fetchDeviceStatus();
