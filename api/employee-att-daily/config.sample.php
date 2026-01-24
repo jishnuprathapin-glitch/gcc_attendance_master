@@ -2,4 +2,5 @@
 return [
     'api_key' => 'change-me',
     'log_path' => __DIR__ . '/logs/employee_att_daily_sync.log',
+    'db_name' => 'gcc_attendance_master',
 ];

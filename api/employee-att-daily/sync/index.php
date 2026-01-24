@@ -356,6 +356,25 @@ function open_db(): mysqli
 
     mysqli_set_charset($bd, 'utf8mb4');
 
+    $config = load_config();
+    $dbName = '';
+    if (!empty($config['db_name'])) {
+        $dbName = (string) $config['db_name'];
+    }
+    if ($dbName === '') {
+        $envName = getenv('EMPLOYEE_ATT_DAILY_DB_NAME');
+        if (is_string($envName) && $envName !== '') {
+            $dbName = $envName;
+        }
+    }
+    if ($dbName !== '') {
+        if (!$bd->select_db($dbName)) {
+            log_message('db_select_failed', ['database' => $dbName, 'error' => $bd->error]);
+            throw new RuntimeException('Failed to select database.');
+        }
+        log_message('db_selected', ['database' => $dbName]);
+    }
+
     return $bd;
 }
 
