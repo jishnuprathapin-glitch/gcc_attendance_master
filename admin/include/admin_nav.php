@@ -2,6 +2,7 @@
 $links = [
     ['label' => 'Dashboard', 'path' => 'Attendance_Dashboard.php', 'icon' => 'fas fa-home', 'class' => 'btn-outline-primary'],
     ['label' => 'Employees', 'path' => 'Attendance_Employees.php', 'icon' => 'fas fa-users', 'class' => 'btn-outline-primary'],
+    ['label' => 'Monthly Attendance', 'path' => 'Attendance_AttendanceDaily.php', 'icon' => 'fas fa-calendar-alt', 'class' => 'btn-outline-primary'],
     ['label' => 'Device Mapping', 'path' => 'Attendance_DeviceMapping.php', 'icon' => 'fas fa-project-diagram', 'class' => 'btn-outline-primary'],
 ];
 ?>
