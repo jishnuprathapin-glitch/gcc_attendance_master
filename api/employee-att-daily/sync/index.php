@@ -5,6 +5,7 @@ declare(strict_types=1);
 header('Content-Type: application/json');
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+    log_message('method_not_allowed', ['method' => $_SERVER['REQUEST_METHOD'] ?? '']);
     respond(405, ['error' => 'Method not allowed.']);
 }
 
@@ -12,56 +13,80 @@ $headers = get_request_headers();
 $apiKey = trim((string) ($headers['x-api-key'] ?? ''));
 $expectedApiKey = resolve_api_key();
 if ($expectedApiKey === '' || !hash_equals($expectedApiKey, $apiKey)) {
+    log_message('unauthorized', [
+        'has_key' => $apiKey !== '',
+        'remote' => $_SERVER['REMOTE_ADDR'] ?? '',
+    ]);
     respond(401, ['error' => 'Unauthorized.']);
 }
 
 $rawBody = file_get_contents('php://input');
 if ($rawBody === false || trim($rawBody) === '') {
+    log_message('empty_body', ['content_length' => $_SERVER['CONTENT_LENGTH'] ?? null]);
     respond(400, ['error' => 'Empty request body.']);
 }
 
 $payload = json_decode($rawBody, true);
 if (!is_array($payload)) {
+    log_message('invalid_json', [
+        'error' => json_last_error_msg(),
+        'body_length' => strlen($rawBody),
+    ]);
     respond(400, ['error' => 'Invalid JSON payload.']);
 }
 
-if (($payload['source'] ?? '') !== 'EmployeeAttDaily') {
+$source = (string) ($payload['source'] ?? '');
+if ($source !== 'EmployeeAttDaily') {
+    log_message('invalid_source', ['source' => $source]);
     respond(400, ['error' => 'Invalid source.']);
 }
 
 $sentAt = $payload['sentAt'] ?? null;
 if (!is_string($sentAt) || $sentAt === '') {
+    log_message('missing_sent_at');
     respond(400, ['error' => 'Missing sentAt.']);
 }
 
 $changes = $payload['changes'] ?? null;
 if (!is_array($changes)) {
+    log_message('missing_changes', ['type' => gettype($changes)]);
     respond(400, ['error' => 'Missing changes array.']);
 }
+
+log_message('sync_received', ['source' => $source, 'changes' => count($changes)]);
 
 $normalizedChanges = [];
 foreach ($changes as $index => $change) {
     if (!is_array($change)) {
+        log_message('invalid_change_item', ['index' => $index, 'type' => gettype($change)]);
         respond(400, ['error' => 'Invalid change item.', 'index' => $index]);
     }
 
     $changeId = normalize_change_id($change['changeId'] ?? null);
     if ($changeId === '') {
+        log_message('missing_change_id', ['index' => $index]);
         respond(400, ['error' => 'Missing changeId.', 'index' => $index]);
     }
 
     $empCode = trim((string) ($change['empCode'] ?? ''));
     if ($empCode === '') {
+        log_message('missing_emp_code', ['index' => $index, 'change_id' => $changeId]);
         respond(400, ['error' => 'Missing empCode.', 'index' => $index]);
     }
 
     $job = trim((string) ($change['job'] ?? ''));
     if ($job === '') {
+        log_message('missing_job', ['index' => $index, 'change_id' => $changeId]);
         respond(400, ['error' => 'Missing job.', 'index' => $index]);
     }
 
     $attDate = trim((string) ($change['attDate'] ?? ''));
     if (!is_valid_att_date($attDate)) {
+        log_message('invalid_att_date', [
+            'index' => $index,
+            'change_id' => $changeId,
+            'att_date' => $attDate,
+        ]);
         respond(400, ['error' => 'Invalid attDate.', 'index' => $index]);
     }
 
@@ -92,6 +117,7 @@ foreach ($changes as $index => $change) {
 }
 
 if (count($normalizedChanges) === 0) {
+    log_message('sync_empty_changes', ['source' => $source]);
     respond(200, ['received' => 0, 'applied' => 0, 'skipped' => 0, 'errors' => 0]);
 }
 
@@ -101,9 +127,10 @@ try {
 
     $bd->begin_transaction();
 
-    $stmtInboxExists = $bd->prepare('SELECT change_id FROM employee_att_daily_inbox WHERE change_id = ?');
-    $stmtInboxInsert = $bd->prepare('INSERT INTO employee_att_daily_inbox (change_id, status, error_message) VALUES (?, ?, ?)');
-    $stmtUpsert = $bd->prepare(
+    $stmtInboxExists = prepare_statement($bd, 'SELECT change_id FROM employee_att_daily_inbox WHERE change_id = ?', 'inbox_exists');
+    $stmtInboxInsert = prepare_statement($bd, 'INSERT INTO employee_att_daily_inbox (change_id, status, error_message) VALUES (?, ?, ?)', 'inbox_insert');
+    $stmtUpsert = prepare_statement(
+        $bd,
         'INSERT INTO employee_att_daily ' .
         '(emp_code, job, att_date, work_hours, work_code, pending_leave, pending_leave_code, pending_leave_doc_no, is_deleted, last_change_id) ' .
         'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
@@ -115,9 +142,10 @@ try {
         'pending_leave_doc_no = IF(VALUES(last_change_id) > last_change_id, VALUES(pending_leave_doc_no), pending_leave_doc_no), ' .
         'is_deleted = IF(VALUES(last_change_id) > last_change_id, VALUES(is_deleted), is_deleted), ' .
         'last_change_id = GREATEST(last_change_id, VALUES(last_change_id)), ' .
-        'updated_at = IF(VALUES(last_change_id) > last_change_id, CURRENT_TIMESTAMP, updated_at)'
+        'updated_at = IF(VALUES(last_change_id) > last_change_id, CURRENT_TIMESTAMP, updated_at)',
+        'upsert'
     );
-    $stmtSelectLast = $bd->prepare('SELECT last_change_id FROM employee_att_daily WHERE emp_code = ? AND job = ? AND att_date = ?');
+    $stmtSelectLast = prepare_statement($bd, 'SELECT last_change_id FROM employee_att_daily WHERE emp_code = ? AND job = ? AND att_date = ?', 'select_last_change');
 
     $summary = ['received' => count($normalizedChanges), 'applied' => 0, 'skipped' => 0, 'errors' => 0];
     $fatal = false;
@@ -126,17 +154,22 @@ try {
         $changeId = $change['change_id'];
 
         try {
-            $stmtInboxExists->bind_param('s', $changeId);
-            $stmtInboxExists->execute();
+            if (!$stmtInboxExists->bind_param('s', $changeId)) {
+                throw new RuntimeException('Inbox exists bind failed: ' . $stmtInboxExists->error);
+            }
+            if (!$stmtInboxExists->execute()) {
+                throw new RuntimeException('Inbox exists execute failed: ' . $stmtInboxExists->error);
+            }
             $stmtInboxExists->store_result();
             if ($stmtInboxExists->num_rows > 0) {
                 $stmtInboxExists->free_result();
                 $summary['skipped']++;
+                log_message('change_duplicate', ['change_id' => $changeId]);
                 continue;
             }
             $stmtInboxExists->free_result();
 
-            $stmtUpsert->bind_param(
+            if (!$stmtUpsert->bind_param(
                 'ssssssssss',
                 $change['emp_code'],
                 $change['job'],
@@ -148,11 +181,19 @@ try {
                 $change['pending_leave_doc_no'],
                 $change['is_deleted'],
                 $changeId
-            );
-            $stmtUpsert->execute();
+            )) {
+                throw new RuntimeException('Upsert bind failed: ' . $stmtUpsert->error);
+            }
+            if (!$stmtUpsert->execute()) {
+                throw new RuntimeException('Upsert execute failed: ' . $stmtUpsert->error);
+            }
 
-            $stmtSelectLast->bind_param('sss', $change['emp_code'], $change['job'], $change['att_date']);
-            $stmtSelectLast->execute();
+            if (!$stmtSelectLast->bind_param('sss', $change['emp_code'], $change['job'], $change['att_date'])) {
+                throw new RuntimeException('Select last bind failed: ' . $stmtSelectLast->error);
+            }
+            if (!$stmtSelectLast->execute()) {
+                throw new RuntimeException('Select last execute failed: ' . $stmtSelectLast->error);
+            }
             $stmtSelectLast->bind_result($lastChangeId);
 
             $applied = false;
@@ -165,21 +206,44 @@ try {
 
             $status = $applied ? 'applied' : 'skipped';
             $summary[$applied ? 'applied' : 'skipped']++;
+            if (!$applied) {
+                log_message('change_skipped_outdated', [
+                    'change_id' => $changeId,
+                    'last_change_id' => $lastChangeId,
+                    'emp_code' => $change['emp_code'],
+                    'job' => $change['job'],
+                    'att_date' => $change['att_date'],
+                ]);
+            }
 
             $errorMessage = null;
-            $stmtInboxInsert->bind_param('sss', $changeId, $status, $errorMessage);
-            $stmtInboxInsert->execute();
+            if (!$stmtInboxInsert->bind_param('sss', $changeId, $status, $errorMessage)) {
+                throw new RuntimeException('Inbox insert bind failed: ' . $stmtInboxInsert->error);
+            }
+            if (!$stmtInboxInsert->execute()) {
+                throw new RuntimeException('Inbox insert execute failed: ' . $stmtInboxInsert->error);
+            }
         } catch (Throwable $e) {
             $summary['errors']++;
             $message = truncate_error($e->getMessage());
-            error_log('employee_att_daily sync error changeId=' . $changeId . ': ' . $message);
+            log_message('change_error', [
+                'change_id' => $changeId,
+                'error' => $message,
+            ]);
 
             try {
                 $status = 'error';
-                $stmtInboxInsert->bind_param('sss', $changeId, $status, $message);
-                $stmtInboxInsert->execute();
+                if (!$stmtInboxInsert->bind_param('sss', $changeId, $status, $message)) {
+                    throw new RuntimeException('Inbox insert bind failed: ' . $stmtInboxInsert->error);
+                }
+                if (!$stmtInboxInsert->execute()) {
+                    throw new RuntimeException('Inbox insert execute failed: ' . $stmtInboxInsert->error);
+                }
             } catch (Throwable $inner) {
-                error_log('employee_att_daily sync inbox error changeId=' . $changeId . ': ' . $inner->getMessage());
+                log_message('inbox_error', [
+                    'change_id' => $changeId,
+                    'error' => truncate_error($inner->getMessage()),
+                ]);
                 $fatal = true;
                 break;
             }
@@ -188,13 +252,15 @@ try {
 
     if ($fatal) {
         $bd->rollback();
+        log_message('sync_failed', ['reason' => 'inbox_error']);
         respond(500, ['error' => 'Failed to process batch.']);
     }
 
     $bd->commit();
+    log_message('sync_complete', $summary);
     respond(200, $summary);
 } catch (Throwable $e) {
-    error_log('employee_att_daily sync fatal error: ' . $e->getMessage());
+    log_message('sync_fatal', ['error' => truncate_error($e->getMessage())]);
     if (isset($bd) && $bd instanceof mysqli && $bd->errno === 0) {
         $bd->rollback();
     }
@@ -223,14 +289,30 @@ function get_request_headers(): array
     return $lower;
 }
 
+function load_config(): array
+{
+    static $config = null;
+    if ($config !== null) {
+        return $config;
+    }
+
+    $configPath = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'config.php';
+    $config = [];
+    if (is_file($configPath)) {
+        $loaded = require $configPath;
+        if (is_array($loaded)) {
+            $config = $loaded;
+        }
+    }
+
+    return $config;
+}
+
 function resolve_api_key(): string
 {
-    $configPath = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'config.php';
-    if (is_file($configPath)) {
-        $config = require $configPath;
-        if (is_array($config) && !empty($config['api_key'])) {
-            return (string) $config['api_key'];
-        }
+    $config = load_config();
+    if (!empty($config['api_key'])) {
+        return (string) $config['api_key'];
     }
 
     $envKey = getenv('EMPLOYEE_ATT_DAILY_API_KEY');
@@ -239,6 +321,21 @@ function resolve_api_key(): string
     }
 
     return '';
+}
+
+function resolve_log_path(): string
+{
+    $config = load_config();
+    if (!empty($config['log_path'])) {
+        return (string) $config['log_path'];
+    }
+
+    $envPath = getenv('EMPLOYEE_ATT_DAILY_LOG_PATH');
+    if (is_string($envPath) && $envPath !== '') {
+        return $envPath;
+    }
+
+    return dirname(__DIR__) . DIRECTORY_SEPARATOR . 'logs' . DIRECTORY_SEPARATOR . 'employee_att_daily_sync.log';
 }
 
 function open_db(): mysqli
@@ -264,7 +361,7 @@ function open_db(): mysqli
 
 function ensure_tables(mysqli $bd): void
 {
-    $bd->query(
+    if (!$bd->query(
         'CREATE TABLE IF NOT EXISTS employee_att_daily (' .
         'emp_code varchar(10) NOT NULL,' .
         'job varchar(10) NOT NULL,' .
@@ -279,9 +376,15 @@ function ensure_tables(mysqli $bd): void
         'updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,' .
         'PRIMARY KEY (emp_code, job, att_date)' .
         ') ENGINE=InnoDB'
-    );
+    )) {
+        log_message('table_create_failed', [
+            'table' => 'employee_att_daily',
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to create employee_att_daily table.');
+    }
 
-    $bd->query(
+    if (!$bd->query(
         'CREATE TABLE IF NOT EXISTS employee_att_daily_inbox (' .
         'change_id bigint NOT NULL,' .
         'received_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
@@ -289,7 +392,27 @@ function ensure_tables(mysqli $bd): void
         'error_message varchar(1024) NULL,' .
         'PRIMARY KEY (change_id)' .
         ') ENGINE=InnoDB'
-    );
+    )) {
+        log_message('table_create_failed', [
+            'table' => 'employee_att_daily_inbox',
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to create employee_att_daily_inbox table.');
+    }
+}
+
+function prepare_statement(mysqli $bd, string $sql, string $label): mysqli_stmt
+{
+    $stmt = $bd->prepare($sql);
+    if (!$stmt) {
+        log_message('statement_prepare_failed', [
+            'label' => $label,
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to prepare statement: ' . $label);
+    }
+
+    return $stmt;
 }
 
 function normalize_change_id($value): string
@@ -366,6 +489,36 @@ function truncate_error(string $message): string
     }
 
     return substr($message, 0, 1021) . '...';
+}
+
+function log_message(string $message, array $context = []): void
+{
+    $entry = [
+        'ts' => gmdate('c'),
+        'message' => $message,
+    ];
+    if ($context) {
+        $entry['context'] = $context;
+    }
+
+    $line = json_encode($entry, JSON_UNESCAPED_SLASHES);
+    if ($line === false) {
+        $line = gmdate('c') . ' ' . $message;
+    }
+
+    error_log($line);
+
+    $logPath = resolve_log_path();
+    if ($logPath === '') {
+        return;
+    }
+
+    $dir = dirname($logPath);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+    }
+
+    @file_put_contents($logPath, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
 }
 
 function respond(int $status, array $body): void
