@@ -95,6 +95,9 @@ foreach ($changes as $index => $change) {
     $pendingLeave = normalize_bool($change['pendingLeave'] ?? false);
     $pendingLeaveCode = normalize_optional_string($change['pendingLeaveCode'] ?? null);
     $pendingLeaveDocNo = normalize_optional_string($change['pendingLeaveDocNo'] ?? null);
+    $departmentName = normalize_optional_string($change['departmentName'] ?? null);
+    $companyShortname = normalize_optional_string($change['companyShortname'] ?? null);
+    $designationName = normalize_optional_string($change['designationName'] ?? null);
     $projectCodeUtime = normalize_optional_string($change['projectCodeUtime'] ?? null);
     $workHoursUtime = normalize_work_hours($change['workHoursUtime'] ?? null);
     $overrideWorkHours = normalize_work_hours($change['overrideWorkHours'] ?? null);
@@ -127,6 +130,9 @@ foreach ($changes as $index => $change) {
         'pending_leave' => $pendingLeave,
         'pending_leave_code' => $pendingLeaveCode,
         'pending_leave_doc_no' => $pendingLeaveDocNo,
+        'department_name' => $departmentName,
+        'company_shortname' => $companyShortname,
+        'designation_name' => $designationName,
         'projectcode_utime' => $projectCodeUtime,
         'work_hours_utime' => $workHoursUtime,
         'override_work_hours' => $overrideWorkHours,
@@ -160,11 +166,11 @@ try {
     $stmtChangeInsert = prepare_statement(
         $bd,
         'INSERT IGNORE INTO employee_att_daily ' .
-        '(change_id, emp_code, job, Projectcode_utime, work_hours_utime, att_date, work_hours, work_code, pending_leave, ' .
+        '(change_id, emp_code, job, department_name, company_shortname, designation_name, Projectcode_utime, work_hours_utime, att_date, work_hours, work_code, pending_leave, ' .
         'pending_leave_code, pending_leave_doc_no, override_work_hours, override_work_code, override_change_date, ' .
         'override_changed_by_email, override_changed_by_name, override_approved_by_email, override_approved_by_name, ' .
         'override_is_approved, override_approved_date, is_deleted, change_type, changed_at) ' .
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         'changes_insert'
     );
 
@@ -190,10 +196,13 @@ try {
             }
             $stmtInboxExists->free_result();
 
-            $types = str_repeat('s', 23);
+            $types = str_repeat('s', 26);
             $changeId = $change['change_id'];
             $empCode = $change['emp_code'];
             $job = $change['job'];
+            $departmentName = $change['department_name'];
+            $companyShortname = $change['company_shortname'];
+            $designationName = $change['designation_name'];
             $projectCodeUtime = $change['projectcode_utime'];
             $workHoursUtime = $change['work_hours_utime'];
             $attDate = $change['att_date'];
@@ -220,6 +229,9 @@ try {
                 $changeId,
                 $empCode,
                 $job,
+                $departmentName,
+                $companyShortname,
+                $designationName,
                 $projectCodeUtime,
                 $workHoursUtime,
                 $attDate,
@@ -425,6 +437,9 @@ function ensure_tables(mysqli $bd): void
         'change_id bigint NOT NULL,' .
         'emp_code varchar(10) NOT NULL,' .
         'job varchar(10) NOT NULL,' .
+        'department_name varchar(100) NULL,' .
+        'company_shortname varchar(20) NULL,' .
+        'designation_name varchar(100) NULL,' .
         'Projectcode_utime varchar(10) NULL,' .
         'work_hours_utime decimal(9,2) NULL,' .
         'att_date date NOT NULL,' .
@@ -473,6 +488,9 @@ function ensure_tables(mysqli $bd): void
     }
 
     ensure_table_columns($bd, 'employee_att_daily', [
+        'department_name' => 'varchar(100) NULL',
+        'company_shortname' => 'varchar(20) NULL',
+        'designation_name' => 'varchar(100) NULL',
         'Projectcode_utime' => 'varchar(10) NULL',
         'work_hours_utime' => 'decimal(9,2) NULL',
         'override_work_hours' => 'decimal(9,2) NULL',
