@@ -129,7 +129,7 @@ function format_yes_no(?bool $value): string {
     return $value ? 'Yes' : 'No';
 }
 
-function build_project_device_summary(array $deviceCounts, array $deviceMap, int $limit = 3): array {
+function build_project_device_summary(array $deviceCounts, array $deviceMap, array $deviceTotals, int $limit = 3): array {
     $projectCounts = [];
     foreach ($deviceCounts as $sn => $count) {
         $projectKey = 'unassigned';
@@ -147,10 +147,12 @@ function build_project_device_summary(array $deviceCounts, array $deviceMap, int
             }
         }
         if (!isset($projectCounts[$projectKey])) {
+            $totalDevices = (int) ($deviceTotals[$projectKey] ?? 0);
             $projectCounts[$projectKey] = [
                 'key' => $projectKey,
                 'label' => $projectLabel,
                 'count' => 0,
+                'total' => $totalDevices,
             ];
         }
         $projectCounts[$projectKey]['count']++;
@@ -169,7 +171,11 @@ function build_project_device_summary(array $deviceCounts, array $deviceMap, int
     $parts = [];
     foreach ($projects as $project) {
         $label = $project['label'] !== '' ? $project['label'] : 'Project';
-        $parts[] = $label . ': ' . $project['count'];
+        $totalDevices = (int) ($project['total'] ?? 0);
+        if ($totalDevices < (int) $project['count']) {
+            $totalDevices = (int) $project['count'];
+        }
+        $parts[] = $label . ' ' . $project['count'] . '/' . $totalDevices;
     }
     if ($totalProjects === 0) {
         $meta = 'No devices with punches';
@@ -181,6 +187,7 @@ function build_project_device_summary(array $deviceCounts, array $deviceMap, int
         'count' => $totalProjects,
         'meta' => $meta,
         'projects' => $projects,
+        'totals' => $deviceTotals,
     ];
 }
 
@@ -277,12 +284,16 @@ function build_project_device_employee_meta(array $deviceSummary, array $employe
             $label = 'Project';
         }
         $deviceCount = (int) ($project['count'] ?? 0);
+        $totalDevices = (int) ($project['total'] ?? ($deviceSummary['totals'][$key] ?? 0));
+        if ($totalDevices < $deviceCount) {
+            $totalDevices = $deviceCount;
+        }
         $employeeCount = 0;
         if (isset($employeeByKey[$key])) {
             $employeeCount = (int) ($employeeByKey[$key]['count'] ?? 0);
             unset($employeeByKey[$key]);
         }
-        $parts[] = $label . ' ' . $deviceCount . '/' . $employeeCount;
+        $parts[] = $label . ' ' . $deviceCount . '/' . $totalDevices . '/' . $employeeCount;
     }
 
     if (!empty($employeeByKey)) {
@@ -296,7 +307,9 @@ function build_project_device_employee_meta(array $deviceSummary, array $employe
         });
         foreach ($remaining as $project) {
             $label = $project['label'] !== '' ? $project['label'] : 'Project';
-            $parts[] = $label . ' 0/' . (int) ($project['count'] ?? 0);
+            $key = (string) ($project['key'] ?? '');
+            $totalDevices = (int) ($deviceSummary['totals'][$key] ?? 0);
+            $parts[] = $label . ' 0/' . $totalDevices . '/' . (int) ($project['count'] ?? 0);
         }
     }
 
@@ -1155,6 +1168,7 @@ if ($isAjax && $ajaxSection === 'hrms') {
 
 $deviceMap = [];
 $devicesByProject = [];
+$deviceTotalsByProject = [];
 $projects = [];
 $projectCodeById = [];
 
@@ -1191,6 +1205,12 @@ if (isset($bd) && $bd instanceof mysqli) {
             $devicesByProject[$projectKey][] = $sn;
         }
         $deviceResult->free();
+    }
+}
+
+if (!empty($devicesByProject)) {
+    foreach ($devicesByProject as $projectKey => $devices) {
+        $deviceTotalsByProject[$projectKey] = count($devices);
     }
 }
 
@@ -1550,7 +1570,7 @@ if ($isAjax && $ajaxSection === 'active-devices') {
     }
 
     arsort($deviceCounts);
-    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
+    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap, $deviceTotalsByProject);
     $activeDeviceCount = $projectSummary['count'];
     $activeDeviceMeta = $projectSummary['meta'];
     $activeDeviceMetaIsList = false;
@@ -1599,7 +1619,7 @@ if ($isAjax && $ajaxSection === 'active-devices') {
         ? ($activeDeviceCountText . ' Projects with punches')
         : 'Projects with punches';
     if ($activeDeviceMetaIsList) {
-        $activeDeviceLabel .= ' (Devices/Employees:)';
+        $activeDeviceLabel .= ' (Devices active/total / Employees:)';
     }
 
     $payload = [
@@ -1897,7 +1917,7 @@ if ($isAjax && $ajaxSection === 'summary') {
     }
 
     arsort($deviceCounts);
-    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap);
+    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap, $deviceTotalsByProject);
     $activeDeviceCount = $projectSummary['count'];
     $activeDeviceMeta = $projectSummary['meta'];
     $activeDeviceMetaIsList = false;
@@ -1946,7 +1966,7 @@ if ($isAjax && $ajaxSection === 'summary') {
         ? ($activeDeviceCountText . ' Projects with punches')
         : 'Projects with punches';
     if ($activeDeviceMetaIsList) {
-        $activeDeviceLabel .= ' (Devices/Employees:)';
+        $activeDeviceLabel .= ' (Devices active/total / Employees:)';
     }
 
     $deviceStatusOk = false;
@@ -2726,7 +2746,10 @@ include __DIR__ . '/include/layout_top.php';
         count = match[1];
         title = match[2];
       }
-      if (title.includes('(Devices/Employees:)')) {
+      if (title.includes('(Devices active/total / Employees:)')) {
+        title = title.replace('(Devices active/total / Employees:)', '').trim();
+        sub = 'Devices active/total / Employees';
+      } else if (title.includes('(Devices/Employees:)')) {
         title = title.replace('(Devices/Employees:)', '').trim();
         sub = 'Devices / Employees';
       }
@@ -2753,14 +2776,25 @@ include __DIR__ . '/include/layout_top.php';
         if (!trimmed) {
           continue;
         }
-        const match = trimmed.match(/^(.*)\s+(\d+)\/(\d+)$/);
-        if (!match) {
+        const matchThree = trimmed.match(/^(.*)\s+(\d+)\/(\d+)\/(\d+)$/);
+        if (matchThree) {
+          rows.push({
+            label: matchThree[1].trim(),
+            devicesActive: Number(matchThree[2]),
+            devicesTotal: Number(matchThree[3]),
+            employees: Number(matchThree[4]),
+          });
+          continue;
+        }
+        const matchTwo = trimmed.match(/^(.*)\s+(\d+)\/(\d+)$/);
+        if (!matchTwo) {
           return [];
         }
         rows.push({
-          label: match[1].trim(),
-          devices: Number(match[2]),
-          employees: Number(match[3]),
+          label: matchTwo[1].trim(),
+          devicesActive: Number(matchTwo[2]),
+          devicesTotal: null,
+          employees: Number(matchTwo[3]),
         });
       }
       return rows;
@@ -2781,22 +2815,28 @@ include __DIR__ . '/include/layout_top.php';
         }
         return;
       }
-      const maxDevices = Math.max(...rows.map((row) => row.devices), 0);
+      const maxDevices = Math.max(...rows.map((row) => row.devicesActive), 0);
       const maxEmployees = Math.max(...rows.map((row) => row.employees), 0);
       const fragment = document.createDocumentFragment();
       rows.forEach((row) => {
         const item = document.createElement('div');
         item.className = 'project-punches-item';
-        const devicePct = maxDevices > 0 ? (row.devices / maxDevices) * 100 : 0;
+        const hasTotal = Number.isFinite(row.devicesTotal);
+        const totalDevices = hasTotal ? row.devicesTotal : row.devicesActive;
+        const devicePct = hasTotal
+          ? (totalDevices > 0 ? (row.devicesActive / totalDevices) * 100 : 0)
+          : (maxDevices > 0 ? (row.devicesActive / maxDevices) * 100 : 0);
         const employeePct = maxEmployees > 0 ? (row.employees / maxEmployees) * 100 : 0;
+        const deviceCountText = hasTotal ? `${row.devicesActive} / ${totalDevices}` : `${row.devicesActive}`;
+        const deviceLabel = hasTotal ? 'Devices (active/total)' : 'Devices';
         item.innerHTML = `
           <div class="project-punches-item-title">${escapeHtml(row.label)}</div>
-          <div class="project-punches-item-counts">${row.devices} / ${row.employees}</div>
+          <div class="project-punches-item-counts">${deviceCountText} devices · ${row.employees} employees</div>
           <div class="project-punches-bars">
             <div class="project-punches-metric">
               <div class="project-punches-metric-label">
-                <span>Devices</span>
-                <span class="project-punches-metric-value">${row.devices}</span>
+                <span>${deviceLabel}</span>
+                <span class="project-punches-metric-value">${deviceCountText}</span>
               </div>
               <div class="project-punches-bar" style="--bar-size:${devicePct.toFixed(1)}%; --bar-color:#1b4f9a"></div>
             </div>
