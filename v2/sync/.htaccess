@@ -1,0 +1,8 @@
+<IfModule mod_dir.c>
+  DirectorySlash Off
+</IfModule>
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule ^(hrmsvw|employee-daily-punch)/?$ $1/index.php [L]
+</IfModule>
