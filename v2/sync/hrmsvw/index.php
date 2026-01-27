@@ -79,8 +79,6 @@ foreach ($changes as $index => $change) {
         $isDeleted = '1';
     }
 
-    $enforceRequired = ($changeType !== null && in_array($changeType, ['upsert', 'insert', 'update'], true));
-
     $record = [
         'emp_code' => $empCode,
         'change_type' => $changeType ?? ($mode === 'delete' ? 'delete' : null),
@@ -95,10 +93,6 @@ foreach ($changes as $index => $change) {
 
             $hasKey = array_key_exists($payloadKey, $change);
             if (!$hasKey) {
-                if ($enforceRequired && $meta['required']) {
-                    log_message('missing_field', ['index' => $index, 'field' => $payloadKey]);
-                    respond(400, ['error' => 'Missing field.', 'field' => $payloadKey, 'index' => $index]);
-                }
                 $record[$meta['column']] = null;
                 continue;
             }

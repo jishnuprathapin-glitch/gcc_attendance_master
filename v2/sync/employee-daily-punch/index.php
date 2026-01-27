@@ -87,8 +87,6 @@ foreach ($changes as $index => $change) {
         $isDeleted = '1';
     }
 
-    $enforceRequired = ($changeType !== null && in_array($changeType, ['upsert', 'insert', 'update'], true));
-
     $record = [
         'emp_code' => $empCode,
         'punch_date' => $punchDate,
@@ -101,17 +99,6 @@ foreach ($changes as $index => $change) {
     ];
 
     if ($mode === 'upsert') {
-        $requiredKeys = ['first_log', 'last_log', 'first_terminal_sn', 'last_terminal_sn'];
-        foreach ($requiredKeys as $key) {
-            if (!array_key_exists($key, $change)) {
-                if ($enforceRequired) {
-                    log_message('missing_field', ['index' => $index, 'field' => $key]);
-                    respond(400, ['error' => 'Missing field.', 'field' => $key, 'index' => $index]);
-                }
-                continue;
-            }
-        }
-
         [$firstLog, $firstLogOk] = normalize_datetime_field($change['first_log'] ?? null, true);
         if (!$firstLogOk) {
             log_message('invalid_field', ['index' => $index, 'field' => 'first_log']);
