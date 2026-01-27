@@ -144,20 +144,17 @@ try {
 
     $bd->begin_transaction();
 
-    $stmtUpsert = prepare_statement(
+    $stmtInsert = prepare_statement(
         $bd,
         'INSERT INTO employee_daily_punch_sync (' .
-        'emp_code, punch_date, first_log, last_log, first_terminal_sn, last_terminal_sn, is_deleted, change_type, updated_at' .
-        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ' .
-        'ON DUPLICATE KEY UPDATE first_log = VALUES(first_log), last_log = VALUES(last_log), first_terminal_sn = VALUES(first_terminal_sn), ' .
-        'last_terminal_sn = VALUES(last_terminal_sn), is_deleted = VALUES(is_deleted), change_type = VALUES(change_type), updated_at = CURRENT_TIMESTAMP',
-        'daily_punch_upsert'
+        'emp_code, punch_date, first_log, last_log, first_terminal_sn, last_terminal_sn, is_deleted, change_type' .
+        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'daily_punch_insert'
     );
 
     $stmtDelete = prepare_statement(
         $bd,
-        'INSERT INTO employee_daily_punch_sync (emp_code, punch_date, is_deleted, change_type, updated_at) VALUES (?, ?, 1, ?, CURRENT_TIMESTAMP) ' .
-        'ON DUPLICATE KEY UPDATE is_deleted = VALUES(is_deleted), change_type = VALUES(change_type), updated_at = CURRENT_TIMESTAMP',
+        'INSERT INTO employee_daily_punch_sync (emp_code, punch_date, is_deleted, change_type) VALUES (?, ?, 1, ?)',
         'daily_punch_delete'
     );
 
@@ -180,7 +177,7 @@ try {
         }
 
         $types = str_repeat('s', 8);
-        if (!$stmtUpsert->bind_param(
+        if (!$stmtInsert->bind_param(
             $types,
             $data['emp_code'],
             $data['punch_date'],
@@ -191,10 +188,10 @@ try {
             $data['is_deleted'],
             $data['change_type']
         )) {
-            throw new RuntimeException('Upsert bind failed: ' . $stmtUpsert->error);
+            throw new RuntimeException('Insert bind failed: ' . $stmtInsert->error);
         }
-        if (!$stmtUpsert->execute()) {
-            throw new RuntimeException('Upsert execute failed: ' . $stmtUpsert->error);
+        if (!$stmtInsert->execute()) {
+            throw new RuntimeException('Insert execute failed: ' . $stmtInsert->error);
         }
         $summary['applied']++;
     }
@@ -391,6 +388,7 @@ function ensure_tables(mysqli $bd): void
 
     if (!$bd->query(
         'CREATE TABLE IF NOT EXISTS employee_daily_punch_sync (' .
+        'id bigint NOT NULL AUTO_INCREMENT,' .
         'emp_code varchar(20) NOT NULL,' .
         'punch_date date NOT NULL,' .
         'first_log datetime NULL,' .
@@ -401,7 +399,8 @@ function ensure_tables(mysqli $bd): void
         'is_deleted tinyint(1) NOT NULL DEFAULT 0,' .
         'received_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
         'updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
-        'PRIMARY KEY (emp_code, punch_date)' .
+        'PRIMARY KEY (id),' .
+        'KEY idx_emp_date (emp_code, punch_date)' .
         ') ENGINE=InnoDB'
     )) {
         log_message('table_create_failed', [
@@ -410,8 +409,6 @@ function ensure_tables(mysqli $bd): void
         ]);
         throw new RuntimeException('Failed to create employee_daily_punch_sync table.');
     }
-
-    ensure_unique_index($bd, 'employee_daily_punch_sync', 'uniq_emp_date', ['emp_code', 'punch_date']);
 
     ensure_table_columns($bd, 'employee_daily_punch_sync', [
         'first_log' => 'datetime NULL',
@@ -423,6 +420,11 @@ function ensure_tables(mysqli $bd): void
         'received_at' => 'datetime NOT NULL DEFAULT CURRENT_TIMESTAMP',
         'updated_at' => 'datetime NOT NULL DEFAULT CURRENT_TIMESTAMP',
     ]);
+
+    drop_index_if_exists($bd, 'employee_daily_punch_sync', 'uniq_emp_date');
+    drop_primary_key_if_not_id($bd, 'employee_daily_punch_sync');
+    ensure_sync_identity_column($bd, 'employee_daily_punch_sync');
+    ensure_index($bd, 'employee_daily_punch_sync', 'idx_emp_date', ['emp_code', 'punch_date']);
 }
 
 function ensure_config_table(mysqli $bd): void
@@ -478,6 +480,39 @@ function ensure_unique_index(mysqli $bd, string $table, string $indexName, array
     }
 }
 
+function ensure_index(mysqli $bd, string $table, string $indexName, array $columns): void
+{
+    if (has_index($bd, $table, $indexName)) {
+        return;
+    }
+
+    $parts = [];
+    foreach ($columns as $column) {
+        $parts[] = '`' . $column . '`';
+    }
+    $sql = 'ALTER TABLE `' . $table . '` ADD INDEX `' . $indexName . '` (' . implode(', ', $parts) . ')';
+    if (!$bd->query($sql)) {
+        log_message('index_add_failed', [
+            'table' => $table,
+            'index' => $indexName,
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to add index ' . $indexName . ' to ' . $table . '.');
+    }
+}
+
+function has_index(mysqli $bd, string $table, string $indexName): bool
+{
+    $result = $bd->query("SHOW INDEX FROM `$table` WHERE Key_name = '" . $bd->real_escape_string($indexName) . "'");
+    if (!$result) {
+        return false;
+    }
+    $has = $result->num_rows > 0;
+    $result->free();
+
+    return $has;
+}
+
 function has_unique_index(mysqli $bd, string $table, array $columns): bool
 {
     $result = $bd->query('SHOW INDEX FROM `' . $table . '`');
@@ -521,6 +556,147 @@ function has_unique_index(mysqli $bd, string $table, array $columns): bool
     }
 
     return false;
+}
+
+function drop_index_if_exists(mysqli $bd, string $table, string $indexName): void
+{
+    if (!has_index($bd, $table, $indexName)) {
+        return;
+    }
+    $sql = 'ALTER TABLE `' . $table . '` DROP INDEX `' . $indexName . '`';
+    if (!$bd->query($sql)) {
+        log_message('index_drop_failed', [
+            'table' => $table,
+            'index' => $indexName,
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to drop index ' . $indexName . ' from ' . $table . '.');
+    }
+}
+
+function drop_primary_key_if_not_id(mysqli $bd, string $table): void
+{
+    $primaryCols = get_index_columns($bd, $table, 'PRIMARY');
+    if (!$primaryCols) {
+        return;
+    }
+    if ($primaryCols === ['emp_code', 'punch_date'] || $primaryCols === ['punch_date', 'emp_code']) {
+        if (!$bd->query('ALTER TABLE `' . $table . '` DROP PRIMARY KEY')) {
+            log_message('primary_key_drop_failed', [
+                'table' => $table,
+                'error' => $bd->error,
+            ]);
+            throw new RuntimeException('Failed to drop primary key from ' . $table . '.');
+        }
+        return;
+    }
+}
+
+function ensure_sync_identity_column(mysqli $bd, string $table): void
+{
+    $primaryCols = get_index_columns($bd, $table, 'PRIMARY');
+    if ($primaryCols) {
+        return;
+    }
+
+    $autoIncrementColumn = get_auto_increment_column($bd, $table);
+    if ($autoIncrementColumn !== null) {
+        if (!$bd->query('ALTER TABLE `' . $table . '` ADD PRIMARY KEY (`' . $autoIncrementColumn . '`)')) {
+            log_message('primary_key_add_failed', [
+                'table' => $table,
+                'error' => $bd->error,
+            ]);
+            throw new RuntimeException('Failed to add primary key to ' . $table . '.');
+        }
+        return;
+    }
+
+    $columnInfo = get_column_info($bd, $table, 'id');
+    if ($columnInfo === null) {
+        if (!$bd->query('ALTER TABLE `' . $table . '` ADD COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST')) {
+            log_message('column_add_failed', [
+                'table' => $table,
+                'column' => 'id',
+                'error' => $bd->error,
+            ]);
+            throw new RuntimeException('Failed to add id column to ' . $table . '.');
+        }
+        return;
+    }
+
+    $extra = strtolower((string) ($columnInfo['Extra'] ?? ''));
+    if (strpos($extra, 'auto_increment') === false) {
+        if (!$bd->query('ALTER TABLE `' . $table . '` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT')) {
+            log_message('column_modify_failed', [
+                'table' => $table,
+                'column' => 'id',
+                'error' => $bd->error,
+            ]);
+            throw new RuntimeException('Failed to enable AUTO_INCREMENT for id column in ' . $table . '.');
+        }
+    }
+
+    if (!$bd->query('ALTER TABLE `' . $table . '` ADD PRIMARY KEY (`id`)')) {
+        log_message('primary_key_add_failed', [
+            'table' => $table,
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to add primary key to ' . $table . '.');
+    }
+}
+
+function get_column_info(mysqli $bd, string $table, string $column): ?array
+{
+    $result = $bd->query('SHOW COLUMNS FROM `' . $table . '` LIKE \'' . $bd->real_escape_string($column) . '\'');
+    if (!$result) {
+        return null;
+    }
+    $row = $result->fetch_assoc();
+    $result->free();
+
+    return $row ?: null;
+}
+
+function get_auto_increment_column(mysqli $bd, string $table): ?string
+{
+    $result = $bd->query('SHOW COLUMNS FROM `' . $table . '`');
+    if (!$result) {
+        return null;
+    }
+    while ($row = $result->fetch_assoc()) {
+        $extra = strtolower((string) ($row['Extra'] ?? ''));
+        if ($extra !== '' && strpos($extra, 'auto_increment') !== false) {
+            $result->free();
+            return (string) ($row['Field'] ?? '');
+        }
+    }
+    $result->free();
+    return null;
+}
+
+function get_index_columns(mysqli $bd, string $table, string $indexName): array
+{
+    $result = $bd->query('SHOW INDEX FROM `' . $table . '` WHERE Key_name = \'' . $bd->real_escape_string($indexName) . '\'');
+    if (!$result) {
+        return [];
+    }
+
+    $cols = [];
+    while ($row = $result->fetch_assoc()) {
+        $seq = (int) ($row['Seq_in_index'] ?? 0);
+        $col = strtolower((string) ($row['Column_name'] ?? ''));
+        if ($seq > 0 && $col !== '') {
+            $cols[$seq] = $col;
+        }
+    }
+    $result->free();
+
+    if (!$cols) {
+        return [];
+    }
+
+    ksort($cols);
+    return array_values($cols);
 }
 
 function ensure_table_columns(mysqli $bd, string $table, array $columns): void

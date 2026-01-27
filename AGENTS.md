@@ -5,6 +5,10 @@
 - MySQL: D:\Jishnu - Workspace\Software Installation\mysql
 - Source code: D:\Jishnu - Workspace\Software Installation\htdocs\gcc_attendance_master
 
+## Project DB
+- Primary database for this project: gcc_attendance_master
+- HRSmart/login/users use shared portal DB: gcc_it
+
 ## HRSmart DB (from HRSmart/include/db_connect.php)
 - Host: localhost
 - User: root

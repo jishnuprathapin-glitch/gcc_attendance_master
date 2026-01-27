@@ -4,5 +4,5 @@
 
 <IfModule mod_rewrite.c>
   RewriteEngine On
-  RewriteRule ^(hrmsvw|employee-daily-punch)/?$ $1/index.php [L]
+  RewriteRule ^(hrmsvw|employee-daily-punch|utime-employee-details)/?$ $1/index.php [L]
 </IfModule>
