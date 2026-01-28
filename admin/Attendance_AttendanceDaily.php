@@ -591,6 +591,21 @@ include __DIR__ . '/include/layout_top.php';
   .attendance-daily-table .day-col.col-extra.day-expanded {
     display: table-cell;
   }
+  .attendance-daily-table .col-adv {
+    display: none;
+  }
+  .attendance-daily-table .col-adv.is-visible {
+    display: table-cell;
+  }
+  .attendance-daily-table .meta-toggle {
+    margin-left: 0.4rem;
+    padding: 0 0.4rem;
+    border-radius: 4px;
+    border: 1px solid #adb5bd;
+    background: #f8f9fa;
+    font-weight: 700;
+    line-height: 1.2;
+  }
   .attendance-daily-table .day-toggle {
     background: none;
     border: none;
@@ -679,7 +694,7 @@ include __DIR__ . '/include/layout_top.php';
               <?php endforeach; ?>
             </select>
           </div>
-          <div class="form-group col-md-2">
+          <div class="form-group col-md-3">
             <label for="project_code">Project code</label>
             <select id="project_code" name="project_code[]" class="form-control js-searchable" data-placeholder="All" multiple>
               <?php foreach ($projectOptions as $code => $name): ?>
@@ -720,10 +735,10 @@ include __DIR__ . '/include/layout_top.php';
         <h3 class="card-title">Weekly attendance</h3>
         <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
       </div>
-      <?php if ($totalPages > 1): ?>
-        <div class="card-body py-2 d-flex justify-content-between align-items-center">
-          <div class="small text-muted">Page <?= $page ?> of <?= $totalPages ?></div>
-          <nav>
+    <?php if ($totalPages > 1): ?>
+      <div class="card-body py-2 d-flex justify-content-between align-items-center">
+        <div class="small text-muted">Page <?= $page ?> of <?= $totalPages ?></div>
+        <nav>
             <ul class="pagination pagination-sm mb-0">
               <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
                 <a class="page-link" href="<?= h($page > 1 ? build_query_url(array_merge($baseQuery, ['page' => $page - 1])) : '#') ?>">Previous 50</a>
@@ -749,11 +764,14 @@ include __DIR__ . '/include/layout_top.php';
           <thead>
             <tr>
               <th rowspan="2">Emp Code</th>
-              <th rowspan="2">Emp Name</th>
-              <th rowspan="2">Designation</th>
-              <th rowspan="2">Department</th>
-              <th rowspan="2">Employee Type</th>
-              <th rowspan="2">Project Code</th>
+              <th rowspan="2">
+                Emp Name
+                <button type="button" class="meta-toggle" id="toggleMetaColumns" aria-expanded="false" title="Show details">+</button>
+              </th>
+              <th rowspan="2" class="col-adv">Designation</th>
+              <th rowspan="2" class="col-adv">Department</th>
+              <th rowspan="2" class="col-adv">Employee Type</th>
+              <th rowspan="2" class="col-adv">Project Code</th>
               <?php foreach ($dateRange as $dayIndex => $date): ?>
                 <th colspan="<?= $collapsedDayColumns ?>" class="text-center date-header day-header" data-day-index="<?= $dayIndex ?>" data-collapsed-colspan="<?= $collapsedDayColumns ?>" data-expanded-colspan="<?= $expandedDayColumns ?>">
                   <button type="button" class="day-toggle" data-day-index="<?= $dayIndex ?>" aria-expanded="false">
@@ -790,10 +808,10 @@ include __DIR__ . '/include/layout_top.php';
                 <tr>
                   <td><?= h($empCode !== '' ? $empCode : '-') ?></td>
                   <td><?= h($empName !== '' ? $empName : '-') ?></td>
-                  <td><?= h($designation !== '' ? $designation : '-') ?></td>
-                  <td><?= h($department !== '' ? $department : '-') ?></td>
-                  <td><?= h($employeeType !== '' ? $employeeType : '-') ?></td>
-                  <td><?= h($projectCode !== '' ? $projectCode : '-') ?></td>
+                  <td class="col-adv"><?= h($designation !== '' ? $designation : '-') ?></td>
+                  <td class="col-adv"><?= h($department !== '' ? $department : '-') ?></td>
+                  <td class="col-adv"><?= h($employeeType !== '' ? $employeeType : '-') ?></td>
+                  <td class="col-adv"><?= h($projectCode !== '' ? $projectCode : '-') ?></td>
                   <?php foreach ($dateRange as $dayIndex => $date): ?>
                     <?php $dayClass = 'day-' . $dayIndex; ?>
                     <?php
@@ -873,6 +891,7 @@ include __DIR__ . '/include/layout_top.php';
         closeOnSelect: !isMultiple,
       });
     });
+
   });
 </script>
 <script>
@@ -892,6 +911,9 @@ include __DIR__ . '/include/layout_top.php';
       }
       let total = 0;
       headerRow.querySelectorAll('th').forEach((th) => {
+        if (th.classList.contains('col-adv') && !th.classList.contains('is-visible')) {
+          return;
+        }
         const span = Number(th.getAttribute('colspan')) || 1;
         total += span;
       });
@@ -932,6 +954,26 @@ include __DIR__ . '/include/layout_top.php';
       });
     });
     updateEmptyColspan();
+
+    const metaToggle = document.getElementById('toggleMetaColumns');
+    const metaCells = table.querySelectorAll('.col-adv');
+    const setMetaVisible = (visible) => {
+      metaCells.forEach((cell) => {
+        cell.classList.toggle('is-visible', visible);
+      });
+      if (metaToggle) {
+        metaToggle.textContent = visible ? '−' : '+';
+        metaToggle.setAttribute('aria-expanded', visible ? 'true' : 'false');
+        metaToggle.setAttribute('title', visible ? 'Hide details' : 'Show details');
+      }
+      updateEmptyColspan();
+    };
+    setMetaVisible(false);
+    if (metaToggle) {
+      metaToggle.addEventListener('click', function () {
+        setMetaVisible(!metaCells[0]?.classList.contains('is-visible'));
+      });
+    }
   });
 </script>
 <script>
