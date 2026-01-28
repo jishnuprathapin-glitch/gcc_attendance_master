@@ -2283,7 +2283,6 @@ include __DIR__ . '/include/layout_top.php';
 
 <section class="content-header">
   <div class="container-fluid">
-    <?php include __DIR__ . '/include/admin_nav.php'; ?>
     <div class="row mb-2">
       <div class="col-sm-7">
         <h1>Attendance Dashboard</h1>
@@ -2292,6 +2291,7 @@ include __DIR__ . '/include/layout_top.php';
         <span class="badge badge-primary">Range: <?= h($displayStartDate) ?> to <?= h($displayEndDate) ?></span>
       </div>
     </div>
+    <?php include __DIR__ . '/include/admin_nav.php'; ?>
   </div>
 </section>
 

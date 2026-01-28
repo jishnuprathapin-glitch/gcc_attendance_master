@@ -1002,7 +1002,7 @@ include __DIR__ . '/include/layout_top.php';
     --lane-header-text: var(--ink-strong);
     --lane-sub-text: var(--ink-muted);
     --lane-border: var(--border-strong);
-    --lane-chip-bg: color(xyz 0.31 0.4 0.55);
+    --lane-chip-bg: #ab874f;
     --lane-chip-text: #ffffff;
     --lane-chip-border: #ab7373;
     --lane-body-bg: #ffffff;

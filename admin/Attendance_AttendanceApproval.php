@@ -155,7 +155,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     $params = [$startDate, $endDate];
     $types = 'ss';
     if ($employeeCodeFilter !== '') {
-        $filters[] = 'd.emp_code = ?';
+        $filters[] = 'd.emp_code COLLATE utf8mb4_general_ci = ?';
         $params[] = $employeeCodeFilter;
         $types .= 's';
     }
@@ -163,7 +163,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     $sql = 'SELECT d.emp_code, d.att_date, d.override_work_hours, d.override_work_code, d.override_changed_by_name, ' .
         'd.override_changed_by_email, h.emp_name, h.desg_name, h.dept_name ' .
         'FROM gcc_attendance_master.employee_att_daily d ' .
-        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code = d.emp_code ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
         'WHERE ' . implode(' AND ', $filters) .
         ' ORDER BY d.att_date DESC, d.emp_code ASC';
 

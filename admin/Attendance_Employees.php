@@ -127,7 +127,7 @@ include __DIR__ . '/include/layout_top.php';
   <div class="container-fluid">
     <div class="row mb-2">
       <div class="col-sm-6">
-        <h1>Employees</h1>
+        <h1>Employee Biometric List</h1>
       </div>
       <div class="col-sm-6 text-sm-right">
         <span class="badge badge-primary">Employee lookup</span>

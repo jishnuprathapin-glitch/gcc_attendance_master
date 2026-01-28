@@ -199,7 +199,11 @@ $employeeIdTerms = normalize_search_terms($employeeIdInput);
 $startDate = normalize_date($_GET['start_date'] ?? '', $defaultStart);
 $endDate = normalize_date($_GET['end_date'] ?? '', $defaultEnd);
 $page = max(1, (int) ($_GET['page'] ?? 1));
-$perPage = 50;
+$perPage = (int) ($_GET['per_page'] ?? 50);
+$allowedPerPage = [25, 50, 100];
+if (!in_array($perPage, $allowedPerPage, true)) {
+    $perPage = 50;
+}
 
 if ($startDate > $endDate) {
     $swap = $startDate;
@@ -528,6 +532,7 @@ $baseQuery = [
     'designation' => $designationFilter,
     'project_code' => $projectCodeFilter,
     'employee_id' => $employeeIdInput,
+    'per_page' => $perPage,
     'start_date' => $startDate,
     'end_date' => $endDate,
 ];
@@ -606,6 +611,64 @@ include __DIR__ . '/include/layout_top.php';
     font-weight: 700;
     line-height: 1.2;
   }
+  .attendance-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(90deg, rgba(15, 23, 42, 0.06), rgba(15, 23, 42, 0));
+  }
+  .attendance-pager .pager-meta {
+    font-weight: 600;
+    color: #0f172a;
+  }
+  .attendance-pager .pager-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .attendance-pager .pager-btn {
+    border: none;
+    padding: 0.45rem 0.9rem;
+    border-radius: 10px;
+    background: #0f172a;
+    color: #f8fafc;
+    font-weight: 600;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .attendance-pager .pager-btn:disabled,
+  .attendance-pager .pager-btn.is-disabled {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+  .attendance-pager .pager-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.2);
+  }
+  .attendance-pager .pager-field {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.6rem;
+    border-radius: 10px;
+    border: 1px solid rgba(15, 23, 42, 0.2);
+    background: #fff;
+  }
+  .attendance-pager .pager-field input {
+    width: 64px;
+    border: none;
+    font-weight: 600;
+  }
+  .attendance-pager .pager-select {
+    border-radius: 10px;
+    border: 1px solid rgba(15, 23, 42, 0.2);
+    padding: 0.35rem 0.6rem;
+    font-weight: 600;
+  }
   .attendance-daily-table .day-toggle {
     background: none;
     border: none;
@@ -617,6 +680,28 @@ include __DIR__ . '/include/layout_top.php';
   .attendance-daily-table .day-toggle .toggle-icon {
     margin-left: 0.35rem;
     font-weight: 700;
+  }
+  .attendance-daily-table .col-fixed {
+    position: sticky;
+    left: 0;
+    background: #fff;
+    z-index: 4;
+    box-shadow: 4px 0 10px rgba(15, 23, 42, 0.08);
+  }
+  .attendance-daily-table .col-fixed-1 {
+    min-width: 90px;
+    width: 90px;
+    left: 0;
+    z-index: 5;
+  }
+  .attendance-daily-table .col-fixed-2 {
+    min-width: 240px;
+    width: 240px;
+    left: 90px;
+    z-index: 5;
+  }
+  .attendance-daily-table thead .col-fixed {
+    z-index: 6;
   }
   .select2-container {
     width: 100% !important;
@@ -735,36 +820,37 @@ include __DIR__ . '/include/layout_top.php';
         <h3 class="card-title">Weekly attendance</h3>
         <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
       </div>
-    <?php if ($totalPages > 1): ?>
-      <div class="card-body py-2 d-flex justify-content-between align-items-center">
-        <div class="small text-muted">Page <?= $page ?> of <?= $totalPages ?></div>
-        <nav>
-            <ul class="pagination pagination-sm mb-0">
-              <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
-                <a class="page-link" href="<?= h($page > 1 ? build_query_url(array_merge($baseQuery, ['page' => $page - 1])) : '#') ?>">Previous 50</a>
-              </li>
-              <?php foreach ($pageLinks as $link): ?>
-                <?php if ($link === '...'): ?>
-                  <li class="page-item disabled"><span class="page-link">...</span></li>
-                <?php else: ?>
-                  <li class="page-item <?= $link === $page ? 'active' : '' ?>">
-                    <a class="page-link" href="<?= h(build_query_url(array_merge($baseQuery, ['page' => $link]))) ?>"><?= h($link) ?></a>
-                  </li>
-                <?php endif; ?>
+      <?php if ($totalPages > 1): ?>
+        <div class="attendance-pager" data-total-pages="<?= $totalPages ?>">
+          <div class="pager-meta">
+            Showing <?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees
+          </div>
+          <div class="pager-controls">
+            <button type="button" class="pager-btn <?= $page <= 1 ? 'is-disabled' : '' ?>" data-page="<?= max(1, $page - 1) ?>">
+              ‹ Prev
+            </button>
+            <div class="pager-field">
+              <input type="number" class="pager-page" min="1" max="<?= $totalPages ?>" value="<?= $page ?>">
+              <span class="text-muted">/ <?= $totalPages ?></span>
+              <button type="button" class="pager-btn pager-go">Go</button>
+            </div>
+            <select class="pager-select pager-size">
+              <?php foreach ($allowedPerPage as $size): ?>
+                <option value="<?= $size ?>" <?= $perPage === $size ? 'selected' : '' ?>><?= $size ?> / page</option>
               <?php endforeach; ?>
-              <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
-                <a class="page-link" href="<?= h($page < $totalPages ? build_query_url(array_merge($baseQuery, ['page' => $page + 1])) : '#') ?>">Next 50</a>
-              </li>
-            </ul>
-          </nav>
+            </select>
+            <button type="button" class="pager-btn <?= $page >= $totalPages ? 'is-disabled' : '' ?>" data-page="<?= min($totalPages, $page + 1) ?>">
+              Next ›
+            </button>
+          </div>
         </div>
       <?php endif; ?>
       <div class="card-body table-responsive p-0">
         <table class="table table-bordered table-sm attendance-daily-table">
           <thead>
             <tr>
-              <th rowspan="2">Emp Code</th>
-              <th rowspan="2">
+              <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
+              <th rowspan="2" class="col-fixed col-fixed-2">
                 Emp Name
                 <button type="button" class="meta-toggle" id="toggleMetaColumns" aria-expanded="false" title="Show details">+</button>
               </th>
@@ -806,8 +892,8 @@ include __DIR__ . '/include/layout_top.php';
                   $projectCode = trim((string) ($employee['jbno'] ?? ''));
                 ?>
                 <tr>
-                  <td><?= h($empCode !== '' ? $empCode : '-') ?></td>
-                  <td><?= h($empName !== '' ? $empName : '-') ?></td>
+                  <td class="col-fixed col-fixed-1"><?= h($empCode !== '' ? $empCode : '-') ?></td>
+                  <td class="col-fixed col-fixed-2"><?= h($empName !== '' ? $empName : '-') ?></td>
                   <td class="col-adv"><?= h($designation !== '' ? $designation : '-') ?></td>
                   <td class="col-adv"><?= h($department !== '' ? $department : '-') ?></td>
                   <td class="col-adv"><?= h($employeeType !== '' ? $employeeType : '-') ?></td>
@@ -846,27 +932,28 @@ include __DIR__ . '/include/layout_top.php';
         </table>
       </div>
       <?php if ($totalPages > 1): ?>
-        <div class="card-footer d-flex justify-content-between align-items-center">
-          <div class="small text-muted">Page <?= $page ?> of <?= $totalPages ?></div>
-          <nav>
-            <ul class="pagination pagination-sm mb-0">
-              <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
-                <a class="page-link" href="<?= h($page > 1 ? build_query_url(array_merge($baseQuery, ['page' => $page - 1])) : '#') ?>">Previous 50</a>
-              </li>
-              <?php foreach ($pageLinks as $link): ?>
-                <?php if ($link === '...'): ?>
-                  <li class="page-item disabled"><span class="page-link">...</span></li>
-                <?php else: ?>
-                  <li class="page-item <?= $link === $page ? 'active' : '' ?>">
-                    <a class="page-link" href="<?= h(build_query_url(array_merge($baseQuery, ['page' => $link]))) ?>"><?= h($link) ?></a>
-                  </li>
-                <?php endif; ?>
+        <div class="attendance-pager" data-total-pages="<?= $totalPages ?>">
+          <div class="pager-meta">
+            Page <?= $page ?> of <?= $totalPages ?>
+          </div>
+          <div class="pager-controls">
+            <button type="button" class="pager-btn <?= $page <= 1 ? 'is-disabled' : '' ?>" data-page="<?= max(1, $page - 1) ?>">
+              ‹ Prev
+            </button>
+            <div class="pager-field">
+              <input type="number" class="pager-page" min="1" max="<?= $totalPages ?>" value="<?= $page ?>">
+              <span class="text-muted">/ <?= $totalPages ?></span>
+              <button type="button" class="pager-btn pager-go">Go</button>
+            </div>
+            <select class="pager-select pager-size">
+              <?php foreach ($allowedPerPage as $size): ?>
+                <option value="<?= $size ?>" <?= $perPage === $size ? 'selected' : '' ?>><?= $size ?> / page</option>
               <?php endforeach; ?>
-              <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
-                <a class="page-link" href="<?= h($page < $totalPages ? build_query_url(array_merge($baseQuery, ['page' => $page + 1])) : '#') ?>">Next 50</a>
-              </li>
-            </ul>
-          </nav>
+            </select>
+            <button type="button" class="pager-btn <?= $page >= $totalPages ? 'is-disabled' : '' ?>" data-page="<?= min($totalPages, $page + 1) ?>">
+              Next ›
+            </button>
+          </div>
         </div>
       <?php endif; ?>
     </div>
@@ -974,6 +1061,63 @@ include __DIR__ . '/include/layout_top.php';
         setMetaVisible(!metaCells[0]?.classList.contains('is-visible'));
       });
     }
+
+    const pagerBase = <?= json_encode($baseQuery) ?>;
+    const pagerUrl = <?= json_encode(admin_url('Attendance_AttendanceDaily.php')) ?>;
+    const buildPagerUrl = (pageValue, perPageValue) => {
+      const params = new URLSearchParams();
+      Object.keys(pagerBase).forEach((key) => {
+        const value = pagerBase[key];
+        if (Array.isArray(value)) {
+          value.forEach((item) => {
+            if (item !== '') {
+              params.append(`${key}[]`, item);
+            }
+          });
+        } else if (value !== '' && value !== null && value !== undefined) {
+          params.append(key, value);
+        }
+      });
+      if (pageValue) {
+        params.set('page', String(pageValue));
+      }
+      if (perPageValue) {
+        params.set('per_page', String(perPageValue));
+      }
+      const query = params.toString();
+      return query ? `${pagerUrl}?${query}` : pagerUrl;
+    };
+    document.querySelectorAll('.attendance-pager').forEach((pager) => {
+      const pageInput = pager.querySelector('.pager-page');
+      const perSelect = pager.querySelector('.pager-size');
+      const goBtn = pager.querySelector('.pager-go');
+      pager.querySelectorAll('[data-page]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          if (btn.classList.contains('is-disabled')) {
+            return;
+          }
+          const target = Number(btn.getAttribute('data-page'));
+          const size = perSelect ? Number(perSelect.value) : null;
+          window.location.href = buildPagerUrl(target, size);
+        });
+      });
+      if (goBtn && pageInput) {
+        goBtn.addEventListener('click', () => {
+          const target = Number(pageInput.value);
+          if (!Number.isFinite(target) || target < 1) {
+            return;
+          }
+          const size = perSelect ? Number(perSelect.value) : null;
+          window.location.href = buildPagerUrl(target, size);
+        });
+      }
+      if (perSelect) {
+        perSelect.addEventListener('change', () => {
+          const target = pageInput ? Number(pageInput.value) : 1;
+          window.location.href = buildPagerUrl(target || 1, Number(perSelect.value));
+        });
+      }
+    });
   });
 </script>
 <script>
