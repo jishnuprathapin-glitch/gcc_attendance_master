@@ -99,6 +99,38 @@ function format_person(?string $name, ?string $email): string {
     return '-';
 }
 
+function build_query_url(array $params): string {
+    $base = admin_url('Attendance_AttendanceDaily.php');
+    $query = http_build_query($params);
+    if ($query === '') {
+        return $base;
+    }
+    return $base . '?' . $query;
+}
+
+function build_page_window(int $current, int $total, int $radius = 2): array {
+    if ($total <= 1) {
+        return [1];
+    }
+    if ($total <= 7) {
+        return range(1, $total);
+    }
+    $pages = [1];
+    $start = max(2, $current - $radius);
+    $end = min($total - 1, $current + $radius);
+    if ($start > 2) {
+        $pages[] = '...';
+    }
+    for ($i = $start; $i <= $end; $i++) {
+        $pages[] = $i;
+    }
+    if ($end < ($total - 1)) {
+        $pages[] = '...';
+    }
+    $pages[] = $total;
+    return $pages;
+}
+
 function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
     if ($types === '' || empty($params)) {
         return;
@@ -111,12 +143,19 @@ function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
 }
 
 [$defaultStart, $defaultEnd] = current_week_range();
+$today = new DateTimeImmutable('today');
+$last30Start = $today->modify('-29 days')->format('Y-m-d');
+$last30End = $today->format('Y-m-d');
+$prevWeekStart = (new DateTimeImmutable($defaultStart))->modify('-7 days')->format('Y-m-d');
+$prevWeekEnd = (new DateTimeImmutable($defaultEnd))->modify('-7 days')->format('Y-m-d');
 
 $designationFilter = trim((string) ($_GET['designation'] ?? ''));
 $departmentFilter = trim((string) ($_GET['department'] ?? ''));
 $projectCodeFilter = trim((string) ($_GET['project_code'] ?? ''));
 $startDate = normalize_date($_GET['start_date'] ?? '', $defaultStart);
 $endDate = normalize_date($_GET['end_date'] ?? '', $defaultEnd);
+$page = max(1, (int) ($_GET['page'] ?? 1));
+$perPage = 50;
 
 if ($startDate > $endDate) {
     $swap = $startDate;
@@ -133,6 +172,9 @@ $deviceProjectMap = [];
 $departmentOptions = [];
 $designationOptions = [];
 $projectOptions = [];
+$offset = 0;
+$totalEmployees = 0;
+$totalPages = 1;
 $loadError = null;
 
 if (!isset($bd) || !($bd instanceof mysqli)) {
@@ -200,6 +242,34 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $types .= 's';
     }
 
+    $countSql = 'SELECT COUNT(*) AS total ' .
+        'FROM gcc_attendance_master.hrmsvw_sync hr';
+    if (!empty($filters)) {
+        $countSql .= ' WHERE ' . implode(' AND ', $filters);
+    }
+
+    $countStmt = $bd->prepare($countSql);
+    if ($countStmt) {
+        bind_params($countStmt, $types, $params);
+        if ($countStmt->execute()) {
+            $result = $countStmt->get_result();
+            if ($result) {
+                $row = $result->fetch_assoc();
+                if ($row && isset($row['total'])) {
+                    $totalEmployees = (int) $row['total'];
+                }
+                $result->free();
+            }
+        }
+        $countStmt->close();
+    }
+
+    $totalPages = max(1, (int) ceil(max(0, $totalEmployees) / $perPage));
+    if ($page > $totalPages) {
+        $page = $totalPages;
+    }
+    $offset = max(0, ($page - 1) * $perPage);
+
     $sql = 'SELECT hr.emp_code, ' .
         'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
         'hr.desg_name, hr.dept_name, hr.ty_desc, hr.jbno, hr.jbdesc ' .
@@ -207,11 +277,17 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     if (!empty($filters)) {
         $sql .= ' WHERE ' . implode(' AND ', $filters);
     }
-    $sql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT 15';
+    $sql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT ? OFFSET ?';
+
+    $listParams = $params;
+    $listTypes = $types;
+    $listParams[] = $perPage;
+    $listParams[] = $offset;
+    $listTypes .= 'ii';
 
     $stmt = $bd->prepare($sql);
     if ($stmt) {
-        bind_params($stmt, $types, $params);
+        bind_params($stmt, $listTypes, $listParams);
         if ($stmt->execute()) {
             $result = $stmt->get_result();
             if ($result) {
@@ -269,9 +345,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                 $stmt->close();
             }
 
-            $attSql = 'SELECT emp_code, att_date, work_code, pending_leave_code, override_work_hours, ' .
-                'override_changed_by_name, override_changed_by_email, override_approved_by_name, override_approved_by_email, ' .
-                'override_is_approved ' .
+            $attSql = 'SELECT emp_code, att_date, work_code, pending_leave_code, override_work_hours ' .
                 'FROM gcc_attendance_master.employee_att_daily ' .
                 'WHERE emp_code IN (' . $placeholders . ') AND att_date BETWEEN ? AND ? ' .
                 'AND (is_delete = 0 OR is_delete IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL)';
@@ -338,6 +412,51 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     }
 }
 
+if ($totalEmployees === 0 && !empty($employees)) {
+    $totalEmployees = count($employees);
+    $totalPages = 1;
+    $page = 1;
+    $offset = 0;
+}
+
+$baseQuery = [
+    'designation' => $designationFilter,
+    'department' => $departmentFilter,
+    'project_code' => $projectCodeFilter,
+    'start_date' => $startDate,
+    'end_date' => $endDate,
+];
+$currentWeekUrl = build_query_url(array_merge($baseQuery, [
+    'start_date' => $defaultStart,
+    'end_date' => $defaultEnd,
+    'page' => 1,
+]));
+$previousWeekUrl = build_query_url(array_merge($baseQuery, [
+    'start_date' => $prevWeekStart,
+    'end_date' => $prevWeekEnd,
+    'page' => 1,
+]));
+$last30DaysUrl = build_query_url(array_merge($baseQuery, [
+    'start_date' => $last30Start,
+    'end_date' => $last30End,
+    'page' => 1,
+]));
+$isCurrentWeek = ($startDate === $defaultStart && $endDate === $defaultEnd);
+$isPrevWeek = ($startDate === $prevWeekStart && $endDate === $prevWeekEnd);
+$isLast30Days = ($startDate === $last30Start && $endDate === $last30End);
+$pageLinks = build_page_window($page, $totalPages);
+$showingStart = $totalEmployees > 0 ? ($offset + 1) : 0;
+$showingEnd = $totalEmployees > 0 ? min($offset + count($employees), $totalEmployees) : 0;
+$prefetchUrls = [];
+if ($totalPages > 1) {
+    if ($page > 1) {
+        $prefetchUrls[] = build_query_url(array_merge($baseQuery, ['page' => $page - 1]));
+    }
+    if ($page < $totalPages) {
+        $prefetchUrls[] = build_query_url(array_merge($baseQuery, ['page' => $page + 1]));
+    }
+}
+
 include __DIR__ . '/include/layout_top.php';
 
 ?>
@@ -393,6 +512,14 @@ include __DIR__ . '/include/layout_top.php';
       </div>
       <div class="card-body">
         <form method="get" class="form-row">
+          <div class="form-group col-12">
+            <label class="d-block">Quick ranges</label>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
+              <a class="btn <?= $isCurrentWeek ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($currentWeekUrl) ?>">Current week</a>
+              <a class="btn <?= $isPrevWeek ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($previousWeekUrl) ?>">Previous week</a>
+              <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last30DaysUrl) ?>">Last 30 days</a>
+            </div>
+          </div>
           <div class="form-group col-md-3">
             <label for="designation">Designation</label>
             <select id="designation" name="designation" class="form-control js-searchable" data-placeholder="All">
@@ -439,7 +566,9 @@ include __DIR__ . '/include/layout_top.php';
           </div>
         </form>
         <div class="small text-muted">
-          Default week: <?= h($defaultStart) ?> to <?= h($defaultEnd) ?> | Showing <?= count($employees) ?> employee(s)
+          Default week: <?= h($defaultStart) ?> to <?= h($defaultEnd) ?> |
+          Showing <?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employee(s) |
+          Page <?= $page ?> of <?= $totalPages ?>
         </div>
       </div>
     </div>
@@ -447,8 +576,32 @@ include __DIR__ . '/include/layout_top.php';
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center">
         <h3 class="card-title">Weekly attendance</h3>
-        <span class="text-muted small"><?= count($employees) ?> employees | <?= count($dateRange) ?> day(s)</span>
+        <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
       </div>
+      <?php if ($totalPages > 1): ?>
+        <div class="card-body py-2 d-flex justify-content-between align-items-center">
+          <div class="small text-muted">Page <?= $page ?> of <?= $totalPages ?></div>
+          <nav>
+            <ul class="pagination pagination-sm mb-0">
+              <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                <a class="page-link" href="<?= h($page > 1 ? build_query_url(array_merge($baseQuery, ['page' => $page - 1])) : '#') ?>">Previous 50</a>
+              </li>
+              <?php foreach ($pageLinks as $link): ?>
+                <?php if ($link === '...'): ?>
+                  <li class="page-item disabled"><span class="page-link">...</span></li>
+                <?php else: ?>
+                  <li class="page-item <?= $link === $page ? 'active' : '' ?>">
+                    <a class="page-link" href="<?= h(build_query_url(array_merge($baseQuery, ['page' => $link]))) ?>"><?= h($link) ?></a>
+                  </li>
+                <?php endif; ?>
+              <?php endforeach; ?>
+              <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                <a class="page-link" href="<?= h($page < $totalPages ? build_query_url(array_merge($baseQuery, ['page' => $page + 1])) : '#') ?>">Next 50</a>
+              </li>
+            </ul>
+          </nav>
+        </div>
+      <?php endif; ?>
       <div class="card-body table-responsive p-0">
         <table class="table table-bordered table-sm attendance-daily-table">
           <thead>
@@ -460,20 +613,18 @@ include __DIR__ . '/include/layout_top.php';
               <th rowspan="2">Employee Type</th>
               <th rowspan="2">Project Code</th>
               <?php foreach ($dateRange as $date): ?>
-                <th colspan="9" class="text-center date-header"><?= h(format_date_label($date)) ?></th>
+                <th colspan="7" class="text-center date-header"><?= h(format_date_label($date)) ?></th>
               <?php endforeach; ?>
             </tr>
             <tr>
               <?php foreach ($dateRange as $date): ?>
                 <th class="sub-header">Project login (U)</th>
-                <th class="sub-header">Login</th>
-                <th class="sub-header">Logout</th>
                 <th class="sub-header">Leave code (H)</th>
                 <th class="sub-header">Work code (W)</th>
+                <th class="sub-header">Login</th>
+                <th class="sub-header">Logout</th>
                 <th class="sub-header">Work hrs</th>
                 <th class="sub-header">Override hrs</th>
-                <th class="sub-header">Overridden by</th>
-                <th class="sub-header">Approved by</th>
               <?php endforeach; ?>
             </tr>
           </thead>
@@ -508,40 +659,49 @@ include __DIR__ . '/include/layout_top.php';
                       $workCode = is_array($att) ? trim((string) ($att['work_code'] ?? '')) : '';
                       $workHours = calculate_work_hours($firstLog, $lastLog);
                       $overrideHours = is_array($att) ? trim((string) ($att['override_work_hours'] ?? '')) : '';
-                      $overrideBy = format_person(is_array($att) ? ($att['override_changed_by_name'] ?? '') : '', is_array($att) ? ($att['override_changed_by_email'] ?? '') : '');
-                      $approvedBy = format_person(is_array($att) ? ($att['override_approved_by_name'] ?? '') : '', is_array($att) ? ($att['override_approved_by_email'] ?? '') : '');
-                      $isApproved = is_array($att) ? ($att['override_is_approved'] ?? null) : null;
                     ?>
                     <td><?= h($loginProject !== '' ? $loginProject : '-') ?></td>
-                    <td><?= h(format_time_value($firstLog)) ?></td>
-                    <td><?= h(format_time_value($lastLog)) ?></td>
                     <td><?= h($leaveCode !== '' ? $leaveCode : '-') ?></td>
                     <td><?= h($workCode !== '' ? $workCode : '-') ?></td>
+                    <td><?= h(format_time_value($firstLog)) ?></td>
+                    <td><?= h(format_time_value($lastLog)) ?></td>
                     <td><?= h($workHours !== null ? $workHours : '-') ?></td>
                     <td><?= h($overrideHours !== '' ? $overrideHours : '-') ?></td>
-                    <td><?= h($overrideBy) ?></td>
-                    <td>
-                      <?php
-                        if ($approvedBy !== '-' && $approvedBy !== '') {
-                            echo h($approvedBy);
-                        } elseif ($overrideHours !== '' && ($isApproved === null || (string) $isApproved === '0')) {
-                            echo 'Pending';
-                        } else {
-                            echo '-';
-                        }
-                      ?>
-                    </td>
                   <?php endforeach; ?>
                 </tr>
               <?php endforeach; ?>
             <?php else: ?>
               <tr>
-                <td colspan="<?= 6 + (count($dateRange) * 9) ?>" class="text-center text-muted">No employees found for the selected filters.</td>
+                <td colspan="<?= 6 + (count($dateRange) * 7) ?>" class="text-center text-muted">No employees found for the selected filters.</td>
               </tr>
             <?php endif; ?>
           </tbody>
         </table>
       </div>
+      <?php if ($totalPages > 1): ?>
+        <div class="card-footer d-flex justify-content-between align-items-center">
+          <div class="small text-muted">Page <?= $page ?> of <?= $totalPages ?></div>
+          <nav>
+            <ul class="pagination pagination-sm mb-0">
+              <li class="page-item <?= $page <= 1 ? 'disabled' : '' ?>">
+                <a class="page-link" href="<?= h($page > 1 ? build_query_url(array_merge($baseQuery, ['page' => $page - 1])) : '#') ?>">Previous 50</a>
+              </li>
+              <?php foreach ($pageLinks as $link): ?>
+                <?php if ($link === '...'): ?>
+                  <li class="page-item disabled"><span class="page-link">...</span></li>
+                <?php else: ?>
+                  <li class="page-item <?= $link === $page ? 'active' : '' ?>">
+                    <a class="page-link" href="<?= h(build_query_url(array_merge($baseQuery, ['page' => $link]))) ?>"><?= h($link) ?></a>
+                  </li>
+                <?php endif; ?>
+              <?php endforeach; ?>
+              <li class="page-item <?= $page >= $totalPages ? 'disabled' : '' ?>">
+                <a class="page-link" href="<?= h($page < $totalPages ? build_query_url(array_merge($baseQuery, ['page' => $page + 1])) : '#') ?>">Next 50</a>
+              </li>
+            </ul>
+          </nav>
+        </div>
+      <?php endif; ?>
     </div>
   </div>
 </section>
@@ -558,6 +718,24 @@ include __DIR__ . '/include/layout_top.php';
       allowClear: true,
       placeholder: 'All',
       minimumResultsForSearch: 0,
+    });
+  });
+</script>
+<script>
+  window.addEventListener('load', function () {
+    const urls = <?= json_encode(array_values($prefetchUrls)) ?>;
+    if (!urls || !urls.length || typeof fetch !== 'function') {
+      return;
+    }
+    const schedule = window.requestIdleCallback || function (cb) { setTimeout(cb, 500); };
+    schedule(function () {
+      urls.forEach(function (url) {
+        try {
+          fetch(url, { credentials: 'same-origin' });
+        } catch (e) {
+          // Ignore prefetch failures.
+        }
+      });
     });
   });
 </script>
