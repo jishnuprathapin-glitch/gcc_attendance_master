@@ -32,8 +32,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $workHoursRaw = trim((string) ($_POST['workHours'] ?? ''));
         $workCode = trim((string) ($_POST['workCode'] ?? ''));
 
-        if ($employeeCode === '' || $attDate === null) {
-            $error = 'Employee code and attendance date are required.';
+        if ($employeeCode === '') {
+            $error = 'Employee code is required.';
+        } elseif ($attDate === null) {
+            $error = 'Attendance date is required.';
+        } elseif ($workHoursRaw === '' && $workCode === '') {
+            $error = 'Override work hours or override work code is required.';
         } elseif ($userName === '' || $userEmail === '') {
             $error = 'User name/email missing in session.';
         } else {
@@ -43,6 +47,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $error = 'Work hours must be numeric.';
                 } else {
                     $workHours = (float) $workHoursRaw;
+                    if ($workHours < 0) {
+                        $error = 'Work hours must be zero or greater.';
+                    }
                 }
             }
 
@@ -102,7 +109,7 @@ include __DIR__ . '/include/layout_top.php';
         <h3 class="card-title">Submit override</h3>
       </div>
       <div class="card-body">
-        <form method="post">
+        <form method="post" id="overrideForm">
           <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
           <div class="form-row">
             <div class="form-group col-md-3">
@@ -129,5 +136,26 @@ include __DIR__ . '/include/layout_top.php';
     </div>
   </div>
 </section>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('overrideForm');
+    const workHours = document.getElementById('workHours');
+    const workCode = document.getElementById('workCode');
+    if (!form || !workHours || !workCode) {
+      return;
+    }
+    const validateOverrides = () => {
+      const hours = workHours.value.trim();
+      const code = workCode.value.trim();
+      const message = (hours === '' && code === '') ? 'Override work hours or override work code is required.' : '';
+      workHours.setCustomValidity(message);
+      workCode.setCustomValidity(message);
+    };
+    workHours.addEventListener('input', validateOverrides);
+    workCode.addEventListener('input', validateOverrides);
+    form.addEventListener('submit', validateOverrides);
+  });
+</script>
 
 <?php include __DIR__ . '/include/layout_bottom.php'; ?>

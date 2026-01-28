@@ -99,6 +99,46 @@ function format_person(?string $name, ?string $email): string {
     return '-';
 }
 
+function normalize_multi_param($value): array {
+    if (is_array($value)) {
+        $items = $value;
+    } else {
+        $items = [$value];
+    }
+    $clean = [];
+    foreach ($items as $item) {
+        if (!is_scalar($item) && $item !== null) {
+            continue;
+        }
+        $item = trim((string) $item);
+        if ($item === '') {
+            continue;
+        }
+        $clean[$item] = true;
+    }
+    return array_keys($clean);
+}
+
+function normalize_search_terms(?string $value): array {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return [];
+    }
+    $parts = preg_split('/[\\s,;]+/', $value);
+    if (!$parts) {
+        return [];
+    }
+    $clean = [];
+    foreach ($parts as $part) {
+        $part = trim((string) $part);
+        if ($part === '') {
+            continue;
+        }
+        $clean[$part] = true;
+    }
+    return array_keys($clean);
+}
+
 function build_query_url(array $params): string {
     $base = admin_url('Attendance_AttendanceDaily.php');
     $query = http_build_query($params);
@@ -149,9 +189,13 @@ $last30End = $today->format('Y-m-d');
 $prevWeekStart = (new DateTimeImmutable($defaultStart))->modify('-7 days')->format('Y-m-d');
 $prevWeekEnd = (new DateTimeImmutable($defaultEnd))->modify('-7 days')->format('Y-m-d');
 
-$designationFilter = trim((string) ($_GET['designation'] ?? ''));
-$departmentFilter = trim((string) ($_GET['department'] ?? ''));
-$projectCodeFilter = trim((string) ($_GET['project_code'] ?? ''));
+$designationFilter = normalize_multi_param($_GET['designation'] ?? []);
+$departmentFilter = normalize_multi_param($_GET['department'] ?? []);
+$projectCodeFilter = normalize_multi_param($_GET['project_code'] ?? []);
+$costCenterFilter = normalize_multi_param($_GET['cost_center'] ?? []);
+$employeeTypeFilter = normalize_multi_param($_GET['employee_type'] ?? []);
+$employeeIdInput = trim((string) ($_GET['employee_id'] ?? ''));
+$employeeIdTerms = normalize_search_terms($employeeIdInput);
 $startDate = normalize_date($_GET['start_date'] ?? '', $defaultStart);
 $endDate = normalize_date($_GET['end_date'] ?? '', $defaultEnd);
 $page = max(1, (int) ($_GET['page'] ?? 1));
@@ -164,6 +208,8 @@ if ($startDate > $endDate) {
 }
 
 $dateRange = build_date_range($startDate, $endDate);
+$collapsedDayColumns = 2;
+$expandedDayColumns = 7;
 
 $employees = [];
 $dailyPunch = [];
@@ -172,6 +218,8 @@ $deviceProjectMap = [];
 $departmentOptions = [];
 $designationOptions = [];
 $projectOptions = [];
+$costCenterOptions = [];
+$employeeTypeOptions = [];
 $offset = 0;
 $totalEmployees = 0;
 $totalPages = 1;
@@ -222,24 +270,78 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $projectResult->free();
     }
 
+    $costResult = $bd->query(
+        'SELECT cc_code, cc_name FROM gcc_attendance_master.hrms_cost_centers ORDER BY cc_name, cc_code'
+    );
+    if ($costResult) {
+        while ($row = $costResult->fetch_assoc()) {
+            $code = trim((string) ($row['cc_code'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+            $costCenterOptions[$code] = trim((string) ($row['cc_name'] ?? ''));
+        }
+        $costResult->free();
+    }
+
+    $typeResult = $bd->query(
+        'SELECT ty_cd, ty_desc FROM gcc_attendance_master.hrms_employee_types ORDER BY ty_desc, ty_cd'
+    );
+    if ($typeResult) {
+        while ($row = $typeResult->fetch_assoc()) {
+            $code = trim((string) ($row['ty_cd'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+            $employeeTypeOptions[$code] = trim((string) ($row['ty_desc'] ?? ''));
+        }
+        $typeResult->free();
+    }
+
     $filters = ['hr.is_deleted = 0', 'hr.st_code = "A"'];
     $params = [];
     $types = '';
 
-    if ($designationFilter !== '') {
-        $filters[] = 'hr.desg_cd = ?';
-        $params[] = $designationFilter;
-        $types .= 's';
+    if (!empty($designationFilter)) {
+        $placeholders = implode(',', array_fill(0, count($designationFilter), '?'));
+        $filters[] = 'hr.desg_cd IN (' . $placeholders . ')';
+        $params = array_merge($params, $designationFilter);
+        $types .= str_repeat('s', count($designationFilter));
     }
-    if ($departmentFilter !== '') {
-        $filters[] = 'hr.dept_cd = ?';
-        $params[] = $departmentFilter;
-        $types .= 's';
+    if (!empty($departmentFilter)) {
+        $placeholders = implode(',', array_fill(0, count($departmentFilter), '?'));
+        $filters[] = 'hr.dept_cd IN (' . $placeholders . ')';
+        $params = array_merge($params, $departmentFilter);
+        $types .= str_repeat('s', count($departmentFilter));
     }
-    if ($projectCodeFilter !== '') {
-        $filters[] = 'hr.jbno = ?';
-        $params[] = $projectCodeFilter;
-        $types .= 's';
+    if (!empty($projectCodeFilter)) {
+        $placeholders = implode(',', array_fill(0, count($projectCodeFilter), '?'));
+        $filters[] = 'hr.jbno IN (' . $placeholders . ')';
+        $params = array_merge($params, $projectCodeFilter);
+        $types .= str_repeat('s', count($projectCodeFilter));
+    }
+    if (!empty($costCenterFilter)) {
+        $placeholders = implode(',', array_fill(0, count($costCenterFilter), '?'));
+        $filters[] = 'hr.cc_code IN (' . $placeholders . ')';
+        $params = array_merge($params, $costCenterFilter);
+        $types .= str_repeat('s', count($costCenterFilter));
+    }
+    if (!empty($employeeTypeFilter)) {
+        $placeholders = implode(',', array_fill(0, count($employeeTypeFilter), '?'));
+        $filters[] = 'hr.ty_cd IN (' . $placeholders . ')';
+        $params = array_merge($params, $employeeTypeFilter);
+        $types .= str_repeat('s', count($employeeTypeFilter));
+    }
+    if (!empty($employeeIdTerms)) {
+        $likeParts = [];
+        foreach ($employeeIdTerms as $term) {
+            $likeParts[] = 'hr.emp_code LIKE ?';
+            $params[] = '%' . $term . '%';
+            $types .= 's';
+        }
+        if (!empty($likeParts)) {
+            $filters[] = '(' . implode(' OR ', $likeParts) . ')';
+        }
     }
 
     $countSql = 'SELECT COUNT(*) AS total ' .
@@ -420,9 +522,12 @@ if ($totalEmployees === 0 && !empty($employees)) {
 }
 
 $baseQuery = [
-    'designation' => $designationFilter,
+    'cost_center' => $costCenterFilter,
+    'employee_type' => $employeeTypeFilter,
     'department' => $departmentFilter,
+    'designation' => $designationFilter,
     'project_code' => $projectCodeFilter,
+    'employee_id' => $employeeIdInput,
     'start_date' => $startDate,
     'end_date' => $endDate,
 ];
@@ -480,6 +585,24 @@ include __DIR__ . '/include/layout_top.php';
     font-size: 0.75rem;
     font-weight: 600;
   }
+  .attendance-daily-table .day-col.col-extra {
+    display: none;
+  }
+  .attendance-daily-table .day-col.col-extra.day-expanded {
+    display: table-cell;
+  }
+  .attendance-daily-table .day-toggle {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .attendance-daily-table .day-toggle .toggle-icon {
+    margin-left: 0.35rem;
+    font-weight: 700;
+  }
   .select2-container {
     width: 100% !important;
   }
@@ -521,34 +644,53 @@ include __DIR__ . '/include/layout_top.php';
             </div>
           </div>
           <div class="form-group col-md-3">
-            <label for="designation">Designation</label>
-            <select id="designation" name="designation" class="form-control js-searchable" data-placeholder="All">
-              <option value="">All</option>
-              <?php foreach ($designationOptions as $code => $name): ?>
+            <label for="cost_center">Cost center company</label>
+            <select id="cost_center" name="cost_center[]" class="form-control js-searchable" data-placeholder="All" multiple>
+              <?php foreach ($costCenterOptions as $code => $name): ?>
                 <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
-                <option value="<?= h($code) ?>" <?= $designationFilter === $code ? 'selected' : '' ?>><?= h($label) ?></option>
+                <option value="<?= h($code) ?>" <?= in_array($code, $costCenterFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label for="employee_type">Employee type</label>
+            <select id="employee_type" name="employee_type[]" class="form-control js-searchable" data-placeholder="All" multiple>
+              <?php foreach ($employeeTypeOptions as $code => $name): ?>
+                <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
+                <option value="<?= h($code) ?>" <?= in_array($code, $employeeTypeFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
               <?php endforeach; ?>
             </select>
           </div>
           <div class="form-group col-md-3">
             <label for="department">Department</label>
-            <select id="department" name="department" class="form-control js-searchable" data-placeholder="All">
-              <option value="">All</option>
+            <select id="department" name="department[]" class="form-control js-searchable" data-placeholder="All" multiple>
               <?php foreach ($departmentOptions as $code => $name): ?>
                 <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
-                <option value="<?= h($code) ?>" <?= $departmentFilter === $code ? 'selected' : '' ?>><?= h($label) ?></option>
+                <option value="<?= h($code) ?>" <?= in_array($code, $departmentFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label for="designation">Designation</label>
+            <select id="designation" name="designation[]" class="form-control js-searchable" data-placeholder="All" multiple>
+              <?php foreach ($designationOptions as $code => $name): ?>
+                <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
+                <option value="<?= h($code) ?>" <?= in_array($code, $designationFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
               <?php endforeach; ?>
             </select>
           </div>
           <div class="form-group col-md-2">
             <label for="project_code">Project code</label>
-            <select id="project_code" name="project_code" class="form-control js-searchable" data-placeholder="All">
-              <option value="">All</option>
+            <select id="project_code" name="project_code[]" class="form-control js-searchable" data-placeholder="All" multiple>
               <?php foreach ($projectOptions as $code => $name): ?>
                 <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
-                <option value="<?= h($code) ?>" <?= $projectCodeFilter === $code ? 'selected' : '' ?>><?= h($label) ?></option>
+                <option value="<?= h($code) ?>" <?= in_array($code, $projectCodeFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
               <?php endforeach; ?>
             </select>
+          </div>
+          <div class="form-group col-md-2">
+            <label for="employee_id">Employee ID</label>
+            <input id="employee_id" name="employee_id" class="form-control" value="<?= h($employeeIdInput) ?>" placeholder="Employee ID">
           </div>
           <div class="form-group col-md-2">
             <label for="start_date">Start date</label>
@@ -612,19 +754,25 @@ include __DIR__ . '/include/layout_top.php';
               <th rowspan="2">Department</th>
               <th rowspan="2">Employee Type</th>
               <th rowspan="2">Project Code</th>
-              <?php foreach ($dateRange as $date): ?>
-                <th colspan="7" class="text-center date-header"><?= h(format_date_label($date)) ?></th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <th colspan="<?= $collapsedDayColumns ?>" class="text-center date-header day-header" data-day-index="<?= $dayIndex ?>" data-collapsed-colspan="<?= $collapsedDayColumns ?>" data-expanded-colspan="<?= $expandedDayColumns ?>">
+                  <button type="button" class="day-toggle" data-day-index="<?= $dayIndex ?>" aria-expanded="false">
+                    <span class="day-label"><?= h(format_date_label($date)) ?></span>
+                    <span class="toggle-icon" aria-hidden="true">+</span>
+                  </button>
+                </th>
               <?php endforeach; ?>
             </tr>
             <tr>
-              <?php foreach ($dateRange as $date): ?>
-                <th class="sub-header">Project login (U)</th>
-                <th class="sub-header">Leave code (H)</th>
-                <th class="sub-header">Work code (W)</th>
-                <th class="sub-header">Login</th>
-                <th class="sub-header">Logout</th>
-                <th class="sub-header">Work hrs</th>
-                <th class="sub-header">Override hrs</th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php $dayClass = 'day-' . $dayIndex; ?>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-project-login">Project login (U)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-leave">Leave code (H)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-work-code">Work code (W)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-login">Login</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-logout">Logout</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-work-hrs">Work hrs</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-override-hrs">Override hrs</th>
               <?php endforeach; ?>
             </tr>
           </thead>
@@ -646,7 +794,8 @@ include __DIR__ . '/include/layout_top.php';
                   <td><?= h($department !== '' ? $department : '-') ?></td>
                   <td><?= h($employeeType !== '' ? $employeeType : '-') ?></td>
                   <td><?= h($projectCode !== '' ? $projectCode : '-') ?></td>
-                  <?php foreach ($dateRange as $date): ?>
+                  <?php foreach ($dateRange as $dayIndex => $date): ?>
+                    <?php $dayClass = 'day-' . $dayIndex; ?>
                     <?php
                       $punch = ($empCode !== '' && isset($dailyPunch[$empCode][$date])) ? $dailyPunch[$empCode][$date] : null;
                       $att = ($empCode !== '' && isset($attDaily[$empCode][$date])) ? $attDaily[$empCode][$date] : null;
@@ -660,19 +809,19 @@ include __DIR__ . '/include/layout_top.php';
                       $workHours = calculate_work_hours($firstLog, $lastLog);
                       $overrideHours = is_array($att) ? trim((string) ($att['override_work_hours'] ?? '')) : '';
                     ?>
-                    <td><?= h($loginProject !== '' ? $loginProject : '-') ?></td>
-                    <td><?= h($leaveCode !== '' ? $leaveCode : '-') ?></td>
-                    <td><?= h($workCode !== '' ? $workCode : '-') ?></td>
-                    <td><?= h(format_time_value($firstLog)) ?></td>
-                    <td><?= h(format_time_value($lastLog)) ?></td>
-                    <td><?= h($workHours !== null ? $workHours : '-') ?></td>
-                    <td><?= h($overrideHours !== '' ? $overrideHours : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-project-login"><?= h($loginProject !== '' ? $loginProject : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-leave"><?= h($leaveCode !== '' ? $leaveCode : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-work-code"><?= h($workCode !== '' ? $workCode : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-login"><?= h(format_time_value($firstLog)) ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-logout"><?= h(format_time_value($lastLog)) ?></td>
+                    <td class="day-col <?= $dayClass ?> col-work-hrs"><?= h($workHours !== null ? $workHours : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-override-hrs"><?= h($overrideHours !== '' ? $overrideHours : '-') ?></td>
                   <?php endforeach; ?>
                 </tr>
               <?php endforeach; ?>
             <?php else: ?>
-              <tr>
-                <td colspan="<?= 6 + (count($dateRange) * 7) ?>" class="text-center text-muted">No employees found for the selected filters.</td>
+              <tr class="attendance-empty-row">
+                <td colspan="<?= 6 + (count($dateRange) * $collapsedDayColumns) ?>" class="text-center text-muted">No employees found for the selected filters.</td>
               </tr>
             <?php endif; ?>
           </tbody>
@@ -712,13 +861,77 @@ include __DIR__ . '/include/layout_top.php';
     if (!window.jQuery || !jQuery.fn || !jQuery.fn.select2) {
       return;
     }
-    jQuery('.js-searchable').select2({
-      theme: 'bootstrap4',
-      width: '100%',
-      allowClear: true,
-      placeholder: 'All',
-      minimumResultsForSearch: 0,
+    jQuery('.js-searchable').each(function () {
+      const $select = jQuery(this);
+      const isMultiple = $select.prop('multiple');
+      $select.select2({
+        theme: 'bootstrap4',
+        width: '100%',
+        allowClear: true,
+        placeholder: $select.data('placeholder') || 'All',
+        minimumResultsForSearch: 0,
+        closeOnSelect: !isMultiple,
+      });
     });
+  });
+</script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const table = document.querySelector('.attendance-daily-table');
+    if (!table) {
+      return;
+    }
+    const emptyCell = table.querySelector('.attendance-empty-row td');
+    const updateEmptyColspan = () => {
+      if (!emptyCell) {
+        return;
+      }
+      const headerRow = table.querySelector('thead tr');
+      if (!headerRow) {
+        return;
+      }
+      let total = 0;
+      headerRow.querySelectorAll('th').forEach((th) => {
+        const span = Number(th.getAttribute('colspan')) || 1;
+        total += span;
+      });
+      if (total > 0) {
+        emptyCell.setAttribute('colspan', String(total));
+      }
+    };
+    const setDayExpanded = (dayIndex, expanded) => {
+      const extras = table.querySelectorAll(`.day-${dayIndex}.col-extra`);
+      extras.forEach((el) => {
+        if (expanded) {
+          el.classList.add('day-expanded');
+        } else {
+          el.classList.remove('day-expanded');
+        }
+      });
+      const header = table.querySelector(`.day-header[data-day-index="${dayIndex}"]`);
+      if (header) {
+        const expandedColspan = header.getAttribute('data-expanded-colspan') || '7';
+        const collapsedColspan = header.getAttribute('data-collapsed-colspan') || '2';
+        header.setAttribute('colspan', expanded ? expandedColspan : collapsedColspan);
+      }
+      const toggle = table.querySelector(`.day-toggle[data-day-index="${dayIndex}"]`);
+      if (toggle) {
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        const icon = toggle.querySelector('.toggle-icon');
+        if (icon) {
+          icon.textContent = expanded ? '-' : '+';
+        }
+      }
+    };
+    table.querySelectorAll('.day-toggle').forEach((toggle) => {
+      toggle.addEventListener('click', function () {
+        const dayIndex = this.getAttribute('data-day-index');
+        const expanded = this.getAttribute('aria-expanded') === 'true';
+        setDayExpanded(dayIndex, !expanded);
+        updateEmptyColspan();
+      });
+    });
+    updateEmptyColspan();
   });
 </script>
 <script>
