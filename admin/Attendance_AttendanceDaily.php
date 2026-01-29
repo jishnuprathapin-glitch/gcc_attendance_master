@@ -54,7 +54,7 @@ function format_date_label(string $date): string {
 function format_time_value(?string $value): string {
     $value = trim((string) $value);
     if ($value === '') {
-        return '-';
+        return '';
     }
     try {
         $dt = new DateTimeImmutable($value);
@@ -96,7 +96,7 @@ function format_person(?string $name, ?string $email): string {
     if ($email !== '') {
         return $email;
     }
-    return '-';
+    return '';
 }
 
 function normalize_multi_param($value): array {
@@ -182,6 +182,551 @@ function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
     call_user_func_array([$stmt, 'bind_param'], $bind);
 }
 
+function export_job_dir(): string {
+    $dir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'gcc_attendance_exports';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+    }
+    return $dir;
+}
+
+function export_job_path(string $jobId): string {
+    return export_job_dir() . DIRECTORY_SEPARATOR . $jobId . '.json';
+}
+
+function export_job_csv_path(string $jobId): string {
+    return export_job_dir() . DIRECTORY_SEPARATOR . $jobId . '.csv';
+}
+
+function sanitize_export_job_id(?string $jobId): ?string {
+    $jobId = strtolower(trim((string) $jobId));
+    if ($jobId === '') {
+        return null;
+    }
+    if (!preg_match('/^[a-f0-9]{32}$/', $jobId)) {
+        return null;
+    }
+    return $jobId;
+}
+
+function read_export_job(string $jobId): ?array {
+    $path = export_job_path($jobId);
+    if (!is_file($path)) {
+        return null;
+    }
+    $raw = file_get_contents($path);
+    if ($raw === false) {
+        return null;
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        return null;
+    }
+    return $data;
+}
+
+function write_export_job(string $jobId, array $data): void {
+    $path = export_job_path($jobId);
+    $data['updated_at'] = gmdate('c');
+    $payload = json_encode($data, JSON_UNESCAPED_SLASHES);
+    if ($payload === false) {
+        return;
+    }
+    $tmp = $path . '.tmp';
+    @file_put_contents($tmp, $payload);
+    @rename($tmp, $path);
+}
+
+function render_attendance_results(array $context): string {
+    extract($context, EXTR_SKIP);
+    ob_start();
+    ?>
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h3 class="card-title">Weekly attendance</h3>
+        <span class="text-muted small"><?= h($showingStart) ?>-<?= h($showingEnd) ?> of <?= h($totalEmployees) ?> employees | <?= h(count($dateRange)) ?> day(s)</span>
+      </div>
+      <?php if ($totalPages > 1): ?>
+        <div class="attendance-pager" data-total-pages="<?= h($totalPages) ?>">
+          <div class="pager-meta">
+            Showing <?= h($showingStart) ?>-<?= h($showingEnd) ?> of <?= h($totalEmployees) ?> employees
+          </div>
+          <div class="pager-controls">
+            <button type="button" class="pager-btn <?= $page <= 1 ? 'is-disabled' : '' ?>" data-page="<?= h(max(1, $page - 1)) ?>">
+              ‹ Prev
+            </button>
+            <div class="pager-field">
+              <input type="number" class="pager-page" min="1" max="<?= h($totalPages) ?>" value="<?= h($page) ?>">
+              <span class="text-muted">/ <?= h($totalPages) ?></span>
+              <button type="button" class="pager-btn pager-go">Go</button>
+            </div>
+            <select class="pager-select pager-size">
+              <?php foreach ($allowedPerPage as $size): ?>
+                <option value="<?= h($size) ?>" <?= (int) $perPage === (int) $size ? 'selected' : '' ?>><?= h($size) ?> / page</option>
+              <?php endforeach; ?>
+            </select>
+            <button type="button" class="pager-btn <?= $page >= $totalPages ? 'is-disabled' : '' ?>" data-page="<?= h(min($totalPages, $page + 1)) ?>">
+              Next ›
+            </button>
+          </div>
+        </div>
+      <?php endif; ?>
+      <div class="card-body table-responsive p-0">
+        <table class="table table-bordered table-sm attendance-daily-table">
+          <thead>
+            <tr>
+              <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
+              <th rowspan="2" class="col-fixed col-fixed-2">
+                Emp Name
+                <button type="button" class="meta-toggle" id="toggleMetaColumns" aria-expanded="false" title="Show details">+</button>
+              </th>
+              <th rowspan="2" class="col-adv">Designation</th>
+              <th rowspan="2" class="col-adv">Department</th>
+              <th rowspan="2" class="col-adv">Cost center company</th>
+              <th rowspan="2" class="col-adv">Employee Type</th>
+              <th rowspan="2" class="col-adv">Project Code</th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <th colspan="<?= h($collapsedDayColumns) ?>" class="text-center date-header day-header" data-day-index="<?= h($dayIndex) ?>" data-collapsed-colspan="<?= h($collapsedDayColumns) ?>" data-expanded-colspan="<?= h($expandedDayColumns) ?>">
+                  <button type="button" class="day-toggle" data-day-index="<?= h($dayIndex) ?>" aria-expanded="false">
+                    <span class="day-label"><?= h(format_date_label($date)) ?></span>
+                    <span class="toggle-icon" aria-hidden="true">+</span>
+                  </button>
+                </th>
+              <?php endforeach; ?>
+            </tr>
+            <tr>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php $dayClass = 'day-' . $dayIndex; ?>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-project-login">Project login (U)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-leave">Leave code (H)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-work-code">Work code (W)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-login">Login</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-logout">Logout</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-work-hrs">Work hrs</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-override-hrs">Override hrs</th>
+              <?php endforeach; ?>
+            </tr>
+          </thead>
+          <tbody>
+            <?php if (!empty($employees) && !empty($dateRange)): ?>
+              <?php foreach ($employees as $employee): ?>
+                <?php
+                  $empCode = trim((string) ($employee['emp_code'] ?? ''));
+                  $empName = trim((string) ($employee['emp_name'] ?? ''));
+                  $designation = trim((string) ($employee['desg_name'] ?? ''));
+                  $department = trim((string) ($employee['dept_name'] ?? ''));
+                  $costCenterCode = trim((string) ($employee['cc_code'] ?? ''));
+                  $costCenterName = trim((string) ($employee['cc_name'] ?? ''));
+                  $costCenter = $costCenterName !== '' ? $costCenterName : $costCenterCode;
+                  if ($costCenterName !== '' && $costCenterCode !== '' && stripos($costCenterName, $costCenterCode) === false) {
+                      $costCenter = $costCenterCode . ' - ' . $costCenterName;
+                  }
+                  $employeeType = trim((string) ($employee['ty_desc'] ?? ''));
+                  $projectCode = trim((string) ($employee['jbno'] ?? ''));
+                ?>
+                <tr>
+                  <td class="col-fixed col-fixed-1"><?= h($empCode) ?></td>
+                  <td class="col-fixed col-fixed-2"><?= h($empName) ?></td>
+                  <td class="col-adv"><?= h($designation) ?></td>
+                  <td class="col-adv"><?= h($department) ?></td>
+                  <td class="col-adv"><?= h($costCenter) ?></td>
+                  <td class="col-adv"><?= h($employeeType) ?></td>
+                  <td class="col-adv"><?= h($projectCode) ?></td>
+                  <?php foreach ($dateRange as $dayIndex => $date): ?>
+                    <?php $dayClass = 'day-' . $dayIndex; ?>
+                    <?php
+                      $punch = ($empCode !== '' && isset($dailyPunch[$empCode][$date])) ? $dailyPunch[$empCode][$date] : null;
+                      $att = ($empCode !== '' && isset($attDaily[$empCode][$date])) ? $attDaily[$empCode][$date] : null;
+
+                      $firstLog = is_array($punch) ? ($punch['first_log'] ?? null) : null;
+                      $lastLog = is_array($punch) ? ($punch['last_log'] ?? null) : null;
+                      $firstSn = is_array($punch) ? trim((string) ($punch['first_terminal_sn'] ?? '')) : '';
+                      $loginProject = $firstSn !== '' ? trim((string) ($deviceProjectMap[$firstSn] ?? '')) : '';
+                      $leaveCode = is_array($att) ? trim((string) ($att['pending_leave_code'] ?? '')) : '';
+                      $workCode = is_array($att) ? trim((string) ($att['work_code'] ?? '')) : '';
+                      $workHours = calculate_work_hours($firstLog, $lastLog);
+                      $overrideHours = is_array($att) ? trim((string) ($att['override_work_hours'] ?? '')) : '';
+                    ?>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-project-login"><?= h($loginProject) ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-leave"><?= h($leaveCode) ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-work-code"><?= h($workCode) ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-login"><?= h(format_time_value($firstLog)) ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-logout"><?= h(format_time_value($lastLog)) ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-work-hrs"><?= h($workHours !== null ? $workHours : '') ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-override-hrs"><?= h($overrideHours) ?></td>
+                  <?php endforeach; ?>
+                </tr>
+              <?php endforeach; ?>
+            <?php else: ?>
+              <tr class="attendance-empty-row">
+                <td colspan="<?= h(6 + (count($dateRange) * $collapsedDayColumns)) ?>" class="text-center text-muted">No employees found for the selected filters.</td>
+              </tr>
+            <?php endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php if ($totalPages > 1): ?>
+        <div class="attendance-pager" data-total-pages="<?= h($totalPages) ?>">
+          <div class="pager-meta">
+            Page <?= h($page) ?> of <?= h($totalPages) ?>
+          </div>
+          <div class="pager-controls">
+            <button type="button" class="pager-btn <?= $page <= 1 ? 'is-disabled' : '' ?>" data-page="<?= h(max(1, $page - 1)) ?>">
+              ‹ Prev
+            </button>
+            <div class="pager-field">
+              <input type="number" class="pager-page" min="1" max="<?= h($totalPages) ?>" value="<?= h($page) ?>">
+              <span class="text-muted">/ <?= h($totalPages) ?></span>
+              <button type="button" class="pager-btn pager-go">Go</button>
+            </div>
+            <select class="pager-select pager-size">
+              <?php foreach ($allowedPerPage as $size): ?>
+                <option value="<?= h($size) ?>" <?= (int) $perPage === (int) $size ? 'selected' : '' ?>><?= h($size) ?> / page</option>
+              <?php endforeach; ?>
+            </select>
+            <button type="button" class="pager-btn <?= $page >= $totalPages ? 'is-disabled' : '' ?>" data-page="<?= h(min($totalPages, $page + 1)) ?>">
+              Next ›
+            </button>
+          </div>
+        </div>
+      <?php endif; ?>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+function export_attendance_csv(
+    mysqli $bd,
+    array $filters,
+    array $params,
+    string $types,
+    array $dateRange,
+    string $startDate,
+    string $endDate,
+    $output,
+    ?callable $progress = null,
+    int $batchSize = 200
+): ?string {
+    $header = ['Emp Code', 'Emp Name', 'Designation', 'Department', 'Cost center company', 'Employee Type', 'Project Code'];
+    foreach ($dateRange as $date) {
+        $header[] = $date . ' Project login (U)';
+        $header[] = $date . ' Leave code (H)';
+        $header[] = $date . ' Work code (W)';
+        $header[] = $date . ' Login';
+        $header[] = $date . ' Logout';
+        $header[] = $date . ' Work hrs';
+        $header[] = $date . ' Override hrs';
+    }
+    fputcsv($output, $header);
+
+    $exportSql = 'SELECT hr.emp_code, ' .
+        'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
+        'hr.desg_name, hr.dept_name, hr.cc_code, hr.cc_name, hr.ty_desc, hr.jbno, hr.jbdesc ' .
+        'FROM gcc_attendance_master.hrmsvw_sync hr';
+    if (!empty($filters)) {
+        $exportSql .= ' WHERE ' . implode(' AND ', $filters);
+    }
+    $exportSql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT ? OFFSET ?';
+
+    $processed = 0;
+    $exportOffset = 0;
+
+    while (true) {
+        $batchEmployees = [];
+
+        $batchParams = $params;
+        $batchTypes = $types;
+        $batchParams[] = $batchSize;
+        $batchParams[] = $exportOffset;
+        $batchTypes .= 'ii';
+
+        $stmt = $bd->prepare($exportSql);
+        if (!$stmt) {
+            return 'Unable to prepare export query.';
+        }
+        bind_params($stmt, $batchTypes, $batchParams);
+        if ($stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $batchEmployees[] = $row;
+                }
+                $result->free();
+            }
+        } else {
+            $stmt->close();
+            return 'Unable to load employees for export.';
+        }
+        $stmt->close();
+
+        if (empty($batchEmployees)) {
+            break;
+        }
+
+        $empCodes = [];
+        foreach ($batchEmployees as $row) {
+            $code = trim((string) ($row['emp_code'] ?? ''));
+            if ($code !== '') {
+                $empCodes[] = $code;
+            }
+        }
+        $empCodes = array_values(array_unique($empCodes, SORT_STRING));
+
+        $dailyPunch = [];
+        $attDaily = [];
+        $deviceProjectMap = [];
+
+        if (!empty($empCodes)) {
+            $placeholders = implode(',', array_fill(0, count($empCodes), '?'));
+            $rangeTypes = str_repeat('s', count($empCodes)) . 'ss';
+            $rangeParams = array_merge($empCodes, [$startDate, $endDate]);
+
+            $punchSql = 'SELECT emp_code, punch_date, first_log, last_log, first_terminal_sn, last_terminal_sn ' .
+                'FROM gcc_attendance_master.employee_daily_punch ' .
+                'WHERE emp_code IN (' . $placeholders . ') AND punch_date BETWEEN ? AND ?';
+            $stmt = $bd->prepare($punchSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['punch_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($dailyPunch[$emp])) {
+                                $dailyPunch[$emp] = [];
+                            }
+                            $dailyPunch[$emp][$date] = $row;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load daily punches for export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare daily punch export query.';
+            }
+
+            $attSql = 'SELECT emp_code, att_date, work_code, pending_leave_code, override_work_hours ' .
+                'FROM gcc_attendance_master.employee_att_daily ' .
+                'WHERE emp_code IN (' . $placeholders . ') AND att_date BETWEEN ? AND ? ' .
+                'AND (is_delete = 0 OR is_delete IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL)';
+            $stmt = $bd->prepare($attSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['att_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($attDaily[$emp])) {
+                                $attDaily[$emp] = [];
+                            }
+                            $attDaily[$emp][$date] = $row;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load attendance details for export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare attendance export query.';
+            }
+
+            if (!empty($dailyPunch)) {
+                $deviceSn = [];
+                foreach ($dailyPunch as $dates) {
+                    foreach ($dates as $row) {
+                        $sn = trim((string) ($row['first_terminal_sn'] ?? ''));
+                        if ($sn !== '') {
+                            $deviceSn[$sn] = true;
+                        }
+                    }
+                }
+                if (!empty($deviceSn)) {
+                    $deviceList = array_keys($deviceSn);
+                    $devicePlaceholders = implode(',', array_fill(0, count($deviceList), '?'));
+                    $deviceTypes = str_repeat('s', count($deviceList));
+                    $deviceSql = 'SELECT d.device_sn, p.pro_code ' .
+                        'FROM gcc_attendance_master.device_project_map d ' .
+                        'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+                        'WHERE d.device_sn IN (' . $devicePlaceholders . ')';
+                    $stmt = $bd->prepare($deviceSql);
+                    if ($stmt) {
+                        bind_params($stmt, $deviceTypes, $deviceList);
+                        if ($stmt->execute()) {
+                            $result = $stmt->get_result();
+                            if ($result) {
+                                while ($row = $result->fetch_assoc()) {
+                                    $sn = trim((string) ($row['device_sn'] ?? ''));
+                                    if ($sn === '') {
+                                        continue;
+                                    }
+                                    $deviceProjectMap[$sn] = trim((string) ($row['pro_code'] ?? ''));
+                                }
+                                $result->free();
+                            }
+                        }
+                        $stmt->close();
+                    }
+                }
+            }
+        }
+
+        foreach ($batchEmployees as $employee) {
+            $empCode = trim((string) ($employee['emp_code'] ?? ''));
+            $empName = trim((string) ($employee['emp_name'] ?? ''));
+            $designation = trim((string) ($employee['desg_name'] ?? ''));
+            $department = trim((string) ($employee['dept_name'] ?? ''));
+            $costCenterCode = trim((string) ($employee['cc_code'] ?? ''));
+            $costCenterName = trim((string) ($employee['cc_name'] ?? ''));
+            $costCenter = $costCenterName !== '' ? $costCenterName : $costCenterCode;
+            if ($costCenterName !== '' && $costCenterCode !== '' && stripos($costCenterName, $costCenterCode) === false) {
+                $costCenter = $costCenterCode . ' - ' . $costCenterName;
+            }
+            $employeeType = trim((string) ($employee['ty_desc'] ?? ''));
+            $projectCode = trim((string) ($employee['jbno'] ?? ''));
+
+            $row = [
+                $empCode,
+                $empName,
+                $designation,
+                $department,
+                $costCenter,
+                $employeeType,
+                $projectCode,
+            ];
+
+            foreach ($dateRange as $date) {
+                $punch = ($empCode !== '' && isset($dailyPunch[$empCode][$date])) ? $dailyPunch[$empCode][$date] : null;
+                $att = ($empCode !== '' && isset($attDaily[$empCode][$date])) ? $attDaily[$empCode][$date] : null;
+
+                $firstLog = is_array($punch) ? ($punch['first_log'] ?? null) : null;
+                $lastLog = is_array($punch) ? ($punch['last_log'] ?? null) : null;
+                $firstSn = is_array($punch) ? trim((string) ($punch['first_terminal_sn'] ?? '')) : '';
+                $loginProject = $firstSn !== '' ? trim((string) ($deviceProjectMap[$firstSn] ?? '')) : '';
+                $leaveCode = is_array($att) ? trim((string) ($att['pending_leave_code'] ?? '')) : '';
+                $workCode = is_array($att) ? trim((string) ($att['work_code'] ?? '')) : '';
+                $workHours = calculate_work_hours($firstLog, $lastLog);
+                $overrideHours = is_array($att) ? trim((string) ($att['override_work_hours'] ?? '')) : '';
+
+                $row[] = $loginProject;
+                $row[] = $leaveCode;
+                $row[] = $workCode;
+                $row[] = format_time_value($firstLog);
+                $row[] = format_time_value($lastLog);
+                $row[] = $workHours !== null ? $workHours : '';
+                $row[] = $overrideHours;
+            }
+
+            fputcsv($output, $row);
+        }
+
+        $processed += count($batchEmployees);
+        if ($progress) {
+            $progress($processed);
+        }
+
+        $exportOffset += count($batchEmployees);
+        if (count($batchEmployees) < $batchSize) {
+            break;
+        }
+    }
+
+    return null;
+}
+
+$context = null;
+
+$exportType = strtolower(trim((string) ($_GET['export'] ?? '')));
+if ($exportType === 'status') {
+    $jobId = sanitize_export_job_id($_GET['job'] ?? null);
+    $job = $jobId ? read_export_job($jobId) : null;
+    if (!$jobId || !$job) {
+        http_response_code(404);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Export not found.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    $userId = (string) ($_SESSION['user_id'] ?? '');
+    if (($job['user_id'] ?? '') !== $userId) {
+        http_response_code(403);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Export not available.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    $total = (int) ($job['total'] ?? 0);
+    $processed = (int) ($job['processed'] ?? 0);
+    $status = (string) ($job['status'] ?? 'unknown');
+    $percent = $total > 0 ? (int) floor(($processed / $total) * 100) : ($status === 'done' ? 100 : 0);
+    if ($percent > 100) {
+        $percent = 100;
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'ok' => true,
+        'status' => $status,
+        'processed' => $processed,
+        'total' => $total,
+        'percent' => $percent,
+        'message' => $job['message'] ?? null,
+        'filename' => $job['filename'] ?? null,
+    ], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+if ($exportType === 'download') {
+    $jobId = sanitize_export_job_id($_GET['job'] ?? null);
+    $job = $jobId ? read_export_job($jobId) : null;
+    if (!$jobId || !$job) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Export not found.';
+        exit;
+    }
+    $userId = (string) ($_SESSION['user_id'] ?? '');
+    if (($job['user_id'] ?? '') !== $userId) {
+        http_response_code(403);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Export not available.';
+        exit;
+    }
+    if (($job['status'] ?? '') !== 'done') {
+        http_response_code(409);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Export not ready.';
+        exit;
+    }
+    $file = (string) ($job['file'] ?? '');
+    if ($file === '' || !is_file($file)) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Export file missing.';
+        exit;
+    }
+    $filename = (string) ($job['filename'] ?? 'attendance-daily-export.csv');
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    $size = filesize($file);
+    if ($size !== false) {
+        header('Content-Length: ' . $size);
+    }
+    readfile($file);
+    @unlink($file);
+    @unlink(export_job_path($jobId));
+    exit;
+}
+
 [$defaultStart, $defaultEnd] = current_week_range();
 $today = new DateTimeImmutable('today');
 $last30Start = $today->modify('-29 days')->format('Y-m-d');
@@ -192,12 +737,15 @@ $prevWeekEnd = (new DateTimeImmutable($defaultEnd))->modify('-7 days')->format('
 $designationFilter = normalize_multi_param($_GET['designation'] ?? []);
 $departmentFilter = normalize_multi_param($_GET['department'] ?? []);
 $projectCodeFilter = normalize_multi_param($_GET['project_code'] ?? []);
+$loginProjectFilter = normalize_multi_param($_GET['login_project'] ?? []);
 $costCenterFilter = normalize_multi_param($_GET['cost_center'] ?? []);
 $employeeTypeFilter = normalize_multi_param($_GET['employee_type'] ?? []);
 $employeeIdInput = trim((string) ($_GET['employee_id'] ?? ''));
 $employeeIdTerms = normalize_search_terms($employeeIdInput);
 $startDate = normalize_date($_GET['start_date'] ?? '', $defaultStart);
 $endDate = normalize_date($_GET['end_date'] ?? '', $defaultEnd);
+$exportRequested = in_array($exportType, ['1', 'true', 'yes', 'csv'], true);
+$exportStart = ($exportType === 'start');
 $page = max(1, (int) ($_GET['page'] ?? 1));
 $perPage = (int) ($_GET['per_page'] ?? 50);
 $allowedPerPage = [25, 50, 100];
@@ -222,6 +770,7 @@ $deviceProjectMap = [];
 $departmentOptions = [];
 $designationOptions = [];
 $projectOptions = [];
+$loginProjectOptions = [];
 $costCenterOptions = [];
 $employeeTypeOptions = [];
 $offset = 0;
@@ -274,6 +823,24 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $projectResult->free();
     }
 
+    $loginProjectResult = $bd->query(
+        'SELECT DISTINCT p.pro_code, p.name ' .
+        'FROM gcc_attendance_master.device_project_map d ' .
+        'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+        'WHERE p.pro_code IS NOT NULL AND p.pro_code <> "" ' .
+        'ORDER BY p.pro_code'
+    );
+    if ($loginProjectResult) {
+        while ($row = $loginProjectResult->fetch_assoc()) {
+            $code = trim((string) ($row['pro_code'] ?? ''));
+            if ($code === '') {
+                continue;
+            }
+            $loginProjectOptions[$code] = trim((string) ($row['name'] ?? ''));
+        }
+        $loginProjectResult->free();
+    }
+
     $costResult = $bd->query(
         'SELECT cc_code, cc_name FROM gcc_attendance_master.hrms_cost_centers ORDER BY cc_name, cc_code'
     );
@@ -323,6 +890,18 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $filters[] = 'hr.jbno IN (' . $placeholders . ')';
         $params = array_merge($params, $projectCodeFilter);
         $types .= str_repeat('s', count($projectCodeFilter));
+    }
+    if (!empty($loginProjectFilter)) {
+        $placeholders = implode(',', array_fill(0, count($loginProjectFilter), '?'));
+        $filters[] = 'hr.emp_code IN (' .
+            'SELECT DISTINCT dp.emp_code ' .
+            'FROM gcc_attendance_master.employee_daily_punch dp ' .
+            'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+            'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+            'WHERE dp.punch_date BETWEEN ? AND ? AND p.pro_code IN (' . $placeholders . ')' .
+            ')';
+        $params = array_merge($params, [$startDate, $endDate], $loginProjectFilter);
+        $types .= 'ss' . str_repeat('s', count($loginProjectFilter));
     }
     if (!empty($costCenterFilter)) {
         $placeholders = implode(',', array_fill(0, count($costCenterFilter), '?'));
@@ -378,7 +957,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
 
     $sql = 'SELECT hr.emp_code, ' .
         'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
-        'hr.desg_name, hr.dept_name, hr.ty_desc, hr.jbno, hr.jbdesc ' .
+        'hr.desg_name, hr.dept_name, hr.cc_code, hr.cc_name, hr.ty_desc, hr.jbno, hr.jbdesc ' .
         'FROM gcc_attendance_master.hrmsvw_sync hr';
     if (!empty($filters)) {
         $sql .= ' WHERE ' . implode(' AND ', $filters);
@@ -531,11 +1110,18 @@ $baseQuery = [
     'department' => $departmentFilter,
     'designation' => $designationFilter,
     'project_code' => $projectCodeFilter,
+    'login_project' => $loginProjectFilter,
     'employee_id' => $employeeIdInput,
     'per_page' => $perPage,
     'start_date' => $startDate,
     'end_date' => $endDate,
 ];
+$exportUrl = build_query_url(array_merge($baseQuery, [
+    'export' => 'csv',
+]));
+$exportStartUrl = build_query_url(array_merge($baseQuery, [
+    'export' => 'start',
+]));
 $currentWeekUrl = build_query_url(array_merge($baseQuery, [
     'start_date' => $defaultStart,
     'end_date' => $defaultEnd,
@@ -565,6 +1151,152 @@ if ($totalPages > 1) {
     if ($page < $totalPages) {
         $prefetchUrls[] = build_query_url(array_merge($baseQuery, ['page' => $page + 1]));
     }
+}
+
+$context = [
+    'employees' => $employees,
+    'dateRange' => $dateRange,
+    'dailyPunch' => $dailyPunch,
+    'attDaily' => $attDaily,
+    'deviceProjectMap' => $deviceProjectMap,
+    'collapsedDayColumns' => $collapsedDayColumns,
+    'expandedDayColumns' => $expandedDayColumns,
+    'page' => $page,
+    'totalPages' => $totalPages,
+    'totalEmployees' => $totalEmployees,
+    'showingStart' => $showingStart,
+    'showingEnd' => $showingEnd,
+    'perPage' => $perPage,
+    'allowedPerPage' => $allowedPerPage,
+];
+
+if ($exportStart) {
+    if ($loadError !== null) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => $loadError], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    $jobId = bin2hex(random_bytes(16));
+    $exportDir = export_job_dir();
+    if (!is_dir($exportDir) || !is_writable($exportDir)) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Export folder is not writable.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    $filename = 'attendance-daily-' . $startDate . '-to-' . $endDate . '.csv';
+    $csvPath = export_job_csv_path($jobId);
+    $createdAt = gmdate('c');
+    $userId = (string) ($_SESSION['user_id'] ?? '');
+
+    $job = [
+        'id' => $jobId,
+        'status' => 'running',
+        'total' => $totalEmployees,
+        'processed' => 0,
+        'user_id' => $userId,
+        'file' => $csvPath,
+        'filename' => $filename,
+        'created_at' => $createdAt,
+        'message' => null,
+    ];
+    write_export_job($jobId, $job);
+
+    $payload = json_encode([
+        'ok' => true,
+        'job' => $jobId,
+        'total' => $totalEmployees,
+        'statusUrl' => build_query_url(['export' => 'status', 'job' => $jobId]),
+        'downloadUrl' => build_query_url(['export' => 'download', 'job' => $jobId]),
+        'filename' => $filename,
+    ], JSON_UNESCAPED_SLASHES);
+    if ($payload === false) {
+        $payload = '{"ok":false,"message":"Unable to start export."}';
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Connection: close');
+    header('Content-Length: ' . strlen($payload));
+    echo $payload;
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } else {
+        while (ob_get_level() > 0) {
+            @ob_end_flush();
+        }
+        flush();
+    }
+
+    session_write_close();
+    ignore_user_abort(true);
+    set_time_limit(0);
+
+    $output = fopen($csvPath, 'w');
+    if ($output === false) {
+        $job['status'] = 'error';
+        $job['message'] = 'Unable to create export file.';
+        write_export_job($jobId, $job);
+        exit;
+    }
+
+    $progress = function (int $processed) use (&$job, $jobId): void {
+        $job['processed'] = $processed;
+        $job['status'] = 'running';
+        write_export_job($jobId, $job);
+    };
+    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $output, $progress);
+    fclose($output);
+
+    if ($exportError !== null) {
+        $job['status'] = 'error';
+        $job['message'] = $exportError;
+        write_export_job($jobId, $job);
+        exit;
+    }
+
+    $job['status'] = 'done';
+    $job['processed'] = $totalEmployees;
+    write_export_job($jobId, $job);
+    exit;
+}
+
+if ($exportRequested) {
+    if ($loadError !== null) {
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $loadError;
+        exit;
+    }
+
+    $filename = 'attendance-daily-' . $startDate . '-to-' . $endDate . '.csv';
+
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+
+    $output = fopen('php://output', 'w');
+    if ($output === false) {
+        http_response_code(500);
+        exit;
+    }
+
+    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $output);
+    if ($exportError !== null) {
+        fputcsv($output, ['ERROR', $exportError]);
+    }
+
+    fclose($output);
+    exit;
+}
+
+if (($_GET['ajax'] ?? '') === '1') {
+    header('Content-Type: application/json; charset=utf-8');
+    if ($loadError) {
+        echo json_encode(['ok' => false, 'message' => $loadError], JSON_UNESCAPED_SLASHES);
+    } else {
+        echo json_encode(['ok' => true, 'html' => render_attendance_results($context)], JSON_UNESCAPED_SLASHES);
+    }
+    exit;
 }
 
 include __DIR__ . '/include/layout_top.php';
@@ -706,6 +1438,114 @@ include __DIR__ . '/include/layout_top.php';
   .select2-container {
     width: 100% !important;
   }
+  .export-overlay {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(8, 12, 20, 0.72);
+    backdrop-filter: blur(4px);
+    z-index: 1060;
+  }
+  .export-overlay.is-active {
+    display: flex;
+  }
+  .export-modal {
+    position: relative;
+    background: #0b1220;
+    color: #f8f9fa;
+    padding: 24px 28px;
+    border-radius: 18px;
+    min-width: 320px;
+    text-align: center;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+  }
+  .export-modal::before {
+    content: '';
+    position: absolute;
+    inset: -60px;
+    background: radial-gradient(circle at top, rgba(0, 209, 255, 0.25), transparent 60%);
+    opacity: 0.8;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .export-modal > * {
+    position: relative;
+    z-index: 1;
+  }
+  .export-title {
+    font-weight: 600;
+    font-size: 1.1rem;
+    letter-spacing: 0.02em;
+  }
+  .export-ring {
+    --progress: 0;
+    width: 170px;
+    height: 170px;
+    margin: 16px auto 12px;
+    border-radius: 50%;
+    background: conic-gradient(#00d2ff calc(var(--progress) * 1%), #1b2a44 0);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 24px rgba(0, 210, 255, 0.35);
+    transition: background 0.3s ease, box-shadow 0.3s ease;
+  }
+  .export-ring.is-complete {
+    background: conic-gradient(#00e676 100%, #00e676 0);
+    box-shadow: 0 0 28px rgba(0, 230, 118, 0.45);
+  }
+  .export-ring-inner {
+    width: 122px;
+    height: 122px;
+    border-radius: 50%;
+    background: #0b1220;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .export-percent {
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+  .export-count {
+    font-size: 0.8rem;
+    color: #a7b3c2;
+    margin-top: 4px;
+  }
+  .export-status {
+    font-size: 0.9rem;
+    color: #c8d3e0;
+  }
+  .export-actions {
+    margin-top: 14px;
+  }
+  .export-overlay.is-active .export-modal {
+    animation: exportPop 0.4s ease;
+  }
+  @keyframes exportPop {
+    0% { transform: scale(0.96); opacity: 0; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  @media (max-width: 576px) {
+    .export-modal {
+      width: 90%;
+      min-width: 0;
+      padding: 20px 18px;
+    }
+    .export-ring {
+      width: 140px;
+      height: 140px;
+    }
+    .export-ring-inner {
+      width: 104px;
+      height: 104px;
+    }
+  }
 </style>
 
 <section class="content-header">
@@ -714,10 +1554,7 @@ include __DIR__ . '/include/layout_top.php';
       <div class="col-sm-6">
         <h1>Attendance Daily</h1>
       </div>
-      <div class="col-sm-6 text-sm-right">
-        <a class="btn btn-sm btn-outline-primary" href="<?= h(admin_url('Attendance_AttendanceAdjustTime.php')) ?>">Adjust time</a>
-        <a class="btn btn-sm btn-outline-secondary" href="<?= h(admin_url('Attendance_AttendanceApproval.php')) ?>">Approvals</a>
-      </div>
+      <div class="col-sm-6 text-sm-right"></div>
     </div>
     <?php include __DIR__ . '/include/admin_nav.php'; ?>
   </div>
@@ -780,11 +1617,20 @@ include __DIR__ . '/include/layout_top.php';
             </select>
           </div>
           <div class="form-group col-md-3">
-            <label for="project_code">Project code</label>
+            <label for="project_code">Allocated Project Code</label>
             <select id="project_code" name="project_code[]" class="form-control js-searchable" data-placeholder="All" multiple>
               <?php foreach ($projectOptions as $code => $name): ?>
                 <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
                 <option value="<?= h($code) ?>" <?= in_array($code, $projectCodeFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="form-group col-md-3">
+            <label for="login_project">Log-in project</label>
+            <select id="login_project" name="login_project[]" class="form-control js-searchable" data-placeholder="All" multiple>
+              <?php foreach ($loginProjectOptions as $code => $name): ?>
+                <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
+                <option value="<?= h($code) ?>" <?= in_array($code, $loginProjectFilter, true) ? 'selected' : '' ?>><?= h($label) ?></option>
               <?php endforeach; ?>
             </select>
           </div>
@@ -805,6 +1651,9 @@ include __DIR__ . '/include/layout_top.php';
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
             <a class="btn btn-outline-secondary btn-block" href="<?= h(admin_url('Attendance_AttendanceDaily.php')) ?>">Reset</a>
+          </div>
+          <div class="form-group col-md-2 d-flex align-items-end">
+            <a id="exportBtn" class="btn btn-outline-success btn-block" href="<?= h($exportUrl) ?>" data-export-start="<?= h($exportStartUrl) ?>">Export</a>
           </div>
         </form>
         <div class="small text-muted">
@@ -856,6 +1705,7 @@ include __DIR__ . '/include/layout_top.php';
               </th>
               <th rowspan="2" class="col-adv">Designation</th>
               <th rowspan="2" class="col-adv">Department</th>
+              <th rowspan="2" class="col-adv">Cost center company</th>
               <th rowspan="2" class="col-adv">Employee Type</th>
               <th rowspan="2" class="col-adv">Project Code</th>
               <?php foreach ($dateRange as $dayIndex => $date): ?>
@@ -888,16 +1738,23 @@ include __DIR__ . '/include/layout_top.php';
                   $empName = trim((string) ($employee['emp_name'] ?? ''));
                   $designation = trim((string) ($employee['desg_name'] ?? ''));
                   $department = trim((string) ($employee['dept_name'] ?? ''));
+                  $costCenterCode = trim((string) ($employee['cc_code'] ?? ''));
+                  $costCenterName = trim((string) ($employee['cc_name'] ?? ''));
+                  $costCenter = $costCenterName !== '' ? $costCenterName : $costCenterCode;
+                  if ($costCenterName !== '' && $costCenterCode !== '' && stripos($costCenterName, $costCenterCode) === false) {
+                      $costCenter = $costCenterCode . ' - ' . $costCenterName;
+                  }
                   $employeeType = trim((string) ($employee['ty_desc'] ?? ''));
                   $projectCode = trim((string) ($employee['jbno'] ?? ''));
                 ?>
                 <tr>
-                  <td class="col-fixed col-fixed-1"><?= h($empCode !== '' ? $empCode : '-') ?></td>
-                  <td class="col-fixed col-fixed-2"><?= h($empName !== '' ? $empName : '-') ?></td>
-                  <td class="col-adv"><?= h($designation !== '' ? $designation : '-') ?></td>
-                  <td class="col-adv"><?= h($department !== '' ? $department : '-') ?></td>
-                  <td class="col-adv"><?= h($employeeType !== '' ? $employeeType : '-') ?></td>
-                  <td class="col-adv"><?= h($projectCode !== '' ? $projectCode : '-') ?></td>
+                  <td class="col-fixed col-fixed-1"><?= h($empCode) ?></td>
+                  <td class="col-fixed col-fixed-2"><?= h($empName) ?></td>
+                  <td class="col-adv"><?= h($designation) ?></td>
+                  <td class="col-adv"><?= h($department) ?></td>
+                  <td class="col-adv"><?= h($costCenter) ?></td>
+                  <td class="col-adv"><?= h($employeeType) ?></td>
+                  <td class="col-adv"><?= h($projectCode) ?></td>
                   <?php foreach ($dateRange as $dayIndex => $date): ?>
                     <?php $dayClass = 'day-' . $dayIndex; ?>
                     <?php
@@ -913,13 +1770,13 @@ include __DIR__ . '/include/layout_top.php';
                       $workHours = calculate_work_hours($firstLog, $lastLog);
                       $overrideHours = is_array($att) ? trim((string) ($att['override_work_hours'] ?? '')) : '';
                     ?>
-                    <td class="day-col <?= $dayClass ?> col-extra col-project-login"><?= h($loginProject !== '' ? $loginProject : '-') ?></td>
-                    <td class="day-col <?= $dayClass ?> col-extra col-leave"><?= h($leaveCode !== '' ? $leaveCode : '-') ?></td>
-                    <td class="day-col <?= $dayClass ?> col-work-code"><?= h($workCode !== '' ? $workCode : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-project-login"><?= h($loginProject) ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-leave"><?= h($leaveCode) ?></td>
+                    <td class="day-col <?= $dayClass ?> col-work-code"><?= h($workCode) ?></td>
                     <td class="day-col <?= $dayClass ?> col-extra col-login"><?= h(format_time_value($firstLog)) ?></td>
                     <td class="day-col <?= $dayClass ?> col-extra col-logout"><?= h(format_time_value($lastLog)) ?></td>
-                    <td class="day-col <?= $dayClass ?> col-work-hrs"><?= h($workHours !== null ? $workHours : '-') ?></td>
-                    <td class="day-col <?= $dayClass ?> col-extra col-override-hrs"><?= h($overrideHours !== '' ? $overrideHours : '-') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-work-hrs"><?= h($workHours !== null ? $workHours : '') ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-override-hrs"><?= h($overrideHours) ?></td>
                   <?php endforeach; ?>
                 </tr>
               <?php endforeach; ?>
@@ -959,6 +1816,22 @@ include __DIR__ . '/include/layout_top.php';
     </div>
   </div>
 </section>
+
+<div id="exportOverlay" class="export-overlay" aria-hidden="true">
+  <div class="export-modal" role="dialog" aria-modal="true" aria-labelledby="exportTitle">
+    <div class="export-title" id="exportTitle">Preparing export</div>
+    <div class="export-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="export-ring-inner">
+        <div class="export-percent">0%</div>
+        <div class="export-count">0 / 0 employees</div>
+      </div>
+    </div>
+    <div class="export-status" aria-live="polite">Starting export...</div>
+    <div class="export-actions">
+      <button type="button" class="btn btn-outline-light btn-sm" id="exportClose">Close</button>
+    </div>
+  </div>
+</div>
 
 <script defer src="plugins/select2/js/select2.full.min.js"></script>
 <script>
@@ -1118,6 +1991,155 @@ include __DIR__ . '/include/layout_top.php';
         });
       }
     });
+  });
+</script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const exportBtn = document.getElementById('exportBtn');
+    const overlay = document.getElementById('exportOverlay');
+    if (!exportBtn || !overlay) {
+      return;
+    }
+    const startUrl = exportBtn.getAttribute('data-export-start');
+    if (!startUrl) {
+      return;
+    }
+    const ring = overlay.querySelector('.export-ring');
+    const percentEl = overlay.querySelector('.export-percent');
+    const countEl = overlay.querySelector('.export-count');
+    const statusEl = overlay.querySelector('.export-status');
+    const closeBtn = document.getElementById('exportClose');
+
+    let pollTimer = null;
+    let activeJob = null;
+
+    const showOverlay = () => {
+      overlay.classList.add('is-active');
+      overlay.setAttribute('aria-hidden', 'false');
+    };
+    const hideOverlay = () => {
+      overlay.classList.remove('is-active');
+      overlay.setAttribute('aria-hidden', 'true');
+    };
+    const setProgress = (processed, total, percent) => {
+      const safeTotal = Number.isFinite(total) ? total : 0;
+      const safeProcessed = Number.isFinite(processed) ? processed : 0;
+      const safePercent = Number.isFinite(percent)
+        ? Math.max(0, Math.min(100, Math.round(percent)))
+        : (safeTotal > 0 ? Math.round((safeProcessed / safeTotal) * 100) : 0);
+      if (ring) {
+        ring.style.setProperty('--progress', String(safePercent));
+        ring.setAttribute('aria-valuenow', String(safePercent));
+      }
+      if (percentEl) {
+        percentEl.textContent = `${safePercent}%`;
+      }
+      if (countEl) {
+        countEl.textContent = `${safeProcessed} / ${safeTotal} employees`;
+      }
+    };
+    const stopPolling = () => {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+    const pollStatus = () => {
+      if (!activeJob || !activeJob.statusUrl) {
+        return;
+      }
+      fetch(activeJob.statusUrl, { credentials: 'same-origin' })
+        .then((response) => response.json())
+        .then((data) => {
+          if (!data || !data.ok) {
+            throw new Error(data && data.message ? data.message : 'Unable to read export status.');
+          }
+          setProgress(Number(data.processed), Number(data.total), Number(data.percent));
+          if (data.status === 'done') {
+            stopPolling();
+            exportBtn.classList.remove('is-loading');
+            if (ring) {
+              ring.classList.add('is-complete');
+            }
+            if (statusEl) {
+              statusEl.textContent = 'Download starting...';
+            }
+            if (activeJob.downloadUrl) {
+              setTimeout(() => {
+                window.location.href = activeJob.downloadUrl;
+              }, 400);
+            }
+            setTimeout(hideOverlay, 1800);
+            return;
+          }
+          if (data.status === 'error') {
+            stopPolling();
+            exportBtn.classList.remove('is-loading');
+            if (statusEl) {
+              statusEl.textContent = data.message || 'Export failed.';
+            }
+            return;
+          }
+          if (statusEl) {
+            statusEl.textContent = 'Exporting data...';
+          }
+        })
+        .catch((error) => {
+          stopPolling();
+          exportBtn.classList.remove('is-loading');
+          if (statusEl) {
+            statusEl.textContent = error && error.message ? error.message : 'Export failed.';
+          }
+        });
+    };
+
+    exportBtn.addEventListener('click', function (event) {
+      event.preventDefault();
+      if (exportBtn.classList.contains('is-loading')) {
+        return;
+      }
+      exportBtn.classList.add('is-loading');
+      showOverlay();
+      if (ring) {
+        ring.classList.remove('is-complete');
+      }
+      setProgress(0, 0, 0);
+      if (statusEl) {
+        statusEl.textContent = 'Starting export...';
+      }
+
+      fetch(startUrl, { credentials: 'same-origin' })
+        .then((response) => response.json())
+        .then((data) => {
+          if (!data || !data.ok) {
+            throw new Error(data && data.message ? data.message : 'Unable to start export.');
+          }
+          activeJob = {
+            job: data.job,
+            statusUrl: data.statusUrl,
+            downloadUrl: data.downloadUrl,
+          };
+          setProgress(0, Number(data.total), 0);
+          pollStatus();
+          pollTimer = setInterval(pollStatus, 900);
+        })
+        .catch((error) => {
+          exportBtn.classList.remove('is-loading');
+          if (statusEl) {
+            statusEl.textContent = error && error.message ? error.message : 'Unable to start export.';
+          }
+          setTimeout(() => {
+            window.location.href = exportBtn.getAttribute('href');
+            hideOverlay();
+          }, 1200);
+        });
+    });
+
+    if (closeBtn) {
+      closeBtn.addEventListener('click', function () {
+        hideOverlay();
+      });
+    }
   });
 </script>
 <script>
