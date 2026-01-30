@@ -129,6 +129,42 @@ function format_yes_no(?bool $value): string {
     return $value ? 'Yes' : 'No';
 }
 
+function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
+    if ($types === '' || empty($params)) {
+        return;
+    }
+    $bind = [$types];
+    foreach ($params as $index => $value) {
+        $bind[] = &$params[$index];
+    }
+    call_user_func_array([$stmt, 'bind_param'], $bind);
+}
+
+function db_fetch_all(mysqli $bd, string $sql, string $types = '', array $params = []): array {
+    $stmt = $bd->prepare($sql);
+    if (!$stmt) {
+        return ['ok' => false, 'rows' => [], 'error' => $bd->error ?: 'prepare_failed'];
+    }
+    if ($types !== '' && !empty($params)) {
+        bind_params($stmt, $types, $params);
+    }
+    if (!$stmt->execute()) {
+        $error = $stmt->error ?: 'execute_failed';
+        $stmt->close();
+        return ['ok' => false, 'rows' => [], 'error' => $error];
+    }
+    $rows = [];
+    $result = $stmt->get_result();
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $result->free();
+    }
+    $stmt->close();
+    return ['ok' => true, 'rows' => $rows, 'error' => null];
+}
+
 function build_project_device_summary(array $deviceCounts, array $deviceMap, array $deviceTotals, int $limit = 3): array {
     $projectCounts = [];
     foreach ($deviceCounts as $sn => $count) {
@@ -1615,11 +1651,9 @@ if ($isAjax && $ajaxSection === 'active-devices') {
     }
 
     $activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
-    $activeDeviceLabel = $activeDeviceCountText !== '-'
-        ? ($activeDeviceCountText . ' Projects with punches')
-        : 'Projects with punches';
+    $activeDeviceLabel = 'Projects with punches';
     if ($activeDeviceMetaIsList) {
-        $activeDeviceLabel .= ' (Devices active/total / Employees:)';
+        $activeDeviceLabel .= ' (Devices active/total / Employees)';
     }
 
     $payload = [
@@ -1779,6 +1813,695 @@ if ($isAjax && $ajaxSection === 'badge-ratio') {
     header('Cache-Control: no-store');
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
     exit;
+}
+
+if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
+    if (!isset($bd) || !($bd instanceof mysqli)) {
+        $payload = [
+            'errors' => ['Database connection not available.'],
+            'insights' => [],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    $projectCodeFilter = '';
+    if ($projectId !== '' && isset($projectCodeById[$projectId])) {
+        $projectCodeFilter = trim((string) $projectCodeById[$projectId]);
+    }
+
+    $metaParts = [];
+    $metaParts[] = $projectCodeFilter !== '' ? ('Project ' . $projectCodeFilter) : 'All projects';
+    if ($deviceScope === 'none') {
+        $metaParts[] = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected';
+    } elseif ($deviceSnParam !== '') {
+        $metaParts[] = 'Devices ' . $deviceSnParam;
+    } else {
+        $metaParts[] = 'All devices';
+    }
+    $metaText = 'Updated ' . date('d M Y, H:i') . ' | ' . implode(' | ', $metaParts);
+
+    $attWhere = 'att_date BETWEEN ? AND ? AND (is_delete = 0 OR is_delete IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL)';
+    $attTypes = 'ss';
+    $attParams = [$startDate, $endDate];
+    if ($projectCodeFilter !== '') {
+        $attWhere .= ' AND Projectcode_utime = ?';
+        $attTypes .= 's';
+        $attParams[] = $projectCodeFilter;
+    }
+
+    if ($ajaxSection === 'insights-hero') {
+        $errors = [];
+        $employeeCount = 0;
+        $employeeNote = 'Unique employees in range';
+        $countResult = ['ok' => false, 'rows' => []];
+        if ($deviceSnParam !== '') {
+            $punchWhere = 'punch_date BETWEEN ? AND ?';
+            $punchTypes = 'ss';
+            $punchParams = [$startDate, $endDate];
+            $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
+            $punchTypes .= 'ss';
+            $punchParams[] = $deviceSnParam;
+            $punchParams[] = $deviceSnParam;
+            $countSql = 'SELECT COUNT(DISTINCT emp_code) AS employee_count ' .
+                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
+                ' AND (first_log IS NOT NULL OR last_log IS NOT NULL)';
+            $countResult = db_fetch_all($bd, $countSql, $punchTypes, $punchParams);
+        } else {
+            $countSql = 'SELECT COUNT(DISTINCT emp_code) AS employee_count ' .
+                'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere;
+            $countResult = db_fetch_all($bd, $countSql, $attTypes, $attParams);
+        }
+        if (!$countResult['ok']) {
+            $errors[] = 'Employee count unavailable.';
+        } else {
+            $employeeCount = (int) (($countResult['rows'][0]['employee_count'] ?? 0));
+        }
+        if ($deviceScope === 'none' && $employeeCount === 0) {
+            $employeeNote = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
+        }
+
+        $hoursSql = 'SELECT ' .
+            'ROUND(SUM(COALESCE(work_hours, work_hours_utime, 0)), 2) AS total_hours, ' .
+            'ROUND(AVG(COALESCE(work_hours, work_hours_utime)), 2) AS avg_hours ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere;
+        $hoursResult = db_fetch_all($bd, $hoursSql, $attTypes, $attParams);
+        $totalHours = 0.0;
+        $avgHours = 0.0;
+        if ($hoursResult['ok'] && !empty($hoursResult['rows'])) {
+            $hoursRow = $hoursResult['rows'][0];
+            $totalHours = (float) ($hoursRow['total_hours'] ?? 0);
+            $avgHours = (float) ($hoursRow['avg_hours'] ?? 0);
+        } else {
+            $errors[] = 'Work hours unavailable.';
+        }
+
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'hero' => [
+                    'employeeCount' => $employeeCount,
+                    'employeeNote' => $employeeNote,
+                    'totalHours' => $totalHours,
+                    'avgHours' => $avgHours,
+                ],
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-momentum') {
+        $errors = [];
+        $startObj = DateTimeImmutable::createFromFormat('Y-m-d', $startDate);
+        $endObj = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
+        $rangeDays = 1;
+        if ($startObj instanceof DateTimeImmutable && $endObj instanceof DateTimeImmutable) {
+            $rangeDays = max(1, $startObj->diff($endObj)->days + 1);
+        }
+        $prevEndObj = $startObj instanceof DateTimeImmutable ? $startObj->modify('-1 day') : null;
+        $prevStartObj = $prevEndObj ? $prevEndObj->modify('-' . ($rangeDays - 1) . ' days') : null;
+
+        $dailySql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS employee_count ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY att_date ORDER BY att_date';
+        $currentResult = db_fetch_all($bd, $dailySql, $attTypes, $attParams);
+        $currentTotal = 0;
+        if ($currentResult['ok']) {
+            foreach ($currentResult['rows'] as $row) {
+                $currentTotal += (int) ($row['employee_count'] ?? 0);
+            }
+        } else {
+            $errors[] = 'Momentum unavailable.';
+        }
+
+        $prevTotal = 0;
+        if ($prevStartObj && $prevEndObj) {
+            $prevParams = $attParams;
+            $prevParams[0] = $prevStartObj->format('Y-m-d');
+            $prevParams[1] = $prevEndObj->format('Y-m-d');
+            $prevResult = db_fetch_all($bd, $dailySql, $attTypes, $prevParams);
+            if ($prevResult['ok']) {
+                foreach ($prevResult['rows'] as $row) {
+                    $prevTotal += (int) ($row['employee_count'] ?? 0);
+                }
+            } else {
+                $errors[] = 'Previous period unavailable.';
+            }
+        }
+
+        $deltaPercent = null;
+        $direction = 'flat';
+        if ($prevTotal > 0) {
+            $deltaPercent = round((($currentTotal - $prevTotal) / $prevTotal) * 100, 1);
+        } elseif ($currentTotal > 0) {
+            $deltaPercent = 100.0;
+        }
+        if ($deltaPercent !== null) {
+            if ($deltaPercent > 1) {
+                $direction = 'up';
+            } elseif ($deltaPercent < -1) {
+                $direction = 'down';
+            }
+        }
+
+        $label = 'vs previous period';
+        if ($prevStartObj && $prevEndObj) {
+            $label = 'Prev ' . format_display_date($prevStartObj->format('Y-m-d')) .
+                ' to ' . format_display_date($prevEndObj->format('Y-m-d'));
+        }
+
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'momentum' => [
+                    'deltaPercent' => $deltaPercent,
+                    'direction' => $direction,
+                    'currentTotal' => $currentTotal,
+                    'previousTotal' => $prevTotal,
+                    'label' => $label,
+                    'rangeDays' => $rangeDays,
+                ],
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-summary') {
+        $dailySql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS employee_count, ' .
+            'ROUND(SUM(COALESCE(work_hours, work_hours_utime, 0)), 2) AS total_hours ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY att_date ORDER BY att_date';
+        $dailyResult = db_fetch_all($bd, $dailySql, $attTypes, $attParams);
+        $dailyRows = $dailyResult['ok'] ? $dailyResult['rows'] : [];
+        $errors = [];
+        if (!$dailyResult['ok']) {
+            $errors[] = 'Summary unavailable.';
+        }
+        $totalAttendance = 0;
+        $totalHours = 0.0;
+        $peakDay = '';
+        $peakCount = 0;
+        foreach ($dailyRows as $row) {
+            $count = (int) ($row['employee_count'] ?? 0);
+            $hours = (float) ($row['total_hours'] ?? 0);
+            $totalAttendance += $count;
+            $totalHours += $hours;
+            if ($count > $peakCount) {
+                $peakCount = $count;
+                $peakDay = (string) ($row['att_date'] ?? '');
+            }
+        }
+        $dayCount = count($dailyRows);
+        $avgDaily = $dayCount > 0 ? round($totalAttendance / $dayCount, 1) : 0;
+        $avgHours = $totalAttendance > 0 ? round($totalHours / $totalAttendance, 2) : 0;
+        $peakDayLabel = $peakDay !== '' ? format_display_date($peakDay) : '';
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'summary' => [
+                    'totalAttendance' => $totalAttendance,
+                    'avgDailyAttendance' => $avgDaily,
+                    'avgWorkHours' => $avgHours,
+                    'peakDay' => $peakDayLabel,
+                    'peakCount' => $peakCount,
+                    'dayCount' => $dayCount,
+                ],
+                'meta' => $metaText,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-daily') {
+        $dailySql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS employee_count, ' .
+            'ROUND(AVG(COALESCE(work_hours, work_hours_utime)), 2) AS avg_hours, ' .
+            'ROUND(SUM(COALESCE(work_hours, work_hours_utime, 0)), 2) AS total_hours ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY att_date ORDER BY att_date';
+        $dailyResult = db_fetch_all($bd, $dailySql, $attTypes, $attParams);
+        $dailyRows = $dailyResult['ok'] ? $dailyResult['rows'] : [];
+        $payload = [
+            'errors' => $dailyResult['ok'] ? [] : ['Daily trend unavailable.'],
+            'insights' => [
+                'dailyTrend' => array_map(static function (array $row): array {
+                    return [
+                        'date' => (string) ($row['att_date'] ?? ''),
+                        'count' => (int) ($row['employee_count'] ?? 0),
+                        'avgHours' => (float) ($row['avg_hours'] ?? 0),
+                        'totalHours' => (float) ($row['total_hours'] ?? 0),
+                    ];
+                }, $dailyRows),
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-work-hours') {
+        $hoursSql = 'SELECT ' .
+            'SUM(CASE WHEN hours < 4 THEN 1 ELSE 0 END) AS under4, ' .
+            'SUM(CASE WHEN hours >= 4 AND hours < 6 THEN 1 ELSE 0 END) AS h4_6, ' .
+            'SUM(CASE WHEN hours >= 6 AND hours < 8 THEN 1 ELSE 0 END) AS h6_8, ' .
+            'SUM(CASE WHEN hours >= 8 AND hours < 10 THEN 1 ELSE 0 END) AS h8_10, ' .
+            'SUM(CASE WHEN hours >= 10 THEN 1 ELSE 0 END) AS h10_plus ' .
+            'FROM (SELECT COALESCE(work_hours, work_hours_utime) AS hours ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere . ') t ' .
+            'WHERE hours IS NOT NULL';
+        $hoursResult = db_fetch_all($bd, $hoursSql, $attTypes, $attParams);
+        $hoursRow = $hoursResult['ok'] && !empty($hoursResult['rows']) ? $hoursResult['rows'][0] : [];
+        $workHours = [
+            ['label' => '< 4h', 'count' => (int) ($hoursRow['under4'] ?? 0)],
+            ['label' => '4-6h', 'count' => (int) ($hoursRow['h4_6'] ?? 0)],
+            ['label' => '6-8h', 'count' => (int) ($hoursRow['h6_8'] ?? 0)],
+            ['label' => '8-10h', 'count' => (int) ($hoursRow['h8_10'] ?? 0)],
+            ['label' => '10h+', 'count' => (int) ($hoursRow['h10_plus'] ?? 0)],
+        ];
+        $payload = [
+            'errors' => $hoursResult['ok'] ? [] : ['Work hours distribution unavailable.'],
+            'insights' => [
+                'workHours' => $workHours,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-punch-hours') {
+        $punchRows = [];
+        $errors = [];
+        if ($deviceScope === 'none') {
+            $punchRows = [];
+        } else {
+            $punchWhere = 'punch_date BETWEEN ? AND ?';
+            $punchTypes = 'ss';
+            $punchParams = [$startDate, $endDate];
+            if ($deviceSnParam !== '') {
+                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
+                $punchTypes .= 'ss';
+                $punchParams[] = $deviceSnParam;
+                $punchParams[] = $deviceSnParam;
+            }
+            $punchFirstSql = 'SELECT HOUR(first_log) AS hour, COUNT(*) AS count ' .
+                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
+                ' AND first_log IS NOT NULL GROUP BY hour ORDER BY hour';
+            $punchFirstResult = db_fetch_all($bd, $punchFirstSql, $punchTypes, $punchParams);
+            if (!$punchFirstResult['ok']) {
+                $errors[] = 'Punch hour distribution unavailable.';
+            }
+            $punchRows = $punchFirstResult['ok'] ? $punchFirstResult['rows'] : [];
+        }
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'punchHours' => [
+                    'first' => array_map(static function (array $row): array {
+                        return [
+                            'hour' => (int) ($row['hour'] ?? 0),
+                            'count' => (int) ($row['count'] ?? 0),
+                        ];
+                    }, $punchRows),
+                ],
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-punch-outs') {
+        $punchRows = [];
+        $errors = [];
+        if ($deviceScope === 'none') {
+            $punchRows = [];
+        } else {
+            $punchWhere = 'punch_date BETWEEN ? AND ?';
+            $punchTypes = 'ss';
+            $punchParams = [$startDate, $endDate];
+            if ($deviceSnParam !== '') {
+                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
+                $punchTypes .= 'ss';
+                $punchParams[] = $deviceSnParam;
+                $punchParams[] = $deviceSnParam;
+            }
+            $punchLastSql = 'SELECT HOUR(last_log) AS hour, COUNT(*) AS count ' .
+                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
+                ' AND last_log IS NOT NULL GROUP BY hour ORDER BY hour';
+            $punchLastResult = db_fetch_all($bd, $punchLastSql, $punchTypes, $punchParams);
+            if (!$punchLastResult['ok']) {
+                $errors[] = 'Punch out distribution unavailable.';
+            }
+            $punchRows = $punchLastResult['ok'] ? $punchLastResult['rows'] : [];
+        }
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'punchOuts' => array_map(static function (array $row): array {
+                    return [
+                        'hour' => (int) ($row['hour'] ?? 0),
+                        'count' => (int) ($row['count'] ?? 0),
+                    ];
+                }, $punchRows),
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-arrivals') {
+        $rows = [];
+        $errors = [];
+        if ($deviceScope === 'none') {
+            $rows = [];
+        } else {
+            $punchWhere = 'punch_date BETWEEN ? AND ?';
+            $punchTypes = 'ss';
+            $punchParams = [$startDate, $endDate];
+            if ($deviceSnParam !== '') {
+                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
+                $punchTypes .= 'ss';
+                $punchParams[] = $deviceSnParam;
+                $punchParams[] = $deviceSnParam;
+            }
+            $arrivalSql = 'SELECT ' .
+                'SUM(CASE WHEN HOUR(first_log) < 7 THEN 1 ELSE 0 END) AS before7, ' .
+                'SUM(CASE WHEN HOUR(first_log) >= 7 AND HOUR(first_log) < 8 THEN 1 ELSE 0 END) AS h7_8, ' .
+                'SUM(CASE WHEN HOUR(first_log) >= 8 AND HOUR(first_log) < 9 THEN 1 ELSE 0 END) AS h8_9, ' .
+                'SUM(CASE WHEN HOUR(first_log) >= 9 AND HOUR(first_log) < 10 THEN 1 ELSE 0 END) AS h9_10, ' .
+                'SUM(CASE WHEN HOUR(first_log) >= 10 THEN 1 ELSE 0 END) AS h10_plus ' .
+                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
+                ' AND first_log IS NOT NULL';
+            $arrivalResult = db_fetch_all($bd, $arrivalSql, $punchTypes, $punchParams);
+            if (!$arrivalResult['ok']) {
+                $errors[] = 'Arrival distribution unavailable.';
+            } else {
+                $row = $arrivalResult['rows'][0] ?? [];
+                $rows = [
+                    ['label' => 'Before 7', 'count' => (int) ($row['before7'] ?? 0)],
+                    ['label' => '7-8', 'count' => (int) ($row['h7_8'] ?? 0)],
+                    ['label' => '8-9', 'count' => (int) ($row['h8_9'] ?? 0)],
+                    ['label' => '9-10', 'count' => (int) ($row['h9_10'] ?? 0)],
+                    ['label' => '10+', 'count' => (int) ($row['h10_plus'] ?? 0)],
+                ];
+            }
+        }
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'arrivals' => $rows,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-departures') {
+        $rows = [];
+        $errors = [];
+        if ($deviceScope === 'none') {
+            $rows = [];
+        } else {
+            $punchWhere = 'punch_date BETWEEN ? AND ?';
+            $punchTypes = 'ss';
+            $punchParams = [$startDate, $endDate];
+            if ($deviceSnParam !== '') {
+                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
+                $punchTypes .= 'ss';
+                $punchParams[] = $deviceSnParam;
+                $punchParams[] = $deviceSnParam;
+            }
+            $departureSql = 'SELECT ' .
+                'SUM(CASE WHEN HOUR(last_log) < 16 THEN 1 ELSE 0 END) AS before16, ' .
+                'SUM(CASE WHEN HOUR(last_log) >= 16 AND HOUR(last_log) < 18 THEN 1 ELSE 0 END) AS h16_18, ' .
+                'SUM(CASE WHEN HOUR(last_log) >= 18 AND HOUR(last_log) < 20 THEN 1 ELSE 0 END) AS h18_20, ' .
+                'SUM(CASE WHEN HOUR(last_log) >= 20 THEN 1 ELSE 0 END) AS h20_plus ' .
+                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
+                ' AND last_log IS NOT NULL';
+            $departureResult = db_fetch_all($bd, $departureSql, $punchTypes, $punchParams);
+            if (!$departureResult['ok']) {
+                $errors[] = 'Departure distribution unavailable.';
+            } else {
+                $row = $departureResult['rows'][0] ?? [];
+                $rows = [
+                    ['label' => 'Before 4', 'count' => (int) ($row['before16'] ?? 0)],
+                    ['label' => '4-6', 'count' => (int) ($row['h16_18'] ?? 0)],
+                    ['label' => '6-8', 'count' => (int) ($row['h18_20'] ?? 0)],
+                    ['label' => '8+', 'count' => (int) ($row['h20_plus'] ?? 0)],
+                ];
+            }
+        }
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'departures' => $rows,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-consistency') {
+        $errors = [];
+        $startObj = DateTimeImmutable::createFromFormat('Y-m-d', $startDate);
+        $endObj = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
+        $rangeDays = 1;
+        if ($startObj instanceof DateTimeImmutable && $endObj instanceof DateTimeImmutable) {
+            $rangeDays = max(1, $startObj->diff($endObj)->days + 1);
+        }
+        $threshold1 = max(1, (int) ceil($rangeDays * 0.25));
+        $threshold2 = max($threshold1, (int) ceil($rangeDays * 0.5));
+        $threshold3 = max($threshold2, (int) ceil($rangeDays * 0.75));
+
+        $consistencySql = 'SELECT ' .
+            'SUM(CASE WHEN days_present < ? THEN 1 ELSE 0 END) AS under25, ' .
+            'SUM(CASE WHEN days_present >= ? AND days_present < ? THEN 1 ELSE 0 END) AS p25_50, ' .
+            'SUM(CASE WHEN days_present >= ? AND days_present < ? THEN 1 ELSE 0 END) AS p50_75, ' .
+            'SUM(CASE WHEN days_present >= ? THEN 1 ELSE 0 END) AS p75_100 ' .
+            'FROM (SELECT emp_code, COUNT(DISTINCT att_date) AS days_present ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY emp_code) t';
+        $consistencyParams = array_merge([$threshold1, $threshold1, $threshold2, $threshold2, $threshold3, $threshold3], $attParams);
+        $consistencyTypes = 'iiiiii' . $attTypes;
+        $consistencyResult = db_fetch_all($bd, $consistencySql, $consistencyTypes, $consistencyParams);
+        $rows = [];
+        if ($consistencyResult['ok'] && !empty($consistencyResult['rows'])) {
+            $row = $consistencyResult['rows'][0];
+            $rows = [
+                ['label' => '< 25%', 'count' => (int) ($row['under25'] ?? 0)],
+                ['label' => '25-50%', 'count' => (int) ($row['p25_50'] ?? 0)],
+                ['label' => '50-75%', 'count' => (int) ($row['p50_75'] ?? 0)],
+                ['label' => '75-100%', 'count' => (int) ($row['p75_100'] ?? 0)],
+            ];
+        } else {
+            $errors[] = 'Consistency unavailable.';
+        }
+
+        $payload = [
+            'errors' => $errors,
+            'insights' => [
+                'consistency' => $rows,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-weekday') {
+        $weekdaySql = 'SELECT WEEKDAY(att_date) AS weekday, COUNT(DISTINCT emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY weekday ORDER BY weekday';
+        $weekdayResult = db_fetch_all($bd, $weekdaySql, $attTypes, $attParams);
+        $weekdayRows = $weekdayResult['ok'] ? $weekdayResult['rows'] : [];
+        $labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        $mapped = array_fill(0, 7, 0);
+        foreach ($weekdayRows as $row) {
+            $idx = (int) ($row['weekday'] ?? 0);
+            if ($idx >= 0 && $idx < 7) {
+                $mapped[$idx] = (int) ($row['count'] ?? 0);
+            }
+        }
+        $rows = [];
+        foreach ($labels as $idx => $label) {
+            $rows[] = ['label' => $label, 'count' => $mapped[$idx]];
+        }
+        $payload = [
+            'errors' => $weekdayResult['ok'] ? [] : ['Weekday pulse unavailable.'],
+            'insights' => [
+                'weekday' => $rows,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-low-days') {
+        $lowSql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY att_date ORDER BY count ASC, att_date ASC LIMIT 6';
+        $lowResult = db_fetch_all($bd, $lowSql, $attTypes, $attParams);
+        $lowRows = $lowResult['ok'] ? $lowResult['rows'] : [];
+        $rows = array_map(static function (array $row): array {
+            $date = (string) ($row['att_date'] ?? '');
+            $label = $date !== '' ? format_display_date($date) : '-';
+            return [
+                'label' => $label,
+                'count' => (int) ($row['count'] ?? 0),
+            ];
+        }, $lowRows);
+        $payload = [
+            'errors' => $lowResult['ok'] ? [] : ['Low attendance days unavailable.'],
+            'insights' => [
+                'lowDays' => $rows,
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-departments') {
+        $deptWhere = 'd.att_date BETWEEN ? AND ? AND (d.is_delete = 0 OR d.is_delete IS NULL) ' .
+            'AND (d.is_deleted = 0 OR d.is_deleted IS NULL)';
+        $deptTypes = 'ss';
+        $deptParams = [$startDate, $endDate];
+        if ($projectCodeFilter !== '') {
+            $deptWhere .= ' AND d.Projectcode_utime = ?';
+            $deptTypes .= 's';
+            $deptParams[] = $projectCodeFilter;
+        }
+        $deptSql = 'SELECT COALESCE(NULLIF(TRIM(h.dept_name), \'\'), \'Unassigned\') AS label, ' .
+            'COUNT(DISTINCT d.emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily d ' .
+            'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
+            'ON h.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
+            'WHERE ' . $deptWhere . ' GROUP BY label ORDER BY count DESC LIMIT 10';
+        $deptResult = db_fetch_all($bd, $deptSql, $deptTypes, $deptParams);
+        $deptRows = $deptResult['ok'] ? $deptResult['rows'] : [];
+        $payload = [
+            'errors' => $deptResult['ok'] ? [] : ['Department breakdown unavailable.'],
+            'insights' => [
+                'departments' => array_map(static function (array $row): array {
+                    return [
+                        'label' => (string) ($row['label'] ?? ''),
+                        'count' => (int) ($row['count'] ?? 0),
+                    ];
+                }, $deptRows),
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-designations') {
+        $desgWhere = 'd.att_date BETWEEN ? AND ? AND (d.is_delete = 0 OR d.is_delete IS NULL) ' .
+            'AND (d.is_deleted = 0 OR d.is_deleted IS NULL)';
+        $desgTypes = 'ss';
+        $desgParams = [$startDate, $endDate];
+        if ($projectCodeFilter !== '') {
+            $desgWhere .= ' AND d.Projectcode_utime = ?';
+            $desgTypes .= 's';
+            $desgParams[] = $projectCodeFilter;
+        }
+        $desgSql = 'SELECT COALESCE(NULLIF(TRIM(h.desg_name), \'\'), \'Unassigned\') AS label, ' .
+            'COUNT(DISTINCT d.emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily d ' .
+            'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
+            'ON h.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
+            'WHERE ' . $desgWhere . ' GROUP BY label ORDER BY count DESC LIMIT 10';
+        $desgResult = db_fetch_all($bd, $desgSql, $desgTypes, $desgParams);
+        $desgRows = $desgResult['ok'] ? $desgResult['rows'] : [];
+        $payload = [
+            'errors' => $desgResult['ok'] ? [] : ['Designation breakdown unavailable.'],
+            'insights' => [
+                'designations' => array_map(static function (array $row): array {
+                    return [
+                        'label' => (string) ($row['label'] ?? ''),
+                        'count' => (int) ($row['count'] ?? 0),
+                    ];
+                }, $desgRows),
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-projects') {
+        $projectSql = 'SELECT COALESCE(NULLIF(TRIM(Projectcode_utime), \'\'), \'Unassigned\') AS label, ' .
+            'COUNT(DISTINCT emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY label ORDER BY count DESC LIMIT 10';
+        $projectResult = db_fetch_all($bd, $projectSql, $attTypes, $attParams);
+        $projectRows = $projectResult['ok'] ? $projectResult['rows'] : [];
+        $payload = [
+            'errors' => $projectResult['ok'] ? [] : ['Project breakdown unavailable.'],
+            'insights' => [
+                'projects' => array_map(static function (array $row): array {
+                    return [
+                        'label' => (string) ($row['label'] ?? ''),
+                        'count' => (int) ($row['count'] ?? 0),
+                    ];
+                }, $projectRows),
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-overrides') {
+        $overrideSql = 'SELECT ' .
+            'SUM(CASE WHEN override_is_approved = 1 THEN 1 ELSE 0 END) AS approved, ' .
+            'SUM(CASE WHEN override_is_approved = 2 THEN 1 ELSE 0 END) AS rejected, ' .
+            'SUM(CASE WHEN override_is_approved IS NULL OR override_is_approved = 0 THEN 1 ELSE 0 END) AS pending ' .
+            'FROM gcc_attendance_master.employee_att_daily_overrides WHERE att_date BETWEEN ? AND ?';
+        $overrideResult = db_fetch_all($bd, $overrideSql, 'ss', [$startDate, $endDate]);
+        $overrideRow = $overrideResult['ok'] && !empty($overrideResult['rows']) ? $overrideResult['rows'][0] : [];
+        $payload = [
+            'errors' => $overrideResult['ok'] ? [] : ['Override status unavailable.'],
+            'insights' => [
+                'overrides' => [
+                    'pending' => (int) ($overrideRow['pending'] ?? 0),
+                    'approved' => (int) ($overrideRow['approved'] ?? 0),
+                    'rejected' => (int) ($overrideRow['rejected'] ?? 0),
+                ],
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
 }
 
 if ($isAjax && $ajaxSection === 'summary') {
@@ -1962,11 +2685,9 @@ if ($isAjax && $ajaxSection === 'summary') {
     }
 
     $activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
-    $activeDeviceLabel = $activeDeviceCountText !== '-'
-        ? ($activeDeviceCountText . ' Projects with punches')
-        : 'Projects with punches';
+    $activeDeviceLabel = 'Projects with punches';
     if ($activeDeviceMetaIsList) {
-        $activeDeviceLabel .= ' (Devices active/total / Employees:)';
+        $activeDeviceLabel .= ' (Devices active/total / Employees)';
     }
 
     $deviceStatusOk = false;
@@ -2094,9 +2815,7 @@ $activeDeviceMeta = $deviceScope === 'none'
     ? ($deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.')
     : 'Loading project counts...';
 $activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
-$activeDeviceLabel = $activeDeviceCountText !== '-'
-    ? ($activeDeviceCountText . ' Projects with punches')
-    : 'Projects with punches';
+$activeDeviceLabel = 'Projects with punches';
 
 $deviceStatusOk = false;
 $deviceStatusTotal = 0;
@@ -2153,18 +2872,557 @@ $quickRanges = [
 
 $displayStartDate = format_display_date($startDate);
 $displayEndDate = format_display_date($endDate);
+$currentProjectLabel = 'All projects';
+if ($projectId !== '') {
+    foreach ($projects as $project) {
+        if ((string) ($project['id'] ?? '') === $projectId) {
+            $currentProjectLabel = trim((string) ($project['pro_code'] ?? '') . ' ' . (string) ($project['name'] ?? ''));
+            if ($currentProjectLabel === '') {
+                $currentProjectLabel = 'Project ' . $projectId;
+            }
+            break;
+        }
+    }
+}
+$deviceFilterLabel = $deviceSnInput !== '' ? $deviceSnInput : 'All devices';
+$employeeFilterLabel = $employeeCode !== '' ? $employeeCode : 'All employees';
 
 include __DIR__ . '/include/layout_top.php';
 
 ?>
 
 <style>
-  .dash-card {
-    animation: fadeUp 0.5s ease both;
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+  .attendance-dashboard {
+    --dash-ink: #0f172a;
+    --dash-muted: #6b7280;
+    --dash-soft: #f1f5f9;
+    --dash-border: rgba(15, 23, 42, 0.1);
+    --dash-glow: 0 24px 48px rgba(15, 23, 42, 0.12);
+    --dash-accent: #f97316;
+    --dash-accent-2: #14b8a6;
+    --dash-accent-3: #2563eb;
+    font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
+    background:
+      radial-gradient(600px 300px at 10% -10%, rgba(37, 99, 235, 0.16), transparent 55%),
+      radial-gradient(500px 240px at 90% 0%, rgba(20, 184, 166, 0.18), transparent 60%),
+      linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+    padding-top: 1rem;
   }
+
+  .attendance-dashboard-header h1 {
+    font-family: "Fraunces", serif;
+    letter-spacing: 0.01em;
+  }
+
+  .attendance-dashboard-header .badge {
+    background: linear-gradient(120deg, #2563eb, #14b8a6);
+    border-radius: 999px;
+    padding: 8px 14px;
+    box-shadow: 0 10px 24px rgba(37, 99, 235, 0.25);
+  }
+
+  .dash-card {
+    border-radius: 18px;
+    border: 1px solid var(--dash-border);
+    box-shadow: var(--dash-glow);
+    background: rgba(255, 255, 255, 0.9);
+    animation: fadeUp 0.55s ease both;
+    backdrop-filter: blur(4px);
+  }
+
+  .dash-card .card-header {
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(120deg, rgba(37, 99, 235, 0.08), rgba(249, 115, 22, 0.08));
+  }
+
+  .dash-card .card-title {
+    font-weight: 600;
+    color: var(--dash-ink);
+  }
+
   @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(8px); }
+    from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
+  }
+
+  .dash-hero {
+    position: relative;
+    overflow: hidden;
+    border-radius: 22px;
+    padding: 26px 30px;
+    margin-bottom: 1.5rem;
+    border: none;
+    color: #fff;
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 48%, #14b8a6 100%);
+    box-shadow: 0 26px 60px rgba(15, 23, 42, 0.35);
+  }
+
+  .dash-hero::before {
+    content: "";
+    position: absolute;
+    inset: -40% 40% 35% -15%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.24), transparent 65%);
+    opacity: 0.9;
+  }
+
+  .dash-hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(220px 120px at 75% 15%, rgba(255, 255, 255, 0.2), transparent 60%),
+      radial-gradient(240px 140px at 20% 75%, rgba(255, 255, 255, 0.18), transparent 60%);
+    pointer-events: none;
+  }
+
+  .dash-hero-inner {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(240px, 1.2fr) minmax(220px, 1fr);
+    gap: 24px;
+    align-items: center;
+  }
+
+  .dash-hero-kicker {
+    font-size: 12px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .dash-hero-title {
+    font-family: "Fraunces", serif;
+    font-size: 32px;
+    margin: 6px 0 8px;
+  }
+
+  .dash-hero-subtitle {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.82);
+    margin-bottom: 14px;
+  }
+
+  .dash-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .dash-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.16);
+    font-size: 12px;
+  }
+
+  .dash-hero-metrics {
+    display: grid;
+    gap: 12px;
+  }
+
+  .dash-metric {
+    background: rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 16px;
+    padding: 12px 16px;
+    backdrop-filter: blur(6px);
+  }
+
+  .dash-metric-label {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .dash-metric-value {
+    font-size: 24px;
+    font-weight: 600;
+    margin: 4px 0 2px;
+  }
+
+  .dash-metric-meta {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.75);
+  }
+
+  .dash-kpi {
+    position: relative;
+    overflow: hidden;
+    padding: 18px 20px 16px;
+    border-radius: 18px;
+    color: #fff;
+  }
+
+  .dash-kpi::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(120deg, rgba(255, 255, 255, 0.08), transparent 60%);
+    pointer-events: none;
+  }
+
+  .dash-kpi--blue {
+    background: linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%);
+  }
+
+  .dash-kpi--green {
+    background: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
+  }
+
+  .dash-kpi--amber {
+    background: linear-gradient(135deg, #f97316 0%, #f59e0b 100%);
+  }
+
+  .dash-kpi-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 23, 42, 0.18);
+    font-size: 20px;
+    margin-bottom: 12px;
+  }
+
+  .dash-kpi-label {
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .dash-kpi-value {
+    font-size: 26px;
+    font-weight: 600;
+    margin: 6px 0 2px;
+  }
+
+  .dash-kpi-meta {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .badge-snapshot-grid {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+
+  .badge-chip {
+    position: relative;
+    border-radius: 16px;
+    padding: 14px;
+    background: #ffffff;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+  }
+
+  .badge-chip-code {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dash-accent-3);
+  }
+
+  .badge-chip-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--dash-ink);
+    margin-top: 4px;
+  }
+
+  .badge-chip-meta {
+    font-size: 12px;
+    color: var(--dash-muted);
+    margin-top: 4px;
+  }
+
+  .badge-chip-project {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--dash-ink);
+    opacity: 0.8;
+  }
+
+  .badge-snapshot-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 16px;
+  }
+
+  .insight-highlights {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    margin-bottom: 18px;
+  }
+
+  .insight-stat {
+    padding: 14px 16px;
+    border-radius: 16px;
+    background: #ffffff;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+  }
+
+  .insight-stat--accent {
+    border: none;
+    color: #ffffff;
+    background: linear-gradient(135deg, #6366f1 0%, #0ea5e9 100%);
+  }
+
+  .insight-stat--accent.insight-stat--positive {
+    background: linear-gradient(135deg, #10b981 0%, #14b8a6 100%);
+  }
+
+  .insight-stat--accent.insight-stat--negative {
+    background: linear-gradient(135deg, #ef4444 0%, #f97316 100%);
+  }
+
+  .insight-stat-label {
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--dash-muted);
+  }
+
+  .insight-stat-value {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--dash-ink);
+    margin: 6px 0 2px;
+  }
+
+  .insight-stat-meta {
+    font-size: 12px;
+    color: var(--dash-muted);
+  }
+
+  .insight-stat--accent .insight-stat-label,
+  .insight-stat--accent .insight-stat-meta {
+    color: rgba(255, 255, 255, 0.7);
+  }
+
+  .insight-stat--accent .insight-stat-value {
+    color: #ffffff;
+  }
+
+  .insights-grid {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(12, 1fr);
+  }
+
+  .insight-panel {
+    grid-column: span 6;
+    border-radius: 16px;
+    padding: 16px;
+    background: #ffffff;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+  }
+
+  .insight-panel--cool {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(20, 184, 166, 0.04));
+    border-color: rgba(37, 99, 235, 0.18);
+  }
+
+  .insight-panel--warm {
+    background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), rgba(245, 158, 11, 0.05));
+    border-color: rgba(249, 115, 22, 0.18);
+  }
+
+  .insight-panel--wide {
+    grid-column: span 12;
+  }
+
+  .insight-title {
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--dash-ink);
+  }
+
+  .insight-chart {
+    width: 100%;
+    height: 220px;
+    display: block;
+  }
+
+  .insight-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--dash-muted);
+    margin-top: 8px;
+  }
+
+  .insight-bar-list {
+    display: grid;
+    gap: 10px;
+  }
+
+  .insight-bar-row {
+    display: grid;
+    grid-template-columns: 120px 1fr 40px;
+    gap: 10px;
+    align-items: center;
+    font-size: 12px;
+  }
+
+  .insight-bar-label {
+    color: var(--dash-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .insight-bar-track {
+    height: 8px;
+    background: #eef2f7;
+    border-radius: 999px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .insight-bar-fill {
+    height: 100%;
+    width: var(--bar-size, 0%);
+    border-radius: inherit;
+    background: linear-gradient(90deg, #2563eb, #14b8a6);
+  }
+
+  .insight-bar-value {
+    text-align: right;
+    color: var(--dash-ink);
+    font-weight: 600;
+  }
+
+  .insight-hour-grid {
+    display: grid;
+    grid-template-columns: repeat(24, minmax(8px, 1fr));
+    gap: 4px;
+    align-items: end;
+    height: 140px;
+  }
+
+  .insight-hour-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--dash-muted);
+  }
+
+  .insight-hour-bar {
+    width: 100%;
+    height: var(--bar-size, 0%);
+    min-height: 6px;
+    border-radius: 6px 6px 2px 2px;
+    background: linear-gradient(180deg, #f97316, #f59e0b);
+  }
+
+  .insight-status {
+    display: grid;
+    gap: 12px;
+  }
+
+  .insight-status-bar {
+    display: flex;
+    height: 12px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #eef2f7;
+  }
+
+  .insight-status-seg {
+    height: 100%;
+    width: var(--seg-size, 0%);
+  }
+
+  .insight-status-seg--pending { background: #f59e0b; }
+  .insight-status-seg--approved { background: #10b981; }
+  .insight-status-seg--rejected { background: #ef4444; }
+
+  .insight-status-legend {
+    display: grid;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--dash-muted);
+  }
+
+  .insight-status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .insight-empty {
+    font-size: 12px;
+    color: var(--dash-muted);
+  }
+
+  @media (max-width: 991px) {
+    .insight-panel {
+      grid-column: span 12;
+    }
+  }
+
+  @media (max-width: 767px) {
+    .insight-bar-row {
+      grid-template-columns: 100px 1fr 36px;
+    }
+  }
+
+  .filter-help {
+    font-size: 12px;
+    color: var(--dash-muted);
+  }
+
+  .attendance-dashboard .btn {
+    border-radius: 12px;
+  }
+
+  .attendance-dashboard .form-control,
+  .attendance-dashboard .custom-select {
+    border-radius: 12px;
+    border-color: rgba(15, 23, 42, 0.12);
+  }
+
+  .attendance-dashboard .form-control:focus,
+  .attendance-dashboard .custom-select:focus {
+    border-color: rgba(37, 99, 235, 0.6);
+    box-shadow: 0 0 0 0.2rem rgba(37, 99, 235, 0.15);
+  }
+
+  @media (max-width: 991px) {
+    .dash-hero-inner {
+      grid-template-columns: 1fr;
+    }
+    .dash-hero-title {
+      font-size: 26px;
+    }
+  }
+
+  @media (max-width: 767px) {
+    .dash-hero {
+      padding: 20px;
+    }
+    .dash-kpi {
+      padding: 16px;
+    }
   }
   .trend-chart {
     display: grid;
@@ -2200,88 +3458,9 @@ include __DIR__ . '/include/layout_top.php';
     font-size: 12px;
     color: #6c757d;
   }
-  .project-punches-summary {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 16px;
-    align-items: center;
-    margin-bottom: 12px;
-  }
-  .project-punches-count {
-    min-width: 54px;
-    height: 54px;
-    padding: 8px;
-    border-radius: 14px;
-    background: #f1f5f9;
-    border: 1px solid #d7e0ea;
-    color: #1b4f9a;
-    font-size: 22px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .project-punches-title {
-    font-weight: 600;
-  }
-  .project-punches-grid {
-    display: grid;
-    gap: 12px;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  }
-  .project-punches-item {
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px;
-    padding: 10px;
-  }
-  .project-punches-item-title {
-    font-weight: 600;
-    margin-bottom: 2px;
-  }
-  .project-punches-item-counts {
-    font-size: 12px;
-    color: #6c757d;
-  }
-  .project-punches-bars {
-    display: grid;
-    gap: 6px;
-    margin-top: 8px;
-  }
-  .project-punches-metric {
-    display: grid;
-    gap: 4px;
-  }
-  .project-punches-metric-label {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
-    color: #6c757d;
-  }
-  .project-punches-metric-value {
-    font-weight: 600;
-    color: #1f2937;
-  }
-  .project-punches-bar {
-    position: relative;
-    height: 6px;
-    border-radius: 999px;
-    background: #e9edf2;
-    overflow: hidden;
-  }
-  .project-punches-bar::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    height: 100%;
-    width: var(--bar-size, 0%);
-    background: var(--bar-color, #1b4f9a);
-    border-radius: inherit;
-  }
 </style>
 
-<section class="content-header">
+<section class="content-header attendance-dashboard-header">
   <div class="container-fluid">
     <div class="row mb-2">
       <div class="col-sm-7">
@@ -2295,7 +3474,7 @@ include __DIR__ . '/include/layout_top.php';
   </div>
 </section>
 
-<section class="content">
+<section class="content attendance-dashboard">
   <div class="container-fluid">
     <?php if ($flash): ?>
       <div class="alert alert-<?= h($flash['type']) ?>">
@@ -2311,34 +3490,59 @@ include __DIR__ . '/include/layout_top.php';
       <div id="apiErrors" class="alert alert-warning d-none"></div>
     <?php endif; ?>
 
+    <div class="dash-hero dash-card" style="animation-delay: 0.05s;">
+      <div class="dash-hero-inner">
+        <div>
+          <div class="dash-hero-kicker">Attendance intelligence</div>
+          <div class="dash-hero-title">Command center</div>
+          <div class="dash-hero-subtitle">
+            Attendance ledger insights from gcc_attendance_master for your selected range.
+          </div>
+          <div class="dash-chip-row">
+            <span class="dash-chip">Range: <?= h($displayStartDate) ?> to <?= h($displayEndDate) ?></span>
+            <span class="dash-chip">Project: <?= h($currentProjectLabel) ?></span>
+            <span class="dash-chip">Devices: <?= h($deviceFilterLabel) ?></span>
+            <span class="dash-chip">Employee: <?= h($employeeFilterLabel) ?></span>
+          </div>
+        </div>
+        <div class="dash-hero-metrics">
+          <div class="dash-metric">
+            <div class="dash-metric-label">Employees with punches</div>
+            <div class="dash-metric-value" id="heroEmployeeCount">-</div>
+            <div class="dash-metric-meta" id="heroEmployeeMeta">Loading attendance ledger...</div>
+          </div>
+          <div class="dash-metric">
+            <div class="dash-metric-label">Work hours logged</div>
+            <div class="dash-metric-value" id="heroTotalHours">-</div>
+            <div class="dash-metric-meta" id="heroHoursMeta">Avg: -</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="row">
-      <div class="col-lg-4 col-md-6">
-        <div class="small-box bg-info dash-card" style="animation-delay: 0.1s;">
-          <div class="inner">
-            <h3 id="badgeRatioText"><?= h($badgeRatioText) ?></h3>
-            <p id="badgeCardTitle"><?= h($badgeCardTitle) ?></p>
-          </div>
-          <div class="icon"><i class="fas fa-user-check"></i></div>
-          <div id="badgeCoverageLabel" class="small text-white-50 px-3 pb-2"><?= h($badgeCoverageLabel) ?></div>
+      <div class="col-lg-4 col-md-6 mb-4">
+        <div class="dash-kpi dash-kpi--blue dash-card" style="animation-delay: 0.1s;">
+          <div class="dash-kpi-icon"><i class="fas fa-user-check"></i></div>
+          <div class="dash-kpi-label" id="badgeCardTitle"><?= h($badgeCardTitle) ?></div>
+          <div class="dash-kpi-value" id="badgeRatioText"><?= h($badgeRatioText) ?></div>
+          <div class="dash-kpi-meta" id="badgeCoverageLabel"><?= h($badgeCoverageLabel) ?></div>
         </div>
       </div>
-      <div class="col-lg-4 col-md-6">
-        <div class="small-box bg-success dash-card" style="animation-delay: 0.15s;">
-          <div class="inner">
-            <h3 id="deviceStatusRatio"><?= h($deviceStatusRatio) ?></h3>
-            <p>Online / total devices</p>
-          </div>
-          <div class="icon"><i class="fas fa-signal"></i></div>
-          <div id="deviceStatusMeta" class="small text-white-50 px-3 pb-2"><?= h($deviceStatusMeta) ?></div>
+      <div class="col-lg-4 col-md-6 mb-4">
+        <div class="dash-kpi dash-kpi--green dash-card" style="animation-delay: 0.15s;">
+          <div class="dash-kpi-icon"><i class="fas fa-signal"></i></div>
+          <div class="dash-kpi-label">Online / total devices</div>
+          <div class="dash-kpi-value" id="deviceStatusRatio"><?= h($deviceStatusRatio) ?></div>
+          <div class="dash-kpi-meta" id="deviceStatusMeta"><?= h($deviceStatusMeta) ?></div>
         </div>
       </div>
-      <div class="col-lg-4 col-md-6">
-        <div class="info-box dash-card" style="animation-delay: 0.2s;">
-          <span class="info-box-icon bg-warning"><i class="fas fa-microchip"></i></span>
-          <div class="info-box-content">
-            <span id="activeDeviceLabel" class="info-box-text"><?= h($activeDeviceLabel) ?></span>
-            <div id="activeDeviceMeta" class="text-muted small"><?= h($activeDeviceMeta) ?></div>
-          </div>
+      <div class="col-lg-4 col-md-6 mb-4">
+        <div class="dash-kpi dash-kpi--amber dash-card" style="animation-delay: 0.2s;">
+          <div class="dash-kpi-icon"><i class="fas fa-microchip"></i></div>
+          <div class="dash-kpi-label" id="activeDeviceLabel"><?= h($activeDeviceLabel) ?></div>
+          <div class="dash-kpi-value" id="activeDeviceCount"><?= h($activeDeviceCountText) ?></div>
+          <div class="dash-kpi-meta" id="activeDeviceMeta"><?= h($activeDeviceMeta) ?></div>
         </div>
       </div>
     </div>
@@ -2401,19 +3605,101 @@ include __DIR__ . '/include/layout_top.php';
     </div>
 
     <div class="card mb-4 dash-card" style="animation-delay: 0.07s;">
-      <div class="card-header">
-        <h3 class="card-title">Projects with punches</h3>
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h3 class="card-title">Attendance insights</h3>
+        <span id="insightsMeta" class="text-muted small">Loading insights...</span>
       </div>
       <div class="card-body">
-        <div class="project-punches-summary">
-          <div id="activeDeviceReportCount" class="project-punches-count"><?= h($activeDeviceCountText) ?></div>
-          <div>
-            <div id="activeDeviceReportLabel" class="project-punches-title"><?= h($activeDeviceLabel) ?></div>
-            <div id="activeDeviceReportSub" class="text-muted small"></div>
+        <div class="insight-highlights">
+          <div class="insight-stat">
+            <div class="insight-stat-label">Total attendance</div>
+            <div class="insight-stat-value" id="insightTotalAttendance">-</div>
+            <div class="insight-stat-meta" id="insightAvgDaily">Avg per day: -</div>
+          </div>
+          <div class="insight-stat">
+            <div class="insight-stat-label">Avg work hours</div>
+            <div class="insight-stat-value" id="insightAvgHours">-</div>
+            <div class="insight-stat-meta" id="insightDayCount">Days in range: -</div>
+          </div>
+          <div class="insight-stat">
+            <div class="insight-stat-label">Peak day</div>
+            <div class="insight-stat-value" id="insightPeakDay">-</div>
+            <div class="insight-stat-meta" id="insightPeakCount">Peak attendance: -</div>
+          </div>
+          <div class="insight-stat insight-stat--accent" id="insightMomentum">
+            <div class="insight-stat-label">Momentum</div>
+            <div class="insight-stat-value" id="insightMomentumValue">-</div>
+            <div class="insight-stat-meta" id="insightMomentumMeta">vs previous period</div>
           </div>
         </div>
-        <div id="activeDeviceReportChart" class="project-punches-grid d-none"></div>
-        <div id="activeDeviceReportMeta" class="text-muted small d-none"><?= h($activeDeviceMeta) ?></div>
+
+        <div class="insights-grid">
+          <div class="insight-panel insight-panel--wide">
+            <div class="insight-title">Daily attendance trend</div>
+            <svg id="attendanceTrendChart" class="insight-chart" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
+            <div id="attendanceTrendLegend" class="insight-legend"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Work hours distribution</div>
+            <div id="workHoursBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Punch hour heatmap (first in)</div>
+            <div id="punchHourBars" class="insight-hour-grid"></div>
+          </div>
+
+          <div class="insight-panel insight-panel--cool">
+            <div class="insight-title">Arrival windows</div>
+            <div id="arrivalBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel insight-panel--cool">
+            <div class="insight-title">Departure windows</div>
+            <div id="departureBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Departmentwise attendance</div>
+            <div id="departmentBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Designationwise attendance</div>
+            <div id="designationBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Projectwise attendance</div>
+            <div id="projectBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Attendance consistency</div>
+            <div id="consistencyBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel insight-panel--warm">
+            <div class="insight-title">Lowest attendance days</div>
+            <div id="lowDaysBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Day-of-week pulse</div>
+            <div id="weekdayBars" class="insight-bar-list"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Punch hour heatmap (last out)</div>
+            <div id="punchOutBars" class="insight-hour-grid"></div>
+          </div>
+
+          <div class="insight-panel">
+            <div class="insight-title">Override approvals</div>
+            <div id="overrideStatus" class="insight-status"></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -2456,236 +3742,6 @@ include __DIR__ . '/include/layout_top.php';
       </div>
     </div>
 
-    <div class="row">
-      <div class="col-lg-12">
-        <div class="card dash-card" style="animation-delay: 0.4s;">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h3 class="card-title">Logged in badges</h3>
-            <span id="loggedBadgesMeta" class="text-muted small"><?= h($loggedBadgesMeta) ?></span>
-          </div>
-          <div class="card-body">
-            <div class="d-flex flex-wrap justify-content-end mb-3">
-              <label class="sr-only" for="loggedBadgesSearch">Badge number</label>
-              <div class="input-group input-group-sm" style="max-width: 280px; width: 100%;">
-                <input id="loggedBadgesSearch" class="form-control" type="text" placeholder="Badge number" autocomplete="off" value="<?= h($badgeNumberFilter) ?>">
-                <div class="input-group-append">
-                  <button id="loggedBadgesSearchBtn" class="btn btn-outline-secondary" type="button">Search</button>
-                  <button id="loggedBadgesSearchClear" class="btn btn-outline-secondary" type="button">Clear</button>
-                </div>
-              </div>
-            </div>
-            <div id="loggedBadgesTableWrapper" class="table-responsive<?= !empty($loggedBadgesRows) ? '' : ' d-none' ?>">
-              <table class="table table-sm table-striped mb-0">
-                <thead>
-                  <tr>
-                    <th>Employee Code (utime)</th>
-                    <th>Name (utime)</th>
-                    <th>Name (hrms)</th>
-                    <th>Department (hrms)</th>
-                    <th>Designation (hrms)</th>
-                    <th>First Punch time (utime)</th>
-                    <th>First Punch device (utime)</th>
-                    <th>FP Project ID</th>
-                    <th>FP project name</th>
-                    <th>Last Punch time (utime)</th>
-                    <th>Last Punch device (utime)</th>
-                    <th>LP project id</th>
-                    <th>LP project name</th>
-                  </tr>
-                </thead>
-                <tbody id="loggedBadgesTableBody">
-                  <?php foreach ($loggedBadgesRows as $row): ?>
-                    <?php
-                      $badgeNumber = trim((string) ($row['badgeNumber'] ?? ''));
-                      $utimeName = trim((string) ($row['utimeName'] ?? ''));
-                      $hrmsName = trim((string) ($row['hrmsName'] ?? ''));
-                      $department = trim((string) ($row['department'] ?? ''));
-                      $designation = trim((string) ($row['designation'] ?? ''));
-                      $firstLoginTime = trim((string) ($row['firstLoginTime'] ?? ''));
-                      $lastLoginTime = trim((string) ($row['lastLoginTime'] ?? ''));
-                      $firstLoginDeviceSn = trim((string) ($row['firstLoginDeviceSn'] ?? ''));
-                      $lastLoginDeviceSn = trim((string) ($row['lastLoginDeviceSn'] ?? ''));
-                      $firstLoginProjectId = trim((string) ($row['firstLoginProjectId'] ?? ''));
-                      $firstLoginProjectName = trim((string) ($row['firstLoginProjectName'] ?? ''));
-                      $lastLoginProjectId = trim((string) ($row['lastLoginProjectId'] ?? ''));
-                      $lastLoginProjectName = trim((string) ($row['lastLoginProjectName'] ?? ''));
-                    ?>
-                    <tr>
-                      <td><?= h($badgeNumber) ?></td>
-                      <td><?= h($utimeName !== '' ? $utimeName : '-') ?></td>
-                      <td><?= h($hrmsName !== '' ? $hrmsName : '-') ?></td>
-                      <td><?= h($department !== '' ? $department : '-') ?></td>
-                      <td><?= h($designation !== '' ? $designation : '-') ?></td>
-                      <td><?= h($firstLoginTime !== '' ? $firstLoginTime : '-') ?></td>
-                      <td><?= h($firstLoginDeviceSn !== '' ? $firstLoginDeviceSn : '-') ?></td>
-                      <td><?= h($firstLoginProjectId !== '' ? $firstLoginProjectId : '-') ?></td>
-                      <td><?= h($firstLoginProjectName !== '' ? $firstLoginProjectName : '-') ?></td>
-                      <td><?= h($lastLoginTime !== '' ? $lastLoginTime : '-') ?></td>
-                      <td><?= h($lastLoginDeviceSn !== '' ? $lastLoginDeviceSn : '-') ?></td>
-                      <td><?= h($lastLoginProjectId !== '' ? $lastLoginProjectId : '-') ?></td>
-                      <td><?= h($lastLoginProjectName !== '' ? $lastLoginProjectName : '-') ?></td>
-                    </tr>
-                  <?php endforeach; ?>
-                </tbody>
-              </table>
-            </div>
-            <p id="loggedBadgesEmpty" class="text-muted mb-0<?= !empty($loggedBadgesRows) ? ' d-none' : '' ?>">
-              <?= h($loggedBadgesEmptyText) ?>
-            </p>
-            <div id="loggedBadgesPagination" class="d-flex flex-wrap justify-content-between align-items-center mt-3 d-none">
-              <button id="loggedBadgesPrev" class="btn btn-sm btn-outline-secondary" type="button">Prev</button>
-              <div class="d-flex align-items-center">
-                <span id="loggedBadgesPageInfo" class="text-muted small mr-3"></span>
-                <div class="input-group input-group-sm" style="width: 120px;">
-                  <input id="loggedBadgesPageInput" class="form-control" type="number" min="1" placeholder="Page">
-                  <div class="input-group-append">
-                    <button id="loggedBadgesGo" class="btn btn-outline-secondary" type="button">Go</button>
-                  </div>
-                </div>
-              </div>
-              <button id="loggedBadgesNext" class="btn btn-sm btn-outline-secondary" type="button">Next</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="row">
-      <div class="col-lg-12">
-        <div class="card dash-card" style="animation-delay: 0.55s;">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h3 class="card-title">HRMS employee snapshot</h3>
-            <span class="text-muted small">HRMS API</span>
-          </div>
-          <div class="card-body">
-            <form method="get" class="mb-3" id="hrmsSnapshotForm">
-              <input type="hidden" name="startDate" value="<?= h($startDate) ?>">
-              <input type="hidden" name="endDate" value="<?= h($endDate) ?>">
-              <input type="hidden" name="projectId" value="<?= h($projectId) ?>">
-              <input type="hidden" name="deviceSn" value="<?= h($deviceSnParam) ?>">
-              <label class="sr-only" for="employeeCode">HRMS employee code</label>
-              <div class="input-group">
-                <input id="employeeCode" name="employeeCode" class="form-control" value="<?= h($employeeCode) ?>" placeholder="HRMS employee code">
-                <div class="input-group-append">
-                  <button type="submit" class="btn btn-primary">Load</button>
-                </div>
-              </div>
-            </form>
-            <div id="hrmsSnapshotContent">
-              <?php if ($employeeCode === ''): ?>
-                <p class="text-muted mb-0">Enter an employee code above to load HRMS details.</p>
-              <?php elseif ($lazyMode): ?>
-                <p class="text-muted mb-0">Loading HRMS details...</p>
-              <?php elseif ($hrmsError): ?>
-                <div class="alert alert-warning mb-0">
-                  <?= h($hrmsError) ?>
-                </div>
-              <?php else: ?>
-                <?php
-                  $employeeName = $hrmsSummary['employeeName'] ?? 'Employee';
-                  $employeeCodeLabel = trim((string) ($hrmsSummary['employeeCode'] ?? $employeeCode));
-                  $departmentDisplay = format_name_with_code(
-                      $hrmsSummary['department'] ?? '',
-                      $hrmsSummary['departmentCode'] ?? '',
-                      'Department n/a'
-                  );
-                  $designationDisplay = format_name_with_code(
-                      $hrmsSummary['designation'] ?? '',
-                      $hrmsSummary['designationCode'] ?? '',
-                      'Designation n/a'
-                  );
-                  $statusDisplay = $hrmsSummary['status'] ?? 'n/a';
-                  $companyDisplay = trim((string) ($hrmsSummary['companyCode'] ?? ''));
-                  if ($companyDisplay === '') {
-                      $companyDisplay = 'n/a';
-                  }
-                  $workTypeDisplay = format_name_with_code(
-                      $hrmsSummary['workTypeDescription'] ?? '',
-                      $hrmsSummary['workTypeCode'] ?? '',
-                      'n/a'
-                  );
-                  $todayWorkingDisplay = format_yes_no($hrmsSummary['todayWorking'] ?? null);
-                  $onEleaveDisplay = format_yes_no($hrmsSummary['onEleave'] ?? null);
-                  $leaveDisplay = format_name_with_code(
-                      $hrmsSummary['leaveDescription'] ?? '',
-                      $hrmsSummary['leaveCode'] ?? '',
-                      'n/a'
-                  );
-                ?>
-                <div class="mb-3">
-                  <div class="h5 mb-1">
-                    <?= h($employeeName) ?>
-                    <?php if ($employeeCodeLabel !== ''): ?>
-                      <span class="text-muted small">(<?= h($employeeCodeLabel) ?>)</span>
-                    <?php endif; ?>
-                  </div>
-                  <div class="text-muted">
-                    <?= h($departmentDisplay) ?> | <?= h($designationDisplay) ?>
-                  </div>
-                  <div class="text-muted">Status: <?= h($statusDisplay) ?></div>
-                </div>
-                <div class="row mb-2">
-                  <div class="col-md-4 col-6 mb-2">
-                    <div class="text-muted small">Company</div>
-                    <div class="h6 mb-0"><?= h($companyDisplay) ?></div>
-                  </div>
-                  <div class="col-md-4 col-6 mb-2">
-                    <div class="text-muted small">Work type</div>
-                    <div class="h6 mb-0"><?= h($workTypeDisplay) ?></div>
-                  </div>
-                  <div class="col-md-4 col-6 mb-2">
-                    <div class="text-muted small">Today working</div>
-                    <div class="h6 mb-0"><?= h($todayWorkingDisplay) ?></div>
-                  </div>
-                  <div class="col-md-4 col-6 mb-2">
-                    <div class="text-muted small">On leave</div>
-                    <div class="h6 mb-0"><?= h($onEleaveDisplay) ?></div>
-                  </div>
-                  <div class="col-md-4 col-6 mb-2">
-                    <div class="text-muted small">Leave type</div>
-                    <div class="h6 mb-0"><?= h($leaveDisplay) ?></div>
-                  </div>
-                </div>
-                <div class="row">
-                  <div class="col-6 mb-3">
-                    <div class="text-muted small">Attendance days</div>
-                    <div class="h5 mb-0"><?= h((string) $hrmsSummary['attendanceDays']) ?></div>
-                    <?php if (!empty($hrmsSummary['attendanceError'])): ?>
-                      <div class="text-warning small"><?= h($hrmsSummary['attendanceError']) ?></div>
-                    <?php endif; ?>
-                  </div>
-                  <div class="col-6 mb-3">
-                    <div class="text-muted small">Leave days</div>
-                    <div class="h5 mb-0"><?= h((string) $hrmsSummary['leaveDays']) ?></div>
-                  </div>
-                  <div class="col-6">
-                    <div class="text-muted small">Last attendance</div>
-                    <div class="h6 mb-0"><?= h($hrmsSummary['lastAttendance'] ?? 'n/a') ?></div>
-                  </div>
-                  <div class="col-6">
-                    <div class="text-muted small">Holidays</div>
-                    <div class="h6 mb-0"><?= h((string) $hrmsSummary['holidayCount']) ?></div>
-                  </div>
-                </div>
-              <?php endif; ?>
-              <div class="border-top pt-3 mt-3">
-                <div class="d-flex justify-content-between align-items-center mb-2">
-                  <h6 class="mb-0">UTime punch details</h6>
-                  <span class="text-muted small">UTime API</span>
-                </div>
-                <div id="utimeSnapshotContent">
-                  <?php if ($employeeCode === ''): ?>
-                    <p class="text-muted mb-0">Enter an employee code above to load UTime punch details.</p>
-                  <?php else: ?>
-                    <p class="text-muted mb-0">Loading UTime details...</p>
-                  <?php endif; ?>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 </section>
 
@@ -2732,6 +3788,13 @@ include __DIR__ . '/include/layout_top.php';
     const valueOrDash = (value) => {
       const text = String(value ?? '').trim();
       return text !== '' ? text : '-';
+    };
+    const formatNumber = (value, options = {}) => {
+      const num = Number(value);
+      if (!Number.isFinite(num)) {
+        return '-';
+      }
+      return num.toLocaleString(undefined, options);
     };
     const updateProjectPunchesSummary = (labelText) => {
       const countEl = document.getElementById('activeDeviceReportCount');
@@ -2868,6 +3931,262 @@ include __DIR__ . '/include/layout_top.php';
         return value;
       }
       return `${month} ${parts[2]}`;
+    };
+
+    const renderTrendChart = (rows) => {
+      const chart = document.getElementById('attendanceTrendChart');
+      const legend = document.getElementById('attendanceTrendLegend');
+      if (!chart) {
+        return;
+      }
+      const data = Array.isArray(rows) ? rows : [];
+      if (!data.length) {
+        chart.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#94a3b8" font-size="12">No data</text>';
+        if (legend) {
+          legend.textContent = 'No attendance data available.';
+        }
+        return;
+      }
+      const width = 640;
+      const height = 220;
+      const padding = 32;
+      const values = data.map((row) => Number(row.count) || 0);
+      const maxValue = Math.max(...values, 1);
+      const step = data.length > 1 ? (width - padding * 2) / (data.length - 1) : 0;
+      const points = data.map((row, index) => {
+        const x = padding + step * index;
+        const value = Number(row.count) || 0;
+        const y = height - padding - ((value / maxValue) * (height - padding * 2));
+        return { x, y, value, date: row.date };
+      });
+      const linePath = points.map((point, index) => {
+        const cmd = index === 0 ? 'M' : 'L';
+        return `${cmd} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+      }).join(' ');
+      const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(2)} ${height - padding} ` +
+        `L ${points[0].x.toFixed(2)} ${height - padding} Z`;
+      const gridLines = [0.25, 0.5, 0.75].map((fraction) => {
+        const y = height - padding - (height - padding * 2) * fraction;
+        return `<line x1="${padding}" y1="${y.toFixed(2)}" x2="${width - padding}" y2="${y.toFixed(2)}" stroke="rgba(15,23,42,0.08)" stroke-dasharray="4 6" />`;
+      }).join('');
+      const lastPoint = points[points.length - 1];
+      chart.innerHTML = `
+        <defs>
+          <linearGradient id="trendStroke" x1="0" x2="1">
+            <stop offset="0%" stop-color="#2563eb" />
+            <stop offset="100%" stop-color="#14b8a6" />
+          </linearGradient>
+          <linearGradient id="trendArea" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="rgba(37,99,235,0.35)" />
+            <stop offset="100%" stop-color="rgba(20,184,166,0.05)" />
+          </linearGradient>
+        </defs>
+        ${gridLines}
+        <path d="${areaPath}" fill="url(#trendArea)" />
+        <path d="${linePath}" fill="none" stroke="url(#trendStroke)" stroke-width="3" stroke-linecap="round" />
+        <circle cx="${lastPoint.x.toFixed(2)}" cy="${lastPoint.y.toFixed(2)}" r="4" fill="#f97316" stroke="#ffffff" stroke-width="2" />
+      `;
+      if (legend) {
+        const startLabel = formatMonthDay(data[0].date);
+        const endLabel = formatMonthDay(data[data.length - 1].date);
+        legend.innerHTML = `<span>${startLabel} to ${endLabel}</span><span>Peak: ${maxValue}</span>`;
+      }
+    };
+
+    const renderBarList = (containerId, items) => {
+      const container = document.getElementById(containerId);
+      if (!container) {
+        return;
+      }
+      const rows = Array.isArray(items) ? items : [];
+      if (!rows.length) {
+        container.innerHTML = '<div class="insight-empty">No data available.</div>';
+        return;
+      }
+      const max = Math.max(...rows.map((row) => Number(row.count) || 0), 1);
+      container.innerHTML = rows.map((row) => {
+        const label = escapeHtml(row.label || '-');
+        const count = Number(row.count) || 0;
+        const percent = count > 0 ? Math.max(4, (count / max) * 100) : 0;
+        return `
+          <div class="insight-bar-row">
+            <div class="insight-bar-label">${label}</div>
+            <div class="insight-bar-track">
+              <div class="insight-bar-fill" style="--bar-size:${percent.toFixed(2)}%;"></div>
+            </div>
+            <div class="insight-bar-value">${count}</div>
+          </div>
+        `;
+      }).join('');
+    };
+
+    const renderPunchHours = (rows, containerId = 'punchHourBars') => {
+      const container = document.getElementById(containerId);
+      if (!container) {
+        return;
+      }
+      if (!Array.isArray(rows) || rows.length === 0) {
+        container.innerHTML = '<div class="insight-empty">No punch data available.</div>';
+        return;
+      }
+      const hours = Array.from({ length: 24 }, () => 0);
+      (Array.isArray(rows) ? rows : []).forEach((row) => {
+        const hour = Number(row.hour);
+        if (Number.isFinite(hour) && hour >= 0 && hour < 24) {
+          hours[hour] = Number(row.count) || 0;
+        }
+      });
+      const max = Math.max(...hours, 1);
+      container.innerHTML = hours.map((count, hour) => {
+        const label = (hour % 6 === 0 || hour === 23) ? String(hour) : '';
+        const percent = count > 0 ? Math.max(4, (count / max) * 100) : 0;
+        return `
+          <div class="insight-hour-col">
+            <div class="insight-hour-bar" style="--bar-size:${percent.toFixed(2)}%;"></div>
+            <div class="insight-hour-label">${label}</div>
+          </div>
+        `;
+      }).join('');
+    };
+
+    const renderOverrideStatus = (overrides) => {
+      const container = document.getElementById('overrideStatus');
+      if (!container) {
+        return;
+      }
+      const pending = Number(overrides.pending) || 0;
+      const approved = Number(overrides.approved) || 0;
+      const rejected = Number(overrides.rejected) || 0;
+      const total = pending + approved + rejected;
+      if (total === 0) {
+        container.innerHTML = '<div class="insight-empty">No override activity in range.</div>';
+        return;
+      }
+      const pendingPct = (pending / total) * 100;
+      const approvedPct = (approved / total) * 100;
+      const rejectedPct = (rejected / total) * 100;
+      container.innerHTML = `
+        <div class="insight-status-bar">
+          <div class="insight-status-seg insight-status-seg--approved" style="--seg-size:${approvedPct.toFixed(2)}%;"></div>
+          <div class="insight-status-seg insight-status-seg--pending" style="--seg-size:${pendingPct.toFixed(2)}%;"></div>
+          <div class="insight-status-seg insight-status-seg--rejected" style="--seg-size:${rejectedPct.toFixed(2)}%;"></div>
+        </div>
+        <div class="insight-status-legend">
+          <div class="insight-status-item"><span>Approved</span><strong>${approved}</strong></div>
+          <div class="insight-status-item"><span>Pending</span><strong>${pending}</strong></div>
+          <div class="insight-status-item"><span>Rejected</span><strong>${rejected}</strong></div>
+        </div>
+      `;
+    };
+
+    const renderHeroMetrics = (hero) => {
+      const employeeCount = Number(hero.employeeCount);
+      const totalHours = Number(hero.totalHours);
+      const avgHours = Number(hero.avgHours);
+      const employeeCountText = Number.isFinite(employeeCount)
+        ? formatNumber(employeeCount)
+        : '-';
+      const totalHoursText = Number.isFinite(totalHours)
+        ? `${formatNumber(totalHours, { maximumFractionDigits: 1 })} hrs`
+        : '-';
+      const avgHoursText = Number.isFinite(avgHours)
+        ? `Avg: ${formatNumber(avgHours, { maximumFractionDigits: 2 })} hrs`
+        : 'Avg: -';
+      setText('heroEmployeeCount', employeeCountText);
+      setText('heroEmployeeMeta', hero.employeeNote || 'Unique employees in range');
+      setText('heroTotalHours', totalHoursText);
+      setText('heroHoursMeta', avgHoursText);
+    };
+
+    const renderMomentum = (momentum) => {
+      const card = document.getElementById('insightMomentum');
+      const delta = Number(momentum.deltaPercent);
+      let valueText = '-';
+      if (Number.isFinite(delta)) {
+        const sign = delta > 0 ? '+' : '';
+        valueText = `${sign}${delta.toFixed(1)}%`;
+      }
+      setText('insightMomentumValue', valueText);
+      const label = momentum.label || 'vs previous period';
+      const currentTotal = Number(momentum.currentTotal);
+      const previousTotal = Number(momentum.previousTotal);
+      const totalsLabel = Number.isFinite(currentTotal) && Number.isFinite(previousTotal)
+        ? `${formatNumber(currentTotal)} now | ${formatNumber(previousTotal)} prev`
+        : '';
+      setText('insightMomentumMeta', totalsLabel ? `${label} | ${totalsLabel}` : label);
+      if (card) {
+        card.classList.remove('insight-stat--positive', 'insight-stat--negative');
+        if (Number.isFinite(delta)) {
+          if (delta > 1) {
+            card.classList.add('insight-stat--positive');
+          } else if (delta < -1) {
+            card.classList.add('insight-stat--negative');
+          }
+        }
+      }
+    };
+
+    const renderInsightsSummary = (summary, meta) => {
+      const metaEl = document.getElementById('insightsMeta');
+      if (metaEl) {
+        metaEl.textContent = meta || 'Insights updated';
+      }
+      const safeSummary = (summary && typeof summary === 'object') ? summary : {};
+      setText('insightTotalAttendance', Number.isFinite(Number(safeSummary.totalAttendance)) ? safeSummary.totalAttendance : '-');
+      setText('insightAvgDaily', Number.isFinite(Number(safeSummary.avgDailyAttendance))
+        ? `Avg per day: ${safeSummary.avgDailyAttendance}`
+        : 'Avg per day: -');
+      setText('insightAvgHours', Number.isFinite(Number(safeSummary.avgWorkHours)) ? `${safeSummary.avgWorkHours} hrs` : '-');
+      setText('insightDayCount', Number.isFinite(Number(safeSummary.dayCount))
+        ? `Days in range: ${safeSummary.dayCount}`
+        : 'Days in range: -');
+      setText('insightPeakDay', safeSummary.peakDay || '-');
+      setText('insightPeakCount', Number.isFinite(Number(safeSummary.peakCount))
+        ? `Peak attendance: ${safeSummary.peakCount}`
+        : 'Peak attendance: -');
+    };
+    const renderInsightsDaily = (dailyTrend) => {
+      renderTrendChart(Array.isArray(dailyTrend) ? dailyTrend : []);
+    };
+    const renderInsightsWorkHours = (workHours) => {
+      renderBarList('workHoursBars', Array.isArray(workHours) ? workHours : []);
+    };
+    const renderInsightsPunchHours = (punchHours) => {
+      if (punchHours && Array.isArray(punchHours.first)) {
+        renderPunchHours(punchHours.first);
+        return;
+      }
+      renderPunchHours(Array.isArray(punchHours) ? punchHours : []);
+    };
+    const renderInsightsDepartments = (departments) => {
+      renderBarList('departmentBars', Array.isArray(departments) ? departments : []);
+    };
+    const renderInsightsDesignations = (designations) => {
+      renderBarList('designationBars', Array.isArray(designations) ? designations : []);
+    };
+    const renderInsightsProjects = (projects) => {
+      renderBarList('projectBars', Array.isArray(projects) ? projects : []);
+    };
+    const renderInsightsOverrides = (overrides) => {
+      renderOverrideStatus(overrides || {});
+    };
+    const renderInsightsArrivals = (arrivals) => {
+      renderBarList('arrivalBars', Array.isArray(arrivals) ? arrivals : []);
+    };
+    const renderInsightsDepartures = (departures) => {
+      renderBarList('departureBars', Array.isArray(departures) ? departures : []);
+    };
+    const renderInsightsConsistency = (consistency) => {
+      renderBarList('consistencyBars', Array.isArray(consistency) ? consistency : []);
+    };
+    const renderInsightsWeekday = (weekday) => {
+      renderBarList('weekdayBars', Array.isArray(weekday) ? weekday : []);
+    };
+    const renderInsightsLowDays = (lowDays) => {
+      renderBarList('lowDaysBars', Array.isArray(lowDays) ? lowDays : []);
+    };
+    const renderInsightsPunchOuts = (punchOuts) => {
+      renderPunchHours(Array.isArray(punchOuts) ? punchOuts : [], 'punchOutBars');
     };
     const baseUrl = '<?= h(admin_url('Attendance_Dashboard.php')) ?>';
     const renderHrmsSnapshot = (hrms) => {
@@ -3117,6 +4436,8 @@ include __DIR__ . '/include/layout_top.php';
 
     const renderLoggedBadgesPage = (page) => {
       const metaEl = document.getElementById('loggedBadgesMeta');
+      const heroCountEl = document.getElementById('loggedBadgesCount');
+      const heroMetaEl = document.getElementById('loggedBadgesHeroMeta');
       const tableWrapper = document.getElementById('loggedBadgesTableWrapper');
       const tableBody = document.getElementById('loggedBadgesTableBody');
       const emptyEl = document.getElementById('loggedBadgesEmpty');
@@ -3125,7 +4446,7 @@ include __DIR__ . '/include/layout_top.php';
       const nextBtn = document.getElementById('loggedBadgesNext');
       const pageInfoEl = document.getElementById('loggedBadgesPageInfo');
       const pageInput = document.getElementById('loggedBadgesPageInput');
-      if (!metaEl || !tableWrapper || !tableBody || !emptyEl || !paginationEl || !pageInfoEl) {
+      if (!metaEl) {
         return;
       }
       const rows = loggedBadgesState.rows;
@@ -3136,9 +4457,30 @@ include __DIR__ . '/include/layout_top.php';
       const totalCount = count > 0 ? count : rows.length;
 
       if (ok) {
-        metaEl.textContent = note !== '' ? note : `${totalCount} badges`;
+        if (metaEl) {
+          metaEl.textContent = note !== '' ? note : `${totalCount} badges`;
+        }
+        if (heroCountEl) {
+          heroCountEl.textContent = String(totalCount);
+        }
+        if (heroMetaEl) {
+          heroMetaEl.textContent = note !== '' ? note : `${totalCount} badges`;
+        }
       } else {
-        metaEl.textContent = 'Unable to load badges';
+        if (metaEl) {
+          metaEl.textContent = 'Unable to load badges';
+        }
+        if (heroCountEl) {
+          heroCountEl.textContent = '-';
+        }
+        if (heroMetaEl) {
+          heroMetaEl.textContent = 'Unable to load badges';
+        }
+      }
+
+      const hasTable = !!(tableWrapper && tableBody && emptyEl && paginationEl && pageInfoEl);
+      if (!hasTable) {
+        return;
       }
 
       if (ok && rows.length) {
@@ -3499,12 +4841,16 @@ include __DIR__ . '/include/layout_top.php';
           const deviceStatus = (data && data.deviceStatus) || {};
           setText('deviceStatusRatio', deviceStatus.deviceStatusRatio || '-');
           setText('deviceStatusMeta', deviceStatus.deviceStatusMeta || '');
+          setText('heroDeviceStatusRatio', deviceStatus.deviceStatusRatio || '-');
+          setText('heroDeviceStatusMeta', deviceStatus.deviceStatusMeta || '');
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
           setPanelError('Online/total devices', errors.length > 0);
         })
         .catch(() => {
           setText('deviceStatusRatio', '-');
           setText('deviceStatusMeta', 'Status data unavailable');
+          setText('heroDeviceStatusRatio', '-');
+          setText('heroDeviceStatusMeta', 'Status data unavailable');
           setPanelError('Online/total devices', true);
         });
     };
@@ -3534,6 +4880,390 @@ include __DIR__ . '/include/layout_top.php';
           setText('badgeCardTitle', 'Logged in employees');
           setText('badgeCoverageLabel', 'Coverage n/a');
           setPanelError('Logged in / active employees', true);
+        });
+    };
+
+    const fetchHeroMetrics = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-hero');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderHeroMetrics(insights.hero || {});
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Hero metrics', errors.length > 0);
+        })
+        .catch(() => {
+          renderHeroMetrics({ employeeNote: 'Attendance ledger unavailable' });
+          setPanelError('Hero metrics', true);
+        });
+    };
+
+    const fetchMomentum = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-momentum');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderMomentum(insights.momentum || {});
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Momentum', errors.length > 0);
+        })
+        .catch(() => {
+          renderMomentum({});
+          setPanelError('Momentum', true);
+        });
+    };
+
+    const fetchInsightsSummary = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-summary');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsSummary(insights.summary || {}, insights.meta || '');
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Insights summary', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsSummary({}, 'Insights unavailable');
+          setPanelError('Insights summary', true);
+        });
+    };
+
+    const fetchInsightsDaily = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-daily');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsDaily(insights.dailyTrend || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Daily trend', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsDaily([]);
+          setPanelError('Daily trend', true);
+        });
+    };
+
+    const fetchInsightsWorkHours = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-work-hours');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsWorkHours(insights.workHours || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Work hours', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsWorkHours([]);
+          setPanelError('Work hours', true);
+        });
+    };
+
+    const fetchInsightsPunchHours = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-punch-hours');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsPunchHours(insights.punchHours || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Punch hours', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsPunchHours([]);
+          setPanelError('Punch hours', true);
+        });
+    };
+
+    const fetchInsightsPunchOuts = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-punch-outs');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsPunchOuts(insights.punchOuts || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Punch outs', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsPunchOuts([]);
+          setPanelError('Punch outs', true);
+        });
+    };
+
+    const fetchInsightsArrivals = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-arrivals');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsArrivals(insights.arrivals || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Arrivals', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsArrivals([]);
+          setPanelError('Arrivals', true);
+        });
+    };
+
+    const fetchInsightsDepartures = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-departures');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsDepartures(insights.departures || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Departures', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsDepartures([]);
+          setPanelError('Departures', true);
+        });
+    };
+
+    const fetchInsightsConsistency = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-consistency');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsConsistency(insights.consistency || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Consistency', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsConsistency([]);
+          setPanelError('Consistency', true);
+        });
+    };
+
+    const fetchInsightsWeekday = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-weekday');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsWeekday(insights.weekday || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Weekday pulse', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsWeekday([]);
+          setPanelError('Weekday pulse', true);
+        });
+    };
+
+    const fetchInsightsLowDays = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-low-days');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsLowDays(insights.lowDays || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Low days', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsLowDays([]);
+          setPanelError('Low days', true);
+        });
+    };
+
+    const fetchInsightsDepartments = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-departments');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsDepartments(insights.departments || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Departments', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsDepartments([]);
+          setPanelError('Departments', true);
+        });
+    };
+
+    const fetchInsightsDesignations = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-designations');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsDesignations(insights.designations || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Designations', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsDesignations([]);
+          setPanelError('Designations', true);
+        });
+    };
+
+    const fetchInsightsProjects = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-projects');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsProjects(insights.projects || []);
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Projects', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsProjects([]);
+          setPanelError('Projects', true);
+        });
+    };
+
+    const fetchInsightsOverrides = () => {
+      const params = new URLSearchParams(baseParams);
+      params.set('ajax_section', 'insights-overrides');
+      const url = baseUrl + '?' + params.toString();
+
+      fetch(url, { credentials: 'same-origin' })
+        .then((response) => {
+          if (!response.ok) {
+            throw new Error('Request failed');
+          }
+          return response.json();
+        })
+        .then((data) => {
+          const insights = (data && data.insights) || {};
+          renderInsightsOverrides(insights.overrides || {});
+          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
+          setPanelError('Overrides', errors.length > 0);
+        })
+        .catch(() => {
+          renderInsightsOverrides({});
+          setPanelError('Overrides', true);
         });
     };
 
@@ -3629,7 +5359,6 @@ include __DIR__ . '/include/layout_top.php';
       fetchLoggedBadges(safePage, loggedBadgesState.pageSize);
     };
 
-    renderLoggedBadges(initialLoggedBadges || {});
     const initialLabelEl = document.getElementById('activeDeviceLabel');
     const initialMetaEl = document.getElementById('activeDeviceMeta');
     updateProjectPunchesSummary(initialLabelEl ? initialLabelEl.textContent : '');
@@ -3638,7 +5367,22 @@ include __DIR__ . '/include/layout_top.php';
     fetchActiveDevices();
     fetchDeviceStatus();
     fetchBadgeRatio();
-    fetchLoggedBadges(loggedBadgesState.page, loggedBadgesState.pageSize);
+    fetchHeroMetrics();
+    fetchMomentum();
+    fetchInsightsSummary();
+    fetchInsightsDaily();
+    fetchInsightsWorkHours();
+    fetchInsightsPunchHours();
+    fetchInsightsPunchOuts();
+    fetchInsightsArrivals();
+    fetchInsightsDepartures();
+    fetchInsightsConsistency();
+    fetchInsightsWeekday();
+    fetchInsightsLowDays();
+    fetchInsightsDepartments();
+    fetchInsightsDesignations();
+    fetchInsightsProjects();
+    fetchInsightsOverrides();
   })();
 </script>
 

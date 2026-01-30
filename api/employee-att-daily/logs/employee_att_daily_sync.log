@@ -1,0 +1,4 @@
+{"ts":"2026-01-29T12:06:52+00:00","message":"sync_received","context":{"source":"EmployeeAttDaily","changes":1}}
+{"ts":"2026-01-29T12:06:52+00:00","message":"db_selected","context":{"database":"gcc_attendance_master"}}
+{"ts":"2026-01-29T12:06:53+00:00","message":"override_migration_complete","context":{"rows":0}}
+{"ts":"2026-01-29T12:06:54+00:00","message":"sync_complete","context":{"received":1,"applied":1,"skipped":0,"errors":0}}

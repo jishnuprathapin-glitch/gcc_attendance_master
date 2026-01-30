@@ -110,7 +110,7 @@ function attendance_api_post_json(string $path, array $payload, int $timeoutSeco
 
     $body = json_encode($payload);
     if ($body === false) {
-        return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'json_encode_failed', 'url' => $url];
+        return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'json_encode_failed', 'url' => $url, 'raw' => null];
     }
 
     $responseBody = null;
@@ -120,7 +120,7 @@ function attendance_api_post_json(string $path, array $payload, int $timeoutSeco
     if (function_exists('curl_init')) {
         $ch = curl_init($url);
         if ($ch === false) {
-            return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'curl_init_failed', 'url' => $url];
+            return ['ok' => false, 'status' => null, 'data' => null, 'error' => 'curl_init_failed', 'url' => $url, 'raw' => null];
         }
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $timeoutSeconds);
@@ -160,7 +160,7 @@ function attendance_api_post_json(string $path, array $payload, int $timeoutSeco
     }
 
     if ($error !== null) {
-        return ['ok' => false, 'status' => $status, 'data' => null, 'error' => $error, 'url' => $url];
+        return ['ok' => false, 'status' => $status, 'data' => null, 'error' => $error, 'url' => $url, 'raw' => $responseBody];
     }
 
     $data = null;
@@ -174,6 +174,7 @@ function attendance_api_post_json(string $path, array $payload, int $timeoutSeco
                 'data' => null,
                 'error' => 'invalid_json_response',
                 'url' => $url,
+                'raw' => $responseBody,
             ];
         }
     }
@@ -185,6 +186,7 @@ function attendance_api_post_json(string $path, array $payload, int $timeoutSeco
         'data' => $data,
         'error' => $ok ? null : 'http_error',
         'url' => $url,
+        'raw' => $responseBody,
     ];
 }
 
