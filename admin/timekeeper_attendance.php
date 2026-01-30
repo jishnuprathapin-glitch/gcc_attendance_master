@@ -161,6 +161,43 @@ function normalize_search_terms(?string $value): array {
     return array_keys($clean);
 }
 
+function ensure_timekeeper_project_map_table(mysqli $bd): bool {
+    $sql = 'CREATE TABLE IF NOT EXISTS `gcc_attendance_master`.`timekeeper_project_map` (' .
+        '`user_id` varchar(50) NOT NULL,' .
+        '`project_code` varchar(20) NOT NULL,' .
+        '`created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,' .
+        'PRIMARY KEY (`user_id`, `project_code`)' .
+        ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+    return (bool) $bd->query($sql);
+}
+
+function load_timekeeper_projects(mysqli $bd, string $userId): array {
+    if ($userId === '') {
+        return [];
+    }
+    $projects = [];
+    $stmt = $bd->prepare(
+        'SELECT project_code FROM gcc_attendance_master.timekeeper_project_map WHERE user_id = ? ORDER BY project_code'
+    );
+    if ($stmt) {
+        $stmt->bind_param('s', $userId);
+        if ($stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $code = trim((string) ($row['project_code'] ?? ''));
+                    if ($code !== '') {
+                        $projects[] = $code;
+                    }
+                }
+                $result->free();
+            }
+        }
+        $stmt->close();
+    }
+    return $projects;
+}
+
 function build_query_url(array $params): string {
     $base = admin_url('Attendance_AttendanceDaily.php');
     $query = http_build_query($params);
@@ -893,6 +930,10 @@ $offset = 0;
 $totalEmployees = 0;
 $totalPages = 1;
 $loadError = null;
+$mappingRequired = false;
+$mappingError = null;
+$mappedProjects = [];
+$userId = trim((string) ($_SESSION['user_id'] ?? ''));
 
 if (!isset($bd) || !($bd instanceof mysqli)) {
     $loadError = 'Database connection not available.';
@@ -938,6 +979,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         }
         $projectResult->free();
     }
+    $allProjectOptions = $projectOptions;
 
     $loginProjectResult = $bd->query(
         'SELECT DISTINCT p.pro_code, p.name ' .
@@ -985,9 +1027,63 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $typeResult->free();
     }
 
-    $filters = ['hr.is_deleted = 0', 'hr.st_code = "A"'];
-    $params = [];
-    $types = '';
+    if (!ensure_timekeeper_project_map_table($bd)) {
+        $loadError = 'Unable to load project access configuration.';
+    } else {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_project_mapping') {
+            if (!verify_csrf($_POST['csrf'] ?? null)) {
+                $mappingError = 'Invalid request token.';
+            } else {
+                $selected = normalize_multi_param($_POST['mapped_projects'] ?? []);
+                $valid = array_values(array_intersect($selected, array_keys($allProjectOptions ?? [])));
+                if (empty($valid)) {
+                    $mappingError = 'Select at least one project.';
+                } else {
+                    $stmt = $bd->prepare(
+                        'INSERT IGNORE INTO gcc_attendance_master.timekeeper_project_map (user_id, project_code) VALUES (?, ?)'
+                    );
+                    if (!$stmt) {
+                        $mappingError = 'Unable to save project access.';
+                    } else {
+                        foreach ($valid as $code) {
+                            $stmt->bind_param('ss', $userId, $code);
+                            if (!$stmt->execute()) {
+                                $mappingError = 'Unable to save project access.';
+                                break;
+                            }
+                        }
+                        $stmt->close();
+                    }
+                }
+            }
+            if ($mappingError === null) {
+                header('Location: ' . admin_url('timekeeper_attendance.php'));
+                exit;
+            }
+        }
+
+        $mappedProjects = load_timekeeper_projects($bd, $userId);
+        if (empty($mappedProjects)) {
+            $mappingRequired = true;
+        }
+    }
+
+    if (!$loadError && !$mappingRequired) {
+        $mappedProjectSet = array_fill_keys($mappedProjects, true);
+        if (!empty($projectCodeFilter)) {
+            $projectCodeFilter = array_values(array_intersect($projectCodeFilter, $mappedProjects));
+        }
+        if (!empty($loginProjectFilter)) {
+            $loginProjectFilter = array_values(array_intersect($loginProjectFilter, $mappedProjects));
+        }
+        if (!empty($mappedProjects)) {
+            $projectOptions = array_intersect_key($projectOptions, $mappedProjectSet);
+            $loginProjectOptions = array_intersect_key($loginProjectOptions, $mappedProjectSet);
+        }
+
+        $filters = ['hr.is_deleted = 0', 'hr.st_code = "A"'];
+        $params = [];
+        $types = '';
 
     if (!empty($designationFilter)) {
         $placeholders = implode(',', array_fill(0, count($designationFilter), '?'));
@@ -1043,27 +1139,43 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         }
     }
 
-    $countSql = 'SELECT COUNT(*) AS total ' .
-        'FROM gcc_attendance_master.hrmsvw_sync hr';
-    if (!empty($filters)) {
-        $countSql .= ' WHERE ' . implode(' AND ', $filters);
-    }
-
-    $countStmt = $bd->prepare($countSql);
-    if ($countStmt) {
-        bind_params($countStmt, $types, $params);
-        if ($countStmt->execute()) {
-            $result = $countStmt->get_result();
-            if ($result) {
-                $row = $result->fetch_assoc();
-                if ($row && isset($row['total'])) {
-                    $totalEmployees = (int) $row['total'];
-                }
-                $result->free();
-            }
+        if (!empty($mappedProjects)) {
+            $mapPlaceholders = implode(',', array_fill(0, count($mappedProjects), '?'));
+            $filters[] = '(' .
+                'hr.jbno IN (' . $mapPlaceholders . ') ' .
+                'OR hr.emp_code IN (' .
+                    'SELECT DISTINCT dp.emp_code ' .
+                    'FROM gcc_attendance_master.employee_daily_punch dp ' .
+                    'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                    'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+                    'WHERE dp.punch_date BETWEEN ? AND ? AND p.pro_code IN (' . $mapPlaceholders . ')' .
+                ')' .
+            ')';
+            $params = array_merge($params, $mappedProjects, [$startDate, $endDate], $mappedProjects);
+            $types .= str_repeat('s', count($mappedProjects)) . 'ss' . str_repeat('s', count($mappedProjects));
         }
-        $countStmt->close();
-    }
+
+        $countSql = 'SELECT COUNT(*) AS total ' .
+            'FROM gcc_attendance_master.hrmsvw_sync hr';
+        if (!empty($filters)) {
+            $countSql .= ' WHERE ' . implode(' AND ', $filters);
+        }
+
+        $countStmt = $bd->prepare($countSql);
+        if ($countStmt) {
+            bind_params($countStmt, $types, $params);
+            if ($countStmt->execute()) {
+                $result = $countStmt->get_result();
+                if ($result) {
+                    $row = $result->fetch_assoc();
+                    if ($row && isset($row['total'])) {
+                        $totalEmployees = (int) $row['total'];
+                    }
+                    $result->free();
+                }
+            }
+            $countStmt->close();
+        }
 
     $totalPages = max(1, (int) ceil(max(0, $totalEmployees) / $perPage));
     if ($page > $totalPages) {
@@ -1071,14 +1183,14 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     }
     $offset = max(0, ($page - 1) * $perPage);
 
-    $sql = 'SELECT hr.emp_code, ' .
-        'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
-        'hr.desg_name, hr.dept_name, hr.cc_code, hr.cc_name, hr.ty_desc, hr.jbno, hr.jbdesc ' .
-        'FROM gcc_attendance_master.hrmsvw_sync hr';
-    if (!empty($filters)) {
-        $sql .= ' WHERE ' . implode(' AND ', $filters);
-    }
-    $sql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT ? OFFSET ?';
+        $sql = 'SELECT hr.emp_code, ' .
+            'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
+            'hr.desg_name, hr.dept_name, hr.cc_code, hr.cc_name, hr.ty_desc, hr.jbno, hr.jbdesc ' .
+            'FROM gcc_attendance_master.hrmsvw_sync hr';
+        if (!empty($filters)) {
+            $sql .= ' WHERE ' . implode(' AND ', $filters);
+        }
+        $sql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT ? OFFSET ?';
 
     $listParams = $params;
     $listTypes = $types;
@@ -1086,26 +1198,26 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     $listParams[] = $offset;
     $listTypes .= 'ii';
 
-    $stmt = $bd->prepare($sql);
-    if ($stmt) {
-        bind_params($stmt, $listTypes, $listParams);
-        if ($stmt->execute()) {
-            $result = $stmt->get_result();
-            if ($result) {
-                while ($row = $result->fetch_assoc()) {
-                    $employees[] = $row;
+        $stmt = $bd->prepare($sql);
+        if ($stmt) {
+            bind_params($stmt, $listTypes, $listParams);
+            if ($stmt->execute()) {
+                $result = $stmt->get_result();
+                if ($result) {
+                    while ($row = $result->fetch_assoc()) {
+                        $employees[] = $row;
+                    }
+                    $result->free();
                 }
-                $result->free();
+            } else {
+                $loadError = 'Unable to load employees.';
             }
+            $stmt->close();
         } else {
-            $loadError = 'Unable to load employees.';
+            $loadError = 'Unable to prepare employee query.';
         }
-        $stmt->close();
-    } else {
-        $loadError = 'Unable to prepare employee query.';
-    }
 
-    if (!$loadError && !empty($employees) && !empty($dateRange)) {
+        if (!$loadError && !empty($employees) && !empty($dateRange)) {
         $empCodes = [];
         foreach ($employees as $row) {
             $code = trim((string) ($row['emp_code'] ?? ''));
@@ -1246,6 +1358,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                 }
             }
         }
+        }
     }
 }
 
@@ -1323,6 +1436,12 @@ $context = [
 ];
 
 if ($exportStart) {
+    if ($mappingRequired) {
+        http_response_code(400);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['ok' => false, 'message' => 'Project access is not configured.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
     if ($loadError !== null) {
         http_response_code(500);
         header('Content-Type: application/json; charset=utf-8');
@@ -1414,6 +1533,12 @@ if ($exportStart) {
 }
 
 if ($exportRequested) {
+    if ($mappingRequired) {
+        http_response_code(400);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Project access is not configured.';
+        exit;
+    }
     if ($loadError !== null) {
         http_response_code(500);
         header('Content-Type: text/plain; charset=utf-8');
@@ -1443,7 +1568,9 @@ if ($exportRequested) {
 
 if (($_GET['ajax'] ?? '') === '1') {
     header('Content-Type: application/json; charset=utf-8');
-    if ($loadError) {
+    if ($mappingRequired) {
+        echo json_encode(['ok' => false, 'message' => 'Project access is not configured.'], JSON_UNESCAPED_SLASHES);
+    } elseif ($loadError) {
         echo json_encode(['ok' => false, 'message' => $loadError], JSON_UNESCAPED_SLASHES);
     } else {
         echo json_encode(['ok' => true, 'html' => render_attendance_results($context)], JSON_UNESCAPED_SLASHES);
@@ -1826,6 +1953,37 @@ include __DIR__ . '/include/layout_top.php';
       <div class="alert alert-warning mb-3"><?= h($loadError) ?></div>
     <?php endif; ?>
 
+    <?php if ($mappingRequired): ?>
+      <div class="card mb-3">
+        <div class="card-header">
+          <h3 class="card-title">Project access setup</h3>
+        </div>
+        <div class="card-body">
+          <p class="text-muted mb-3">Select the projects you belong to. This is a one-time setup and cannot be changed here.</p>
+          <?php if ($mappingError): ?>
+            <div class="alert alert-warning"><?= h($mappingError) ?></div>
+          <?php endif; ?>
+          <form method="post">
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+            <input type="hidden" name="action" value="save_project_mapping">
+            <div class="form-group">
+              <label for="mapped_projects">Projects</label>
+              <select id="mapped_projects" name="mapped_projects[]" class="form-control js-searchable" data-placeholder="Select projects" multiple>
+                <?php foreach (($allProjectOptions ?? []) as $code => $name): ?>
+                  <?php $label = $name !== '' ? ($code . ' - ' . $name) : $code; ?>
+                  <option value="<?= h($code) ?>"><?= h($label) ?></option>
+                <?php endforeach; ?>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary">Save project access</button>
+          </form>
+        </div>
+      </div>
+    <?php else: ?>
+      <?php if (!empty($mappedProjects)): ?>
+        <div class="alert alert-info mb-3 small">Project access: <?= h(implode(', ', $mappedProjects)) ?></div>
+      <?php endif; ?>
+
     <div class="card">
       <div class="card-header">
         <h3 class="card-title">Filters</h3>
@@ -1910,7 +2068,7 @@ include __DIR__ . '/include/layout_top.php';
             <button type="submit" class="btn btn-primary btn-block">Apply</button>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
-            <a class="btn btn-outline-secondary btn-block" href="<?= h(admin_url('Attendance_AttendanceDaily.php')) ?>">Reset</a>
+            <a class="btn btn-outline-secondary btn-block" href="<?= h(admin_url('timekeeper_attendance.php')) ?>">Reset</a>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
             <a id="exportBtn" class="btn btn-outline-success btn-block" href="<?= h($exportUrl) ?>" data-export-start="<?= h($exportStartUrl) ?>">Export</a>
@@ -2117,6 +2275,7 @@ include __DIR__ . '/include/layout_top.php';
         </div>
       <?php endif; ?>
     </div>
+    <?php endif; ?>
   </div>
 </section>
 

@@ -1,7 +1,6 @@
 <?php
 
 require __DIR__ . '/include/bootstrap.php';
-require __DIR__ . '/include/attendance_api.php';
 
 $page_title = 'Attendance Override Approvals';
 
@@ -84,6 +83,13 @@ function format_filter_list(array $items, int $max = 3): string {
     return implode(', ', $head) . ' +' . ($count - $max);
 }
 
+function json_response(array $payload, int $status = 200): void {
+    header('Content-Type: application/json');
+    http_response_code($status);
+    echo json_encode($payload);
+    exit;
+}
+
 [$defaultStart, $defaultEnd] = current_week_range();
 
 $hasQuery = !empty($_GET);
@@ -114,14 +120,16 @@ $userEmail = trim((string) ($_SESSION['user_email'] ?? ''));
 
 $success = null;
 $error = null;
+$postAction = $_POST['action'] ?? '';
+$isAjax = ($_POST['ajax'] ?? '') === '1' || ($_POST['ajax'] ?? '') === 'true';
+$ajaxPayload = null;
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'approve') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $postAction === 'approve') {
+    $empCode = trim((string) ($_POST['employeeCode'] ?? ''));
+    $attDate = trim((string) ($_POST['attDate'] ?? ''));
     if (!verify_csrf($_POST['csrf'] ?? null)) {
         $error = 'Invalid request token.';
     } else {
-        $empCode = trim((string) ($_POST['employeeCode'] ?? ''));
-        $attDate = trim((string) ($_POST['attDate'] ?? ''));
-
         if ($empCode === '' || $attDate === '') {
             $error = 'Employee code and date are required.';
         } elseif ($userName === '' || $userEmail === '') {
@@ -132,7 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'appro
             $row = null;
             $stmt = $bd->prepare(
                 'SELECT override_work_hours, override_work_code, override_changed_by_name, override_changed_by_email ' .
-                'FROM gcc_attendance_master.employee_att_daily ' .
+                'FROM gcc_attendance_master.employee_att_daily_overrides ' .
                 'WHERE emp_code = ? AND att_date = ? LIMIT 1'
             );
             if ($stmt) {
@@ -159,30 +167,319 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'appro
                     $changedByEmail = $userEmail;
                 }
 
-                $payload = [
-                    'employeeCode' => $empCode,
-                    'attDate' => $attDate,
-                    'workHours' => $row['override_work_hours'] !== null ? (float) $row['override_work_hours'] : null,
-                    'workCode' => ($row['override_work_code'] ?? '') !== '' ? $row['override_work_code'] : null,
-                    'changeDate' => gmdate(DATE_ATOM),
-                    'changedByEmail' => $changedByEmail,
-                    'changedByName' => $changedByName,
-                    'approvedByEmail' => $userEmail,
-                    'approvedByName' => $userName,
-                    'isApproved' => true,
-                    'approvedDate' => gmdate(DATE_ATOM),
-                ];
-
-                $result = attendance_api_post_json('/attendance-override/upsert', ['rows' => [$payload]], 15);
-                if ($result['ok']) {
-                    $success = 'Override approved.';
+                $approvedAt = gmdate('Y-m-d H:i:s');
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.employee_att_daily_overrides ' .
+                    'SET override_is_approved = 1, override_approved_by_email = ?, override_approved_by_name = ?, ' .
+                    'override_approved_date = ?, override_change_date = ?, override_changed_by_email = ?, ' .
+                    'override_changed_by_name = ? ' .
+                    'WHERE emp_code = ? AND att_date = ?'
+                );
+                if ($stmt) {
+                    $stmt->bind_param(
+                        'ssssssss',
+                        $userEmail,
+                        $userName,
+                        $approvedAt,
+                        $approvedAt,
+                        $changedByEmail,
+                        $changedByName,
+                        $empCode,
+                        $attDate
+                    );
+                    if ($stmt->execute()) {
+                        if ($stmt->affected_rows > 0) {
+                            $success = 'Override approved.';
+                        } else {
+                            $error = 'Approval failed (no rows updated).';
+                        }
+                    } else {
+                        $error = 'Approval failed (database error).';
+                    }
+                    $stmt->close();
                 } else {
-                    $status = $result['status'] ?? 'n/a';
-                    $error = 'Approval failed (status ' . $status . ').';
+                    $error = 'Approval failed (unable to prepare statement).';
                 }
             }
         }
     }
+    $ajaxPayload = [
+        'action' => 'approve',
+        'ok' => $error === null,
+        'message' => $success,
+        'error' => $error,
+        'empCode' => $empCode,
+        'attDate' => $attDate,
+    ];
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $postAction === 'reject') {
+    $empCode = trim((string) ($_POST['employeeCode'] ?? ''));
+    $attDate = trim((string) ($_POST['attDate'] ?? ''));
+    if (!verify_csrf($_POST['csrf'] ?? null)) {
+        $error = 'Invalid request token.';
+    } elseif ($empCode === '' || $attDate === '') {
+        $error = 'Employee code and date are required.';
+    } elseif ($userName === '' || $userEmail === '') {
+        $error = 'User name/email missing in session.';
+    } elseif (!isset($bd) || !($bd instanceof mysqli)) {
+        $error = 'Database connection not available.';
+    } else {
+        $approvedAt = gmdate('Y-m-d H:i:s');
+        $stmt = $bd->prepare(
+            'UPDATE gcc_attendance_master.employee_att_daily_overrides ' .
+            'SET override_is_approved = 2, override_approved_by_email = ?, override_approved_by_name = ?, ' .
+            'override_approved_date = ?, override_change_date = ?, ' .
+            'override_changed_by_email = IFNULL(NULLIF(override_changed_by_email, ""), ?), ' .
+            'override_changed_by_name = IFNULL(NULLIF(override_changed_by_name, ""), ?) ' .
+            'WHERE emp_code = ? AND att_date = ? ' .
+            'AND (override_work_hours IS NOT NULL OR override_work_code IS NOT NULL) ' .
+            'AND (override_is_approved IS NULL OR override_is_approved = 0)'
+        );
+        if ($stmt) {
+            $stmt->bind_param(
+                'ssssssss',
+                $userEmail,
+                $userName,
+                $approvedAt,
+                $approvedAt,
+                $userEmail,
+                $userName,
+                $empCode,
+                $attDate
+            );
+            if ($stmt->execute()) {
+                if ($stmt->affected_rows > 0) {
+                    $success = 'Override rejected.';
+                } else {
+                    $error = 'Rejection failed (no rows updated).';
+                }
+            } else {
+                $error = 'Rejection failed (database error).';
+            }
+            $stmt->close();
+        } else {
+            $error = 'Rejection failed (unable to prepare statement).';
+        }
+    }
+    $ajaxPayload = [
+        'action' => 'reject',
+        'ok' => $error === null,
+        'message' => $success,
+        'error' => $error,
+        'empCode' => $empCode,
+        'attDate' => $attDate,
+    ];
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $postAction === 'approve-all') {
+    $approvedCount = 0;
+    $skippedCount = 0;
+    $failedCount = 0;
+    if (!verify_csrf($_POST['csrf'] ?? null)) {
+        $error = 'Invalid request token.';
+    } elseif ($userName === '' || $userEmail === '') {
+        $error = 'User name/email missing in session.';
+    } elseif (!isset($bd) || !($bd instanceof mysqli)) {
+        $error = 'Database connection not available.';
+    } else {
+        $empCodes = $_POST['bulk_emp_code'] ?? [];
+        $attDates = $_POST['bulk_att_date'] ?? [];
+        if (!is_array($empCodes) || !is_array($attDates)) {
+            $error = 'Invalid bulk approval payload.';
+        } else {
+            $bulkEntries = [];
+            $seen = [];
+            $count = min(count($empCodes), count($attDates));
+            for ($i = 0; $i < $count; $i++) {
+                $empCode = trim((string) $empCodes[$i]);
+                $attDate = trim((string) $attDates[$i]);
+                if ($empCode === '' || $attDate === '') {
+                    continue;
+                }
+                $dt = DateTime::createFromFormat('Y-m-d', $attDate);
+                if (!$dt) {
+                    continue;
+                }
+                $attDate = $dt->format('Y-m-d');
+                $key = $empCode . '|' . $attDate;
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+                $bulkEntries[] = [$empCode, $attDate];
+            }
+
+            if (empty($bulkEntries)) {
+                $error = 'No valid overrides found for bulk approval.';
+            } else {
+                $approvedAt = gmdate('Y-m-d H:i:s');
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.employee_att_daily_overrides ' .
+                    'SET override_is_approved = 1, override_approved_by_email = ?, override_approved_by_name = ?, ' .
+                    'override_approved_date = ?, override_change_date = ?, ' .
+                    'override_changed_by_email = IFNULL(NULLIF(override_changed_by_email, ""), ?), ' .
+                    'override_changed_by_name = IFNULL(NULLIF(override_changed_by_name, ""), ?) ' .
+                    'WHERE emp_code = ? AND att_date = ? ' .
+                    'AND (override_work_hours IS NOT NULL OR override_work_code IS NOT NULL) ' .
+                    'AND (override_is_approved IS NULL OR override_is_approved = 0)'
+                );
+
+                if ($stmt) {
+                    foreach ($bulkEntries as [$empCode, $attDate]) {
+                        $stmt->bind_param(
+                            'ssssssss',
+                            $userEmail,
+                            $userName,
+                            $approvedAt,
+                            $approvedAt,
+                            $userEmail,
+                            $userName,
+                            $empCode,
+                            $attDate
+                        );
+                        if ($stmt->execute()) {
+                            if ($stmt->affected_rows > 0) {
+                                $approvedCount++;
+                            } else {
+                                $skippedCount++;
+                            }
+                        } else {
+                            $failedCount++;
+                        }
+                    }
+                    $stmt->close();
+
+                    if ($approvedCount > 0) {
+                        $success = 'Approved ' . $approvedCount . ' override(s).';
+                        if ($skippedCount > 0) {
+                            $success .= ' Skipped ' . $skippedCount . ' (already approved or missing).';
+                        }
+                    }
+                    if ($failedCount > 0) {
+                        $error = 'Approval failed for ' . $failedCount . ' override(s).';
+                    } elseif ($approvedCount === 0) {
+                        $error = 'No overrides were approved.';
+                    }
+                } else {
+                    $error = 'Approval failed (unable to prepare statement).';
+                }
+            }
+        }
+    }
+    $ajaxPayload = [
+        'action' => 'approve-all',
+        'ok' => $error === null,
+        'message' => $success,
+        'error' => $error,
+        'approved' => $approvedCount,
+        'skipped' => $skippedCount,
+        'failed' => $failedCount,
+    ];
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $postAction === 'reject-all') {
+    $rejectedCount = 0;
+    $skippedCount = 0;
+    $failedCount = 0;
+    if (!verify_csrf($_POST['csrf'] ?? null)) {
+        $error = 'Invalid request token.';
+    } elseif ($userName === '' || $userEmail === '') {
+        $error = 'User name/email missing in session.';
+    } elseif (!isset($bd) || !($bd instanceof mysqli)) {
+        $error = 'Database connection not available.';
+    } else {
+        $empCodes = $_POST['bulk_emp_code'] ?? [];
+        $attDates = $_POST['bulk_att_date'] ?? [];
+        if (!is_array($empCodes) || !is_array($attDates)) {
+            $error = 'Invalid bulk rejection payload.';
+        } else {
+            $bulkEntries = [];
+            $seen = [];
+            $count = min(count($empCodes), count($attDates));
+            for ($i = 0; $i < $count; $i++) {
+                $empCode = trim((string) $empCodes[$i]);
+                $attDate = trim((string) $attDates[$i]);
+                if ($empCode === '' || $attDate === '') {
+                    continue;
+                }
+                $dt = DateTime::createFromFormat('Y-m-d', $attDate);
+                if (!$dt) {
+                    continue;
+                }
+                $attDate = $dt->format('Y-m-d');
+                $key = $empCode . '|' . $attDate;
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+                $bulkEntries[] = [$empCode, $attDate];
+            }
+
+            if (empty($bulkEntries)) {
+                $error = 'No valid overrides found for bulk rejection.';
+            } else {
+                $approvedAt = gmdate('Y-m-d H:i:s');
+                $stmt = $bd->prepare(
+                    'UPDATE gcc_attendance_master.employee_att_daily_overrides ' .
+                    'SET override_is_approved = 2, override_approved_by_email = ?, override_approved_by_name = ?, ' .
+                    'override_approved_date = ?, override_change_date = ?, ' .
+                    'override_changed_by_email = IFNULL(NULLIF(override_changed_by_email, ""), ?), ' .
+                    'override_changed_by_name = IFNULL(NULLIF(override_changed_by_name, ""), ?) ' .
+                    'WHERE emp_code = ? AND att_date = ? ' .
+                    'AND (override_work_hours IS NOT NULL OR override_work_code IS NOT NULL) ' .
+                    'AND (override_is_approved IS NULL OR override_is_approved = 0)'
+                );
+
+                if ($stmt) {
+                    foreach ($bulkEntries as [$empCode, $attDate]) {
+                        $stmt->bind_param(
+                            'ssssssss',
+                            $userEmail,
+                            $userName,
+                            $approvedAt,
+                            $approvedAt,
+                            $userEmail,
+                            $userName,
+                            $empCode,
+                            $attDate
+                        );
+                        if ($stmt->execute()) {
+                            if ($stmt->affected_rows > 0) {
+                                $rejectedCount++;
+                            } else {
+                                $skippedCount++;
+                            }
+                        } else {
+                            $failedCount++;
+                        }
+                    }
+                    $stmt->close();
+
+                    if ($rejectedCount > 0) {
+                        $success = 'Rejected ' . $rejectedCount . ' override(s).';
+                        if ($skippedCount > 0) {
+                            $success .= ' Skipped ' . $skippedCount . ' (already handled or missing).';
+                        }
+                    }
+                    if ($failedCount > 0) {
+                        $error = 'Rejection failed for ' . $failedCount . ' override(s).';
+                    } elseif ($rejectedCount === 0) {
+                        $error = 'No overrides were rejected.';
+                    }
+                } else {
+                    $error = 'Rejection failed (unable to prepare statement).';
+                }
+            }
+        }
+    }
+    $ajaxPayload = [
+        'action' => 'reject-all',
+        'ok' => $error === null,
+        'message' => $success,
+        'error' => $error,
+        'rejected' => $rejectedCount,
+        'skipped' => $skippedCount,
+        'failed' => $failedCount,
+    ];
+}
+
+if ($isAjax && $ajaxPayload !== null) {
+    json_response($ajaxPayload, $ajaxPayload['ok'] ? 200 : 400);
 }
 
 $pending = [];
@@ -226,21 +523,21 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     }
 
     $filters = [
-        '(d.override_work_hours IS NOT NULL OR d.override_work_code IS NOT NULL)',
-        '(d.override_is_approved IS NULL OR d.override_is_approved = 0)',
+        '(o.override_work_hours IS NOT NULL OR o.override_work_code IS NOT NULL)',
+        '(o.override_is_approved IS NULL OR o.override_is_approved = 0)',
         '(d.is_delete = 0 OR d.is_delete IS NULL)',
         '(d.is_deleted = 0 OR d.is_deleted IS NULL)',
     ];
     $params = [];
     $types = '';
     if ($hasQuery) {
-        $filters[] = 'd.att_date BETWEEN ? AND ?';
+        $filters[] = 'o.att_date BETWEEN ? AND ?';
         $params[] = $startDate;
         $params[] = $endDate;
         $types .= 'ss';
     }
     if ($employeeCodeFilter !== '') {
-        $filters[] = 'd.emp_code COLLATE utf8mb4_general_ci = ?';
+        $filters[] = 'o.emp_code COLLATE utf8mb4_general_ci = ?';
         $params[] = $employeeCodeFilter;
         $types .= 's';
     }
@@ -257,20 +554,22 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
             'FROM gcc_attendance_master.employee_daily_punch dp ' .
             'LEFT JOIN gcc_attendance_master.device_project_map dm ON dm.device_sn = dp.first_terminal_sn ' .
             'LEFT JOIN gcc_it.projects p ON p.id = dm.project_id ' .
-            'WHERE dp.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
-            'AND dp.punch_date = d.att_date ' .
+            'WHERE dp.emp_code COLLATE utf8mb4_general_ci = o.emp_code COLLATE utf8mb4_general_ci ' .
+            'AND dp.punch_date = o.att_date ' .
             'AND p.pro_code IN (' . $placeholders . ')' .
         ')';
         $params = array_merge($params, $loginProjectFilter);
         $types .= str_repeat('s', count($loginProjectFilter));
     }
 
-    $sql = 'SELECT d.emp_code, d.att_date, d.override_work_hours, d.override_work_code, d.override_changed_by_name, ' .
-        'd.override_changed_by_email, h.emp_name, h.desg_name, h.dept_name ' .
-        'FROM gcc_attendance_master.employee_att_daily d ' .
-        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
+    $sql = 'SELECT o.emp_code, o.att_date, o.override_work_hours, o.override_work_code, o.override_changed_by_name, ' .
+        'o.override_changed_by_email, h.emp_name, h.desg_name, h.dept_name ' .
+        'FROM gcc_attendance_master.employee_att_daily_overrides o ' .
+        'LEFT JOIN gcc_attendance_master.employee_att_daily d ON d.emp_code COLLATE utf8mb4_general_ci = o.emp_code COLLATE utf8mb4_general_ci ' .
+        'AND d.att_date = o.att_date ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = o.emp_code COLLATE utf8mb4_general_ci ' .
         'WHERE ' . implode(' AND ', $filters) .
-        ' ORDER BY COALESCE(d.override_change_date, d.att_date) DESC, d.emp_code ASC' .
+        ' ORDER BY COALESCE(o.override_change_date, o.att_date) DESC, o.emp_code ASC' .
         ($hasQuery ? '' : ' LIMIT 10');
 
     $stmt = $bd->prepare($sql);
@@ -507,11 +806,51 @@ include __DIR__ . '/include/layout_top.php';
     background: rgba(255, 107, 53, 0.08);
   }
 
+  .approval-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .approval-actions form {
+    margin: 0;
+  }
+
+  .approval-row-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+
   .approval-approve-btn {
     border-radius: 999px;
     padding: 6px 14px;
     font-family: "Space Grotesk", sans-serif;
     font-weight: 600;
+  }
+
+  .approval-reject-btn {
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 600;
+  }
+
+  .approval-approve-all-btn {
+    border-radius: 999px;
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 600;
+  }
+
+  .approval-reject-all-btn {
+    border-radius: 999px;
+    font-family: "Space Grotesk", sans-serif;
+    font-weight: 600;
+  }
+
+  .approval-row--busy {
+    opacity: 0.6;
   }
 
   .approval-meta {
@@ -558,6 +897,7 @@ include __DIR__ . '/include/layout_top.php';
     <?php if ($loadError): ?>
       <div class="alert alert-warning"><?= h($loadError) ?></div>
     <?php endif; ?>
+    <div id="approval-alerts"></div>
 
     <div class="approval-hero">
       <div class="approval-hero-content">
@@ -574,7 +914,7 @@ include __DIR__ . '/include/layout_top.php';
         <div class="approval-stats">
           <div class="approval-stat">
             <div class="approval-stat-label">Pending</div>
-            <div class="approval-stat-value"><?= h((string) $pendingCount) ?></div>
+            <div class="approval-stat-value js-pending-count"><?= h((string) $pendingCount) ?></div>
             <div class="approval-stat-meta"><?= h($pendingMeta) ?></div>
           </div>
           <div class="approval-stat">
@@ -638,10 +978,53 @@ include __DIR__ . '/include/layout_top.php';
       </div>
     </div>
 
+    <?php
+      $queryParams = [];
+      if ($hasQuery) {
+          $queryParams = [
+              'employeeCode' => $employeeCodeFilter,
+              'start_date' => $startDate,
+              'end_date' => $endDate,
+          ];
+          if (!empty($projectCodeFilter)) {
+              $queryParams['project_code'] = $projectCodeFilter;
+          }
+          if (!empty($loginProjectFilter)) {
+              $queryParams['login_project'] = $loginProjectFilter;
+          }
+      }
+      $actionUrl = admin_url('Attendance_AttendanceApproval.php');
+      if (!empty($queryParams)) {
+          $actionUrl .= '?' . http_build_query($queryParams);
+      }
+    ?>
+
     <div class="card approval-card approval-card--table">
       <div class="card-header d-flex justify-content-between align-items-center">
         <h3 class="card-title">Pending overrides</h3>
-        <span class="text-muted small"><?= count($pending) ?> pending</span>
+        <div class="approval-actions">
+          <span class="text-muted small"><span class="js-pending-count"><?= count($pending) ?></span> pending</span>
+          <?php if (!empty($pending)): ?>
+            <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-all-form js-bulk-action-form">
+              <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+              <input type="hidden" name="action" value="approve-all">
+              <?php foreach ($pending as $row): ?>
+                <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+              <?php endforeach; ?>
+              <button type="submit" class="btn btn-sm btn-outline-success approval-approve-all-btn">Approve all</button>
+            </form>
+            <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-all-form js-bulk-action-form">
+              <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+              <input type="hidden" name="action" value="reject-all">
+              <?php foreach ($pending as $row): ?>
+                <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+              <?php endforeach; ?>
+              <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-all-btn">Reject all</button>
+            </form>
+          <?php endif; ?>
+        </div>
       </div>
       <div class="card-body table-responsive p-0">
         <table class="table table-bordered table-sm approval-table">
@@ -661,7 +1044,7 @@ include __DIR__ . '/include/layout_top.php';
           <tbody>
             <?php if (!empty($pending)): ?>
               <?php foreach ($pending as $row): ?>
-                <tr>
+                <tr data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
                   <td><?= h($row['emp_code'] ?? '-') ?></td>
                   <td><?= h($row['emp_name'] ?? '-') ?></td>
                   <td><?= h($row['desg_name'] ?? '-') ?></td>
@@ -671,46 +1054,233 @@ include __DIR__ . '/include/layout_top.php';
                   <td><?= h($row['override_work_code'] ?? '-') ?></td>
                   <td><?= h(format_person($row['override_changed_by_name'] ?? '', $row['override_changed_by_email'] ?? '')) ?></td>
                   <td>
-                    <?php
-                      $queryParams = [];
-                      if ($hasQuery) {
-                          $queryParams = [
-                              'employeeCode' => $employeeCodeFilter,
-                              'start_date' => $startDate,
-                              'end_date' => $endDate,
-                          ];
-                          if (!empty($projectCodeFilter)) {
-                              $queryParams['project_code'] = $projectCodeFilter;
-                          }
-                          if (!empty($loginProjectFilter)) {
-                              $queryParams['login_project'] = $loginProjectFilter;
-                          }
-                      }
-                      $actionUrl = admin_url('Attendance_AttendanceApproval.php');
-                      if (!empty($queryParams)) {
-                          $actionUrl .= '?' . http_build_query($queryParams);
-                      }
-                    ?>
-                    <form method="post" action="<?= h($actionUrl) ?>">
-                      <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-                      <input type="hidden" name="action" value="approve">
-                      <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
-                      <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
-                      <button type="submit" class="btn btn-sm btn-success approval-approve-btn">Approve</button>
-                    </form>
+                    <div class="approval-row-actions">
+                      <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-form">
+                        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                        <input type="hidden" name="action" value="approve">
+                        <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                        <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                        <button type="submit" class="btn btn-sm btn-success approval-approve-btn">Approve</button>
+                      </form>
+                      <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-form">
+                        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                        <input type="hidden" name="action" value="reject">
+                        <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                        <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                        <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-btn">Reject</button>
+                      </form>
+                    </div>
                   </td>
                 </tr>
               <?php endforeach; ?>
-            <?php else: ?>
-              <tr>
-                <td colspan="9" class="text-center text-muted">No pending overrides found.</td>
-              </tr>
             <?php endif; ?>
+            <tr class="js-empty-row" style="<?= !empty($pending) ? 'display: none;' : '' ?>">
+              <td colspan="9" class="text-center text-muted">No pending overrides found.</td>
+            </tr>
           </tbody>
         </table>
       </div>
     </div>
   </div>
 </section>
+
+<script>
+(() => {
+  const alerts = document.getElementById('approval-alerts');
+  const pendingCountEls = Array.from(document.querySelectorAll('.js-pending-count'));
+  const emptyRow = document.querySelector('.js-empty-row');
+  const tableBody = document.querySelector('.approval-table tbody');
+  const bulkForms = Array.from(document.querySelectorAll('.js-bulk-action-form'));
+
+  const showAlert = (type, message) => {
+    if (!alerts || !message) {
+      return;
+    }
+    const alert = document.createElement('div');
+    alert.className = `alert alert-${type}`;
+    alert.textContent = message;
+    alerts.prepend(alert);
+    setTimeout(() => {
+      alert.remove();
+    }, 5000);
+  };
+
+  const getPendingCount = () => {
+    const el = pendingCountEls[0];
+    if (!el) {
+      return 0;
+    }
+    const value = parseInt(el.textContent, 10);
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  const setPendingCount = (value) => {
+    const next = Math.max(0, value);
+    pendingCountEls.forEach((el) => {
+      el.textContent = String(next);
+    });
+  };
+
+  const escapeCss = (value) => {
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+      return window.CSS.escape(value);
+    }
+    return value.replace(/"/g, '\\"');
+  };
+
+  const syncEmptyState = () => {
+    const hasRows = !!(tableBody && tableBody.querySelector('tr[data-emp-code]'));
+    if (emptyRow) {
+      emptyRow.style.display = hasRows ? 'none' : '';
+    }
+    bulkForms.forEach((form) => {
+      form.style.display = hasRows ? '' : 'none';
+    });
+  };
+
+  const removeBulkInputs = (empCode, attDate) => {
+    if (!bulkForms.length) {
+      return;
+    }
+    const code = escapeCss(empCode || '');
+    const date = escapeCss(attDate || '');
+    bulkForms.forEach((form) => {
+      form
+        .querySelectorAll(`[data-emp-code="${code}"][data-att-date="${date}"]`)
+        .forEach((input) => input.remove());
+    });
+  };
+
+  const submitForm = async (form) => {
+    const action = form.getAttribute('action') || window.location.href;
+    const formData = new FormData(form);
+    formData.set('ajax', '1');
+    try {
+      const response = await fetch(action, {
+        method: 'POST',
+        body: formData,
+        credentials: 'same-origin',
+      });
+      const data = await response.json();
+      return data;
+    } catch (err) {
+      return {
+        ok: false,
+        error: 'Network error. Please retry.',
+      };
+    }
+  };
+
+  const handleRowForm = (form, options) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (form.dataset.busy === '1') {
+        return;
+      }
+      form.dataset.busy = '1';
+      const button = form.querySelector('button[type="submit"]');
+      const row = form.closest('tr');
+      const originalLabel = button ? button.textContent : '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = options.busyLabel || 'Working...';
+      }
+      if (row) {
+        row.classList.add('approval-row--busy');
+      }
+
+      const data = await submitForm(form);
+      if (data && data.ok) {
+        showAlert('success', data.message || options.successFallback || 'Action completed.');
+        if (row && row.parentNode) {
+          row.remove();
+        }
+        removeBulkInputs(data.empCode, data.attDate);
+        setPendingCount(getPendingCount() - 1);
+        syncEmptyState();
+      } else {
+        showAlert('warning', (data && data.error) || options.errorFallback || 'Action failed.');
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalLabel;
+        }
+        if (row) {
+          row.classList.remove('approval-row--busy');
+        }
+      }
+      form.dataset.busy = '0';
+    });
+  };
+
+  const handleBulkForm = (form, options) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (form.dataset.busy === '1') {
+        return;
+      }
+      form.dataset.busy = '1';
+      const button = form.querySelector('button[type="submit"]');
+      const originalLabel = button ? button.textContent : '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = options.busyLabel || 'Working...';
+      }
+      const currentRows = tableBody
+        ? Array.from(tableBody.querySelectorAll('tr[data-emp-code]'))
+        : [];
+
+      const data = await submitForm(form);
+      if (data && data.ok) {
+        showAlert('success', data.message || options.successFallback || 'Bulk action completed.');
+        currentRows.forEach((row) => row.remove());
+        bulkForms.forEach((bulkForm) => {
+          bulkForm.querySelectorAll('[data-emp-code]').forEach((input) => input.remove());
+        });
+        setPendingCount(0);
+        syncEmptyState();
+      } else {
+        showAlert('warning', (data && data.error) || options.errorFallback || 'Bulk action failed.');
+        if (button) {
+          button.disabled = false;
+          button.textContent = originalLabel;
+        }
+      }
+      form.dataset.busy = '0';
+    });
+  };
+
+  document.querySelectorAll('.js-approve-form').forEach((form) =>
+    handleRowForm(form, {
+      busyLabel: 'Approving...',
+      successFallback: 'Override approved.',
+      errorFallback: 'Approval failed.',
+    })
+  );
+
+  document.querySelectorAll('.js-reject-form').forEach((form) =>
+    handleRowForm(form, {
+      busyLabel: 'Rejecting...',
+      successFallback: 'Override rejected.',
+      errorFallback: 'Rejection failed.',
+    })
+  );
+
+  document.querySelectorAll('.js-approve-all-form').forEach((form) =>
+    handleBulkForm(form, {
+      busyLabel: 'Approving...',
+      successFallback: 'Overrides approved.',
+      errorFallback: 'Bulk approval failed.',
+    })
+  );
+
+  document.querySelectorAll('.js-reject-all-form').forEach((form) =>
+    handleBulkForm(form, {
+      busyLabel: 'Rejecting...',
+      successFallback: 'Overrides rejected.',
+      errorFallback: 'Bulk rejection failed.',
+    })
+  );
+})();
+</script>
 
 <?php include __DIR__ . '/include/layout_bottom.php'; ?>

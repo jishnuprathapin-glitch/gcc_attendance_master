@@ -42,9 +42,13 @@ if ($source !== 'EmployeeAttDaily') {
 }
 
 $sentAt = $payload['sentAt'] ?? null;
-if (!is_string($sentAt) || $sentAt === '') {
+if (!is_string($sentAt) || trim($sentAt) === '') {
     log_message('missing_sent_at');
     respond(400, ['error' => 'Missing sentAt.']);
+}
+if (normalize_datetime($sentAt) === null) {
+    log_message('invalid_sent_at', ['sent_at' => (string) $sentAt]);
+    respond(400, ['error' => 'Invalid sentAt.']);
 }
 
 $changes = $payload['changes'] ?? null;
@@ -92,7 +96,11 @@ foreach ($changes as $index => $change) {
 
     $workHours = normalize_work_hours($change['workHours'] ?? null);
     $workCode = normalize_optional_string($change['workCode'] ?? null);
-    $pendingLeave = normalize_bool($change['pendingLeave'] ?? false);
+    if (!array_key_exists('pendingLeave', $change) || $change['pendingLeave'] === null) {
+        log_message('missing_pending_leave', ['index' => $index, 'change_id' => $changeId]);
+        respond(400, ['error' => 'Missing pendingLeave.', 'index' => $index]);
+    }
+    $pendingLeave = normalize_bool($change['pendingLeave']);
     $pendingLeaveCode = normalize_optional_string($change['pendingLeaveCode'] ?? null);
     $pendingLeaveDocNo = normalize_optional_string($change['pendingLeaveDocNo'] ?? null);
     $departmentName = normalize_optional_string($change['departmentName'] ?? null);
@@ -100,24 +108,33 @@ foreach ($changes as $index => $change) {
     $designationName = normalize_optional_string($change['designationName'] ?? null);
     $projectCodeUtime = normalize_optional_string($change['projectCodeUtime'] ?? null);
     $workHoursUtime = normalize_work_hours($change['workHoursUtime'] ?? null);
-    $overrideWorkHours = normalize_work_hours($change['overrideWorkHours'] ?? null);
-    $overrideWorkCode = normalize_optional_string($change['overrideWorkCode'] ?? null);
-    $overrideChangeDate = normalize_datetime($change['overrideChangeDate'] ?? null);
-    $overrideChangedByEmail = normalize_optional_string($change['overrideChangedByEmail'] ?? null);
-    $overrideChangedByName = normalize_optional_string($change['overrideChangedByName'] ?? null);
-    $overrideApprovedByEmail = normalize_optional_string($change['overrideApprovedByEmail'] ?? null);
-    $overrideApprovedByName = normalize_optional_string($change['overrideApprovedByName'] ?? null);
-    $overrideIsApproved = normalize_optional_bool($change['overrideIsApproved'] ?? null);
-    $overrideApprovedDate = normalize_datetime($change['overrideApprovedDate'] ?? null);
-
-    $isDeleted = normalize_bool($change['isDeleted'] ?? false);
-    $changeType = normalize_optional_string($change['changeType'] ?? null);
-    if ($changeType !== null) {
-        $changeType = strtoupper($changeType);
+    if (!array_key_exists('isDeleted', $change) || $change['isDeleted'] === null) {
+        log_message('missing_is_deleted', ['index' => $index, 'change_id' => $changeId]);
+        respond(400, ['error' => 'Missing isDeleted.', 'index' => $index]);
     }
-    $changedAt = normalize_datetime($change['changedAt'] ?? null);
+    $isDeleted = normalize_bool($change['isDeleted']);
+    $changeTypeRaw = $change['changeType'] ?? null;
+    if (!is_string($changeTypeRaw) || trim($changeTypeRaw) === '') {
+        log_message('missing_change_type', ['index' => $index, 'change_id' => $changeId]);
+        respond(400, ['error' => 'Missing changeType.', 'index' => $index]);
+    }
+    $changeType = strtoupper(trim($changeTypeRaw));
+    if (!in_array($changeType, ['I', 'U', 'D'], true)) {
+        log_message('invalid_change_type', ['index' => $index, 'change_id' => $changeId, 'change_type' => $changeType]);
+        respond(400, ['error' => 'Invalid changeType.', 'index' => $index]);
+    }
+    $changedAtRaw = $change['changedAt'] ?? null;
+    if (!is_string($changedAtRaw) || trim($changedAtRaw) === '') {
+        log_message('missing_changed_at', ['index' => $index, 'change_id' => $changeId]);
+        respond(400, ['error' => 'Missing changedAt.', 'index' => $index]);
+    }
+    $changedAt = normalize_datetime($changedAtRaw);
+    if ($changedAt === null) {
+        log_message('invalid_changed_at', ['index' => $index, 'change_id' => $changeId, 'changed_at' => (string) $changedAtRaw]);
+        respond(400, ['error' => 'Invalid changedAt.', 'index' => $index]);
+    }
     if ($changeType === 'D') {
-        $isDeleted = 1;
+        $isDeleted = '1';
     }
 
     $normalizedChanges[] = [
@@ -135,15 +152,6 @@ foreach ($changes as $index => $change) {
         'designation_name' => $designationName,
         'projectcode_utime' => $projectCodeUtime,
         'work_hours_utime' => $workHoursUtime,
-        'override_work_hours' => $overrideWorkHours,
-        'override_work_code' => $overrideWorkCode,
-        'override_change_date' => $overrideChangeDate,
-        'override_changed_by_email' => $overrideChangedByEmail,
-        'override_changed_by_name' => $overrideChangedByName,
-        'override_approved_by_email' => $overrideApprovedByEmail,
-        'override_approved_by_name' => $overrideApprovedByName,
-        'override_is_approved' => $overrideIsApproved,
-        'override_approved_date' => $overrideApprovedDate,
         'is_deleted' => $isDeleted,
         'change_type' => $changeType,
         'changed_at' => $changedAt,
@@ -167,10 +175,8 @@ try {
         $bd,
         'INSERT IGNORE INTO employee_att_daily ' .
         '(change_id, emp_code, job, department_name, company_shortname, designation_name, Projectcode_utime, work_hours_utime, att_date, work_hours, work_code, pending_leave, ' .
-        'pending_leave_code, pending_leave_doc_no, override_work_hours, override_work_code, override_change_date, ' .
-        'override_changed_by_email, override_changed_by_name, override_approved_by_email, override_approved_by_name, ' .
-        'override_is_approved, override_approved_date, is_deleted, change_type, changed_at) ' .
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'pending_leave_code, pending_leave_doc_no, is_deleted, change_type, changed_at) ' .
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         'changes_insert'
     );
 
@@ -196,7 +202,7 @@ try {
             }
             $stmtInboxExists->free_result();
 
-            $types = str_repeat('s', 26);
+            $types = str_repeat('s', 17);
             $changeId = $change['change_id'];
             $empCode = $change['emp_code'];
             $job = $change['job'];
@@ -211,15 +217,6 @@ try {
             $pendingLeave = $change['pending_leave'];
             $pendingLeaveCode = $change['pending_leave_code'];
             $pendingLeaveDocNo = $change['pending_leave_doc_no'];
-            $overrideWorkHours = $change['override_work_hours'];
-            $overrideWorkCode = $change['override_work_code'];
-            $overrideChangeDate = $change['override_change_date'];
-            $overrideChangedByEmail = $change['override_changed_by_email'];
-            $overrideChangedByName = $change['override_changed_by_name'];
-            $overrideApprovedByEmail = $change['override_approved_by_email'];
-            $overrideApprovedByName = $change['override_approved_by_name'];
-            $overrideIsApproved = $change['override_is_approved'];
-            $overrideApprovedDate = $change['override_approved_date'];
             $isDeleted = $change['is_deleted'];
             $changeType = $change['change_type'];
             $changedAt = $change['changed_at'];
@@ -240,15 +237,6 @@ try {
                 $pendingLeave,
                 $pendingLeaveCode,
                 $pendingLeaveDocNo,
-                $overrideWorkHours,
-                $overrideWorkCode,
-                $overrideChangeDate,
-                $overrideChangedByEmail,
-                $overrideChangedByName,
-                $overrideApprovedByEmail,
-                $overrideApprovedByName,
-                $overrideIsApproved,
-                $overrideApprovedDate,
                 $isDeleted,
                 $changeType,
                 $changedAt
@@ -448,15 +436,6 @@ function ensure_tables(mysqli $bd): void
         'pending_leave tinyint(1) NULL,' .
         'pending_leave_code varchar(10) NULL,' .
         'pending_leave_doc_no varchar(20) NULL,' .
-        'override_work_hours decimal(9,2) NULL,' .
-        'override_work_code varchar(10) NULL,' .
-        'override_change_date datetime NULL,' .
-        'override_changed_by_email varchar(255) NULL,' .
-        'override_changed_by_name varchar(100) NULL,' .
-        'override_approved_by_email varchar(255) NULL,' .
-        'override_approved_by_name varchar(100) NULL,' .
-        'override_is_approved tinyint(1) NULL,' .
-        'override_approved_date datetime NULL,' .
         'is_deleted tinyint(1) NULL,' .
         'change_type varchar(10) NULL,' .
         'changed_at datetime NULL,' .
@@ -487,24 +466,32 @@ function ensure_tables(mysqli $bd): void
         throw new RuntimeException('Failed to create employee_att_daily_inbox table.');
     }
 
+    ensure_override_table($bd);
+
     ensure_table_columns($bd, 'employee_att_daily', [
         'department_name' => 'varchar(100) NULL',
         'company_shortname' => 'varchar(20) NULL',
         'designation_name' => 'varchar(100) NULL',
         'Projectcode_utime' => 'varchar(10) NULL',
         'work_hours_utime' => 'decimal(9,2) NULL',
-        'override_work_hours' => 'decimal(9,2) NULL',
-        'override_work_code' => 'varchar(10) NULL',
-        'override_change_date' => 'datetime NULL',
-        'override_changed_by_email' => 'varchar(255) NULL',
-        'override_changed_by_name' => 'varchar(100) NULL',
-        'override_approved_by_email' => 'varchar(255) NULL',
-        'override_approved_by_name' => 'varchar(100) NULL',
-        'override_is_approved' => 'tinyint(1) NULL',
-        'override_approved_date' => 'datetime NULL',
         'change_type' => 'varchar(10) NULL',
         'changed_at' => 'datetime NULL',
     ]);
+
+    $overrideMigrated = migrate_override_columns($bd);
+    if ($overrideMigrated) {
+        drop_table_columns($bd, 'employee_att_daily', [
+            'override_work_hours',
+            'override_work_code',
+            'override_change_date',
+            'override_changed_by_email',
+            'override_changed_by_name',
+            'override_approved_by_email',
+            'override_approved_by_name',
+            'override_is_approved',
+            'override_approved_date',
+        ]);
+    }
 }
 
 function prepare_statement(mysqli $bd, string $sql, string $label): mysqli_stmt
@@ -519,6 +506,44 @@ function prepare_statement(mysqli $bd, string $sql, string $label): mysqli_stmt
     }
 
     return $stmt;
+}
+
+function ensure_override_table(mysqli $bd): void
+{
+    if (!$bd->query(
+        'CREATE TABLE IF NOT EXISTS employee_att_daily_overrides (' .
+        'emp_code varchar(10) NOT NULL,' .
+        'att_date date NOT NULL,' .
+        'override_work_hours decimal(9,2) NULL,' .
+        'override_work_code varchar(10) NULL,' .
+        'override_change_date datetime NULL,' .
+        'override_changed_by_email varchar(255) NULL,' .
+        'override_changed_by_name varchar(100) NULL,' .
+        'override_approved_by_email varchar(255) NULL,' .
+        'override_approved_by_name varchar(100) NULL,' .
+        'override_is_approved tinyint(1) NULL,' .
+        'override_approved_date datetime NULL,' .
+        'PRIMARY KEY (emp_code, att_date)' .
+        ') ENGINE=InnoDB'
+    )) {
+        log_message('table_create_failed', [
+            'table' => 'employee_att_daily_overrides',
+            'error' => $bd->error,
+        ]);
+        throw new RuntimeException('Failed to create employee_att_daily_overrides table.');
+    }
+
+    ensure_table_columns($bd, 'employee_att_daily_overrides', [
+        'override_work_hours' => 'decimal(9,2) NULL',
+        'override_work_code' => 'varchar(10) NULL',
+        'override_change_date' => 'datetime NULL',
+        'override_changed_by_email' => 'varchar(255) NULL',
+        'override_changed_by_name' => 'varchar(100) NULL',
+        'override_approved_by_email' => 'varchar(255) NULL',
+        'override_approved_by_name' => 'varchar(100) NULL',
+        'override_is_approved' => 'tinyint(1) NULL',
+        'override_approved_date' => 'datetime NULL',
+    ]);
 }
 
 function ensure_table_columns(mysqli $bd, string $table, array $columns): void
@@ -548,6 +573,118 @@ function ensure_table_columns(mysqli $bd, string $table, array $columns): void
                 'error' => $bd->error,
             ]);
             throw new RuntimeException('Failed to add column ' . $name . ' to ' . $table . '.');
+        }
+    }
+}
+
+function migrate_override_columns(mysqli $bd): bool
+{
+    $existing = [];
+    $result = $bd->query('SHOW COLUMNS FROM `employee_att_daily`');
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $name = strtolower((string) ($row['Field'] ?? ''));
+            if ($name !== '') {
+                $existing[$name] = true;
+            }
+        }
+        $result->free();
+    }
+
+    $overrideColumns = [
+        'override_work_hours',
+        'override_work_code',
+        'override_change_date',
+        'override_changed_by_email',
+        'override_changed_by_name',
+        'override_approved_by_email',
+        'override_approved_by_name',
+        'override_is_approved',
+        'override_approved_date',
+    ];
+
+    $hasOverride = false;
+    foreach ($overrideColumns as $column) {
+        if (isset($existing[$column])) {
+            $hasOverride = true;
+            break;
+        }
+    }
+    if (!$hasOverride) {
+        return true;
+    }
+
+    $selectParts = [];
+    $whereParts = [];
+    foreach ($overrideColumns as $column) {
+        if (isset($existing[$column])) {
+            $selectParts[] = $column;
+            $whereParts[] = $column . ' IS NOT NULL';
+        } else {
+            $selectParts[] = 'NULL AS ' . $column;
+        }
+    }
+
+    if (!$whereParts) {
+        return true;
+    }
+
+    $updateParts = [];
+    foreach ($overrideColumns as $column) {
+        $updateParts[] = $column . ' = VALUES(' . $column . ')';
+    }
+
+    $sql = 'INSERT INTO employee_att_daily_overrides ' .
+        '(emp_code, att_date, ' . implode(', ', $overrideColumns) . ') ' .
+        'SELECT emp_code, att_date, ' . implode(', ', $selectParts) . ' ' .
+        'FROM employee_att_daily ' .
+        'WHERE ' . implode(' OR ', $whereParts) . ' ' .
+        'ON DUPLICATE KEY UPDATE ' . implode(', ', $updateParts);
+
+    if (!$bd->query($sql)) {
+        log_message('override_migration_failed', [
+            'error' => $bd->error,
+        ]);
+        return false;
+    }
+
+    log_message('override_migration_complete', [
+        'rows' => $bd->affected_rows,
+    ]);
+    return true;
+}
+
+function drop_table_columns(mysqli $bd, string $table, array $columns): void
+{
+    if (!$columns) {
+        return;
+    }
+
+    $existing = [];
+    $result = $bd->query('SHOW COLUMNS FROM `' . $table . '`');
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $name = strtolower((string) ($row['Field'] ?? ''));
+            if ($name !== '') {
+                $existing[$name] = true;
+            }
+        }
+        $result->free();
+    }
+
+    foreach ($columns as $name) {
+        $key = strtolower($name);
+        if (!isset($existing[$key])) {
+            continue;
+        }
+        $sql = 'ALTER TABLE `' . $table . '` DROP COLUMN `' . $name . '`';
+        if (!$bd->query($sql)) {
+            log_message('column_drop_failed', [
+                'table' => $table,
+                'column' => $name,
+                'error' => $bd->error,
+            ]);
+            throw new RuntimeException('Failed to drop column ' . $name . ' from ' . $table . '.');
         }
     }
 }

@@ -1,29 +1,27 @@
 ﻿
 <?php
 
-require __DIR__ . '/include/bootstrap.php';
-require __DIR__ . '/include/attendance_api.php';
+$previewMode = (($_GET['preview'] ?? '') === '1');
 
-$page_title = 'Adjust Attendance Time';
+if ($previewMode) {
+    header('Content-Type: application/json; charset=utf-8');
 
-$userName = trim((string) ($_SESSION['user_name'] ?? ''));
-$userEmail = trim((string) ($_SESSION['user_email'] ?? ''));
+    require __DIR__ . '/include/helpers.php';
 
-$success = null;
-$error = null;
-$warning = null;
-$rowErrors = [];
-
-$reasonOptions = [
-    '' => 'No reason selected',
-    'MISSED_PUNCH' => 'Missed punch',
-    'DEVICE_ISSUE' => 'Device issue',
-    'SHIFT_CHANGE' => 'Shift change',
-    'MANAGER_REQUEST' => 'Manager request',
-    'APPROVED_LEAVE' => 'Approved leave or permission',
-    'DATA_CORRECTION' => 'Data correction',
-    'OTHER' => 'Other',
-];
+    $hrsmartRoot = dirname(__DIR__, 2) . '/HRSmart';
+    $dbConnectPath = $hrsmartRoot . '/include/db_connect.php';
+    if (!is_file($dbConnectPath)) {
+        echo json_encode(['ok' => false, 'message' => 'Database connection not available.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    require $dbConnectPath;
+    if (!isset($bd) || !($bd instanceof mysqli)) {
+        echo json_encode(['ok' => false, 'message' => 'Database connection not available.'], JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+    mysqli_set_charset($bd, 'utf8mb4');
+    ensure_attendance_override_table($bd);
+}
 
 function normalize_post_date(?string $value): ?string {
     $value = trim((string) $value);
@@ -45,6 +43,41 @@ function normalize_array($value): array {
         return [];
     }
     return [$value];
+}
+
+function override_debug_log(string $event, array $context = []): void {
+    $context['event'] = $event;
+    $context['ts'] = gmdate(DATE_ATOM);
+
+    $payload = json_encode($context, JSON_UNESCAPED_SLASHES);
+    if ($payload === false) {
+        $payload = json_encode([
+            'event' => $event,
+            'ts' => gmdate(DATE_ATOM),
+            'note' => 'json_encode_failed',
+        ], JSON_UNESCAPED_SLASHES);
+    }
+
+    $logDir = __DIR__ . '/logs';
+    $logFile = $logDir . '/attendance_override_debug.log';
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0775, true);
+    }
+    if (is_dir($logDir) && is_writable($logDir)) {
+        @error_log($payload . PHP_EOL, 3, $logFile);
+        return;
+    }
+    error_log($payload);
+}
+
+function truncate_log_string(?string $value, int $maxLen = 2000): ?string {
+    if ($value === null) {
+        return null;
+    }
+    if (strlen($value) <= $maxLen) {
+        return $value;
+    }
+    return substr($value, 0, $maxLen) . '...truncated';
 }
 
 function build_form_rows(array $post): array {
@@ -69,6 +102,32 @@ function build_form_rows(array $post): array {
     }
 
     return $rows;
+}
+
+function is_empty_form_row(array $row): bool {
+    $employeeCode = trim((string) ($row['employeeCode'] ?? ''));
+    $attDate = trim((string) ($row['attDate'] ?? ''));
+    $workHours = trim((string) ($row['workHours'] ?? ''));
+    $workCode = trim((string) ($row['workCode'] ?? ''));
+    $reasonCode = trim((string) ($row['reasonCode'] ?? ''));
+    $reasonNote = trim((string) ($row['reasonNote'] ?? ''));
+
+    return $employeeCode === '' &&
+        $attDate === '' &&
+        $workHours === '' &&
+        $workCode === '' &&
+        $reasonCode === '' &&
+        $reasonNote === '';
+}
+
+function filter_empty_form_rows(array $rows): array {
+    $filtered = [];
+    foreach ($rows as $row) {
+        if (!is_empty_form_row($row)) {
+            $filtered[] = $row;
+        }
+    }
+    return $filtered;
 }
 
 function ensure_override_notes_table(mysqli $bd): bool {
@@ -180,8 +239,7 @@ function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
     call_user_func_array([$stmt, 'bind_param'], $bind);
 }
 
-if (($_GET['preview'] ?? '') === '1') {
-    header('Content-Type: application/json; charset=utf-8');
+if ($previewMode) {
 
     $codeInput = (string) ($_GET['employee_codes'] ?? '');
     $employeeCodes = parse_employee_codes($codeInput);
@@ -220,7 +278,7 @@ if (($_GET['preview'] ?? '') === '1') {
     $types = str_repeat('s', count($employeeCodes));
 
     $empSql = 'SELECT hr.emp_code, ' .
-        'COALESCE(NULLIF(hr.emp_name, \"\"), NULLIF(hr.name, \"\")) AS emp_name, ' .
+        'COALESCE(NULLIF(hr.emp_name, \'\'), NULLIF(hr.name, \'\')) AS emp_name, ' .
         'hr.jbno AS project_code ' .
         'FROM gcc_attendance_master.hrmsvw_sync hr ' .
         'WHERE hr.emp_code IN (' . $placeholders . ')';
@@ -278,10 +336,14 @@ if (($_GET['preview'] ?? '') === '1') {
     }
 
     $attMap = [];
-    $attSql = 'SELECT emp_code, att_date, work_code, pending_leave_code, override_work_hours, override_work_code ' .
-        'FROM gcc_attendance_master.employee_att_daily ' .
-        'WHERE emp_code IN (' . $placeholders . ') AND att_date BETWEEN ? AND ? ' .
-        'AND (is_delete = 0 OR is_delete IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL)';
+    $attSql = 'SELECT d.emp_code, d.att_date, d.work_code, d.pending_leave_code, ' .
+        'o.override_work_hours, o.override_work_code ' .
+        'FROM gcc_attendance_master.employee_att_daily d ' .
+        'LEFT JOIN gcc_attendance_master.employee_att_daily_overrides o ' .
+        'ON o.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
+        'AND o.att_date = d.att_date ' .
+        'WHERE d.emp_code IN (' . $placeholders . ') AND d.att_date BETWEEN ? AND ? ' .
+        'AND (d.is_delete = 0 OR d.is_delete IS NULL) AND (d.is_deleted = 0 OR d.is_deleted IS NULL)';
     $stmt = $bd->prepare($attSql);
     if ($stmt) {
         bind_params($stmt, $rangeTypes, $rangeParams);
@@ -374,6 +436,29 @@ if (($_GET['preview'] ?? '') === '1') {
     exit;
 }
 
+require __DIR__ . '/include/bootstrap.php';
+
+$page_title = 'Adjust Attendance Time';
+
+$userName = trim((string) ($_SESSION['user_name'] ?? ''));
+$userEmail = trim((string) ($_SESSION['user_email'] ?? ''));
+
+$success = null;
+$error = null;
+$warning = null;
+$rowErrors = [];
+
+$reasonOptions = [
+    '' => 'No reason selected',
+    'MISSED_PUNCH' => 'Missed punch',
+    'DEVICE_ISSUE' => 'Device issue',
+    'SHIFT_CHANGE' => 'Shift change',
+    'MANAGER_REQUEST' => 'Manager request',
+    'APPROVED_LEAVE' => 'Approved leave or permission',
+    'DATA_CORRECTION' => 'Data correction',
+    'OTHER' => 'Other',
+];
+
 $formRows = [
     ['employeeCode' => '', 'attDate' => '', 'workHours' => '', 'workCode' => '', 'reasonCode' => '', 'reasonNote' => ''],
     ['employeeCode' => '', 'attDate' => '', 'workHours' => '', 'workCode' => '', 'reasonCode' => '', 'reasonNote' => ''],
@@ -381,15 +466,29 @@ $formRows = [
 ];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $formRows = build_form_rows($_POST);
+    override_debug_log('submit_start', [
+        'uri' => $_SERVER['REQUEST_URI'] ?? '',
+        'method' => $_SERVER['REQUEST_METHOD'] ?? '',
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+    ]);
+
+    $formRows = filter_empty_form_rows(build_form_rows($_POST));
+    override_debug_log('submit_parsed', [
+        'rowCount' => count($formRows),
+        'userEmail' => $userEmail,
+        'userName' => $userName,
+        'hasCsrf' => isset($_POST['csrf']),
+    ]);
 
     if (!verify_csrf($_POST['csrf'] ?? null)) {
         $error = 'Invalid request token.';
+        override_debug_log('submit_error', ['error' => $error]);
     } elseif ($userName === '' || $userEmail === '') {
         $error = 'User name/email missing in session.';
+        override_debug_log('submit_error', ['error' => $error]);
     } else {
-    $rows = [];
-    $noteRows = [];
+        $rows = [];
+        $noteRows = [];
         $seenKeys = [];
         foreach ($formRows as $index => $input) {
             $rowNumber = $index + 1;
@@ -459,63 +558,138 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+        override_debug_log('submit_validated', [
+            'validRows' => count($rows),
+            'noteRows' => count($noteRows),
+            'rowErrors' => $rowErrors,
+        ]);
+
         if ($error === null && empty($rowErrors)) {
             if (empty($rows)) {
                 $error = 'Add at least one valid override row.';
+                override_debug_log('submit_error', ['error' => $error]);
             } else {
-                $result = attendance_api_post_json('/attendance-override/upsert', ['rows' => $rows], 20);
-                if ($result['ok']) {
-                    $success = 'Overrides submitted successfully (' . count($rows) . ' row(s)).';
-                    $formRows = [
-                        ['employeeCode' => '', 'attDate' => '', 'workHours' => '', 'workCode' => '', 'reasonCode' => '', 'reasonNote' => ''],
-                    ];
+                if (!isset($bd) || !($bd instanceof mysqli)) {
+                    $error = 'Database connection not available.';
+                    override_debug_log('submit_error', ['error' => $error]);
+                } elseif (!ensure_attendance_override_table($bd)) {
+                    $error = 'Override table not available.';
+                    override_debug_log('submit_error', ['error' => $error]);
+                } else {
+                    $sql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
+                        '(emp_code, att_date, override_work_hours, override_work_code, override_change_date, ' .
+                        'override_changed_by_email, override_changed_by_name, override_is_approved, ' .
+                        'override_approved_by_email, override_approved_by_name, override_approved_date) ' .
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
+                        'ON DUPLICATE KEY UPDATE ' .
+                        'override_work_hours = VALUES(override_work_hours), ' .
+                        'override_work_code = VALUES(override_work_code), ' .
+                        'override_change_date = VALUES(override_change_date), ' .
+                        'override_changed_by_email = VALUES(override_changed_by_email), ' .
+                        'override_changed_by_name = VALUES(override_changed_by_name), ' .
+                        'override_is_approved = 0, ' .
+                        'override_approved_by_email = NULL, ' .
+                        'override_approved_by_name = NULL, ' .
+                        'override_approved_date = NULL';
+                    $stmt = $bd->prepare($sql);
+                    if (!$stmt) {
+                        $error = 'Override insert failed.';
+                        override_debug_log('submit_error', ['error' => $error, 'db_error' => $bd->error]);
+                    } else {
+                        $applied = 0;
+                        $changeDate = gmdate('Y-m-d H:i:s');
+                        $isApproved = 0;
+                        override_debug_log('submit_db_request', [
+                            'rowCount' => count($rows),
+                            'sampleRows' => array_slice($rows, 0, 5),
+                        ]);
+                        foreach ($rows as $row) {
+                            $empCode = $row['employeeCode'];
+                            $attDate = $row['attDate'];
+                            $workHours = $row['workHours'] !== null ? (string) $row['workHours'] : null;
+                            $workCode = $row['workCode'];
+                            $approvedByEmail = null;
+                            $approvedByName = null;
+                            $approvedDate = null;
+                            $stmt->bind_param(
+                                'sssssssisss',
+                                $empCode,
+                                $attDate,
+                                $workHours,
+                                $workCode,
+                                $changeDate,
+                                $userEmail,
+                                $userName,
+                                $isApproved,
+                                $approvedByEmail,
+                                $approvedByName,
+                                $approvedDate
+                            );
+                            if (!$stmt->execute()) {
+                                $error = 'Override insert failed.';
+                                override_debug_log('submit_error', [
+                                    'error' => $error,
+                                    'db_error' => $stmt->error,
+                                    'empCode' => $empCode,
+                                    'attDate' => $attDate,
+                                ]);
+                                break;
+                            }
+                            $applied++;
+                        }
+                        $stmt->close();
 
-                    if (!empty($noteRows)) {
-                        if (!isset($bd) || !($bd instanceof mysqli)) {
-                            $warning = 'Overrides saved, but notes could not be stored (database unavailable).';
-                        } else {
-                            if (!ensure_override_notes_table($bd)) {
-                                $warning = 'Overrides saved, but notes table could not be created.';
-                            } else {
-                                $stmt = $bd->prepare(
-                                    'INSERT INTO `gcc_attendance_master`.`attendance_override_notes` ' .
-                                    '(emp_code, att_date, work_hours, work_code, reason_code, reason_note, changed_by_email, changed_by_name) ' .
-                                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-                                );
-                                if (!$stmt) {
-                                    $warning = 'Overrides saved, but notes could not be stored.';
+                        if ($error === null) {
+                            override_debug_log('submit_db_response', [
+                                'applied' => $applied,
+                                'rows' => count($rows),
+                            ]);
+                            $success = 'Overrides submitted successfully (' . $applied . ' row(s)).';
+                            $formRows = [
+                                ['employeeCode' => '', 'attDate' => '', 'workHours' => '', 'workCode' => '', 'reasonCode' => '', 'reasonNote' => ''],
+                            ];
+
+                            if (!empty($noteRows)) {
+                                if (!ensure_override_notes_table($bd)) {
+                                    $warning = 'Overrides saved, but notes table could not be created.';
                                 } else {
-                                    foreach ($noteRows as $note) {
-                                        $empCode = $note['emp_code'];
-                                        $attDate = $note['att_date'];
-                                        $workHours = $note['work_hours'];
-                                        $workCode = $note['work_code'];
-                                        $reasonCode = $note['reason_code'];
-                                        $reasonNote = $note['reason_note'];
-                                        $stmt->bind_param(
-                                            'ssssssss',
-                                            $empCode,
-                                            $attDate,
-                                            $workHours,
-                                            $workCode,
-                                            $reasonCode,
-                                            $reasonNote,
-                                            $userEmail,
-                                            $userName
-                                        );
-                                        if (!$stmt->execute()) {
-                                            $warning = 'Overrides saved, but some notes could not be stored.';
-                                            break;
+                                    $stmt = $bd->prepare(
+                                        'INSERT INTO `gcc_attendance_master`.`attendance_override_notes` ' .
+                                        '(emp_code, att_date, work_hours, work_code, reason_code, reason_note, changed_by_email, changed_by_name) ' .
+                                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+                                    );
+                                    if (!$stmt) {
+                                        $warning = 'Overrides saved, but notes could not be stored.';
+                                    } else {
+                                        foreach ($noteRows as $note) {
+                                            $empCode = $note['emp_code'];
+                                            $attDate = $note['att_date'];
+                                            $workHours = $note['work_hours'];
+                                            $workCode = $note['work_code'];
+                                            $reasonCode = $note['reason_code'];
+                                            $reasonNote = $note['reason_note'];
+                                            $stmt->bind_param(
+                                                'ssssssss',
+                                                $empCode,
+                                                $attDate,
+                                                $workHours,
+                                                $workCode,
+                                                $reasonCode,
+                                                $reasonNote,
+                                                $userEmail,
+                                                $userName
+                                            );
+                                            if (!$stmt->execute()) {
+                                                $warning = 'Overrides saved, but some notes could not be stored.';
+                                                break;
+                                            }
                                         }
+                                        $stmt->close();
                                     }
-                                    $stmt->close();
                                 }
                             }
                         }
                     }
-                } else {
-                    $status = $result['status'] ?? 'n/a';
-                    $error = 'Override request failed (status ' . $status . ').';
                 }
             }
         }
@@ -923,6 +1097,7 @@ include __DIR__ . '/include/layout_top.php';
 <script>
   document.addEventListener('DOMContentLoaded', function () {
     const rowsBody = document.getElementById('overrideRows');
+    const overrideForm = document.getElementById('overrideForm');
     const rowTemplate = document.getElementById('overrideRowTemplate');
     const addRowBtn = document.getElementById('addRow');
     const clearRowsBtn = document.getElementById('clearRows');
@@ -947,6 +1122,7 @@ include __DIR__ . '/include/layout_top.php';
     const bulkReasonNote = document.getElementById('bulkReasonNote');
     const bulkOverwrite = document.getElementById('bulkOverwrite');
     const pasteRows = document.getElementById('pasteRows');
+    const submitBtn = overrideForm ? overrideForm.querySelector('button[type="submit"]') : null;
 
     const maxRows = 500;
 
@@ -1028,6 +1204,43 @@ include __DIR__ . '/include/layout_top.php';
         reasonNote: bulkReasonNote ? bulkReasonNote.value.trim() : '',
         overwrite: bulkOverwrite ? bulkOverwrite.checked : false,
       };
+    }
+
+    function isRowEmpty(row) {
+      if (!row) {
+        return true;
+      }
+      const values = [
+        row.querySelector('input[name="employeeCode[]"]'),
+        row.querySelector('input[name="attDate[]"]'),
+        row.querySelector('input[name="workHours[]"]'),
+        row.querySelector('input[name="workCode[]"]'),
+        row.querySelector('select[name="reasonCode[]"]'),
+        row.querySelector('input[name="reasonNote[]"]'),
+      ].map((input) => {
+        if (!input) {
+          return '';
+        }
+        return (input.value || '').trim();
+      });
+      return values.every((value) => value === '');
+    }
+
+    function pruneEmptyRows() {
+      if (!rowsBody) {
+        return 0;
+      }
+      let removed = 0;
+      rowsBody.querySelectorAll('.override-row').forEach((row) => {
+        if (isRowEmpty(row)) {
+          row.remove();
+          removed++;
+        }
+      });
+      if (removed) {
+        updateSummary();
+      }
+      return removed;
     }
 
     function applyTemplateToRow(row, template) {
@@ -1256,6 +1469,7 @@ include __DIR__ . '/include/layout_top.php';
           alert('Too many rows (' + total + '). Please reduce the date range or employee list (max ' + maxRows + ').');
           return;
         }
+        pruneEmptyRows();
         const template = collectTemplate();
         employees.forEach((emp) => {
           dates.forEach((date) => {
@@ -1288,6 +1502,7 @@ include __DIR__ . '/include/layout_top.php';
           alert('Paste some rows first.');
           return;
         }
+        pruneEmptyRows();
         addRowsFromPaste(text.split(/\r?\n/));
         if (pasteRows) {
           pasteRows.value = '';
@@ -1390,6 +1605,12 @@ include __DIR__ . '/include/layout_top.php';
     if (compactToggle) {
       compactToggle.addEventListener('click', () => {
         document.querySelector('.override-table').classList.toggle('table-sm');
+      });
+    }
+
+    if (submitBtn) {
+      submitBtn.addEventListener('click', () => {
+        pruneEmptyRows();
       });
     }
   });

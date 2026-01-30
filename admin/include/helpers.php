@@ -72,4 +72,61 @@ function get_flash(): ?array {
     return $flash;
 }
 
+function ensure_attendance_override_table(mysqli $bd): bool {
+    $sql = 'CREATE TABLE IF NOT EXISTS `gcc_attendance_master`.`employee_att_daily_overrides` (' .
+        '`emp_code` varchar(10) NOT NULL,' .
+        '`att_date` date NOT NULL,' .
+        '`override_work_hours` decimal(9,2) NULL,' .
+        '`override_work_code` varchar(10) NULL,' .
+        '`override_change_date` datetime NULL,' .
+        '`override_changed_by_email` varchar(255) NULL,' .
+        '`override_changed_by_name` varchar(100) NULL,' .
+        '`override_approved_by_email` varchar(255) NULL,' .
+        '`override_approved_by_name` varchar(100) NULL,' .
+        '`override_is_approved` tinyint(1) NULL,' .
+        '`override_approved_date` datetime NULL,' .
+        'PRIMARY KEY (`emp_code`, `att_date`)' .
+        ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+    if (!$bd->query($sql)) {
+        return false;
+    }
+
+    $existing = [];
+    $result = $bd->query('SHOW COLUMNS FROM `gcc_attendance_master`.`employee_att_daily_overrides`');
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $name = strtolower((string) ($row['Field'] ?? ''));
+            if ($name !== '') {
+                $existing[$name] = true;
+            }
+        }
+        $result->free();
+    }
+
+    $columns = [
+        'override_work_hours' => 'decimal(9,2) NULL',
+        'override_work_code' => 'varchar(10) NULL',
+        'override_change_date' => 'datetime NULL',
+        'override_changed_by_email' => 'varchar(255) NULL',
+        'override_changed_by_name' => 'varchar(100) NULL',
+        'override_approved_by_email' => 'varchar(255) NULL',
+        'override_approved_by_name' => 'varchar(100) NULL',
+        'override_is_approved' => 'tinyint(1) NULL',
+        'override_approved_date' => 'datetime NULL',
+    ];
+
+    foreach ($columns as $name => $definition) {
+        $key = strtolower($name);
+        if (isset($existing[$key])) {
+            continue;
+        }
+        $alter = 'ALTER TABLE `gcc_attendance_master`.`employee_att_daily_overrides` ADD COLUMN `' . $name . '` ' . $definition;
+        if (!$bd->query($alter)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 ?>

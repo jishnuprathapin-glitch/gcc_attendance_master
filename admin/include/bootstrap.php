@@ -29,6 +29,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     exit;
 }
 mysqli_set_charset($bd, 'utf8mb4');
+ensure_attendance_override_table($bd);
 
 if (empty($_SESSION['user_id'])) {
     header('Location: /HRSmart/index.php');
