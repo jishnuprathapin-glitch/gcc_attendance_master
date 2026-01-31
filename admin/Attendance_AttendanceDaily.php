@@ -264,9 +264,15 @@ function render_attendance_results(array $context): string {
     ob_start();
     ?>
     <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
         <h3 class="card-title">Weekly attendance</h3>
-        <span class="text-muted small"><?= h($showingStart) ?>-<?= h($showingEnd) ?> of <?= h($totalEmployees) ?> employees | <?= h(count($dateRange)) ?> day(s)</span>
+        <div class="attendance-quick-ranges">
+          <span class="text-muted small"><?= h($showingStart) ?>-<?= h($showingEnd) ?> of <?= h($totalEmployees) ?> employees | <?= h(count($dateRange)) ?> day(s)</span>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
+            <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last30DaysUrl) ?>">Last 30 days</a>
+            <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last60DaysUrl) ?>">Last 60 days</a>
+          </div>
+        </div>
       </div>
       <?php if ($totalPages > 1): ?>
         <div class="attendance-pager" data-total-pages="<?= h($totalPages) ?>">
@@ -843,12 +849,11 @@ if ($exportType === 'download') {
     exit;
 }
 
-[$defaultStart, $defaultEnd] = current_week_range();
 $today = new DateTimeImmutable('today');
+$defaultEnd = $today->format('Y-m-d');
+$defaultStart = $today->modify('-13 days')->format('Y-m-d');
 $last30Start = $today->modify('-29 days')->format('Y-m-d');
-$last30End = $today->format('Y-m-d');
-$prevWeekStart = (new DateTimeImmutable($defaultStart))->modify('-7 days')->format('Y-m-d');
-$prevWeekEnd = (new DateTimeImmutable($defaultEnd))->modify('-7 days')->format('Y-m-d');
+$last60Start = $today->modify('-59 days')->format('Y-m-d');
 
 $designationFilter = normalize_multi_param($_GET['designation'] ?? []);
 $departmentFilter = normalize_multi_param($_GET['department'] ?? []);
@@ -1274,24 +1279,18 @@ $exportUrl = build_query_url(array_merge($baseQuery, [
 $exportStartUrl = build_query_url(array_merge($baseQuery, [
     'export' => 'start',
 ]));
-$currentWeekUrl = build_query_url(array_merge($baseQuery, [
-    'start_date' => $defaultStart,
+$last30DaysUrl = build_query_url(array_merge($baseQuery, [
+    'start_date' => $last30Start,
     'end_date' => $defaultEnd,
     'page' => 1,
 ]));
-$previousWeekUrl = build_query_url(array_merge($baseQuery, [
-    'start_date' => $prevWeekStart,
-    'end_date' => $prevWeekEnd,
+$last60DaysUrl = build_query_url(array_merge($baseQuery, [
+    'start_date' => $last60Start,
+    'end_date' => $defaultEnd,
     'page' => 1,
 ]));
-$last30DaysUrl = build_query_url(array_merge($baseQuery, [
-    'start_date' => $last30Start,
-    'end_date' => $last30End,
-    'page' => 1,
-]));
-$isCurrentWeek = ($startDate === $defaultStart && $endDate === $defaultEnd);
-$isPrevWeek = ($startDate === $prevWeekStart && $endDate === $prevWeekEnd);
-$isLast30Days = ($startDate === $last30Start && $endDate === $last30End);
+$isLast30Days = ($startDate === $last30Start && $endDate === $defaultEnd);
+$isLast60Days = ($startDate === $last60Start && $endDate === $defaultEnd);
 $pageLinks = build_page_window($page, $totalPages);
 $showingStart = $totalEmployees > 0 ? ($offset + 1) : 0;
 $showingEnd = $totalEmployees > 0 ? min($offset + count($employees), $totalEmployees) : 0;
@@ -1320,6 +1319,10 @@ $context = [
     'showingEnd' => $showingEnd,
     'perPage' => $perPage,
     'allowedPerPage' => $allowedPerPage,
+    'last30DaysUrl' => $last30DaysUrl,
+    'last60DaysUrl' => $last60DaysUrl,
+    'isLast30Days' => $isLast30Days,
+    'isLast60Days' => $isLast60Days,
 ];
 
 if ($exportStart) {
@@ -1490,6 +1493,11 @@ include __DIR__ . '/include/layout_top.php';
     scroll-behavior: smooth;
     scrollbar-width: none;
     flex: 1;
+    cursor: grab;
+  }
+  .attendance-day-scroller .day-strip.is-dragging {
+    cursor: grabbing;
+    user-select: none;
   }
   .attendance-day-scroller .day-strip.is-centered {
     justify-content: center;
@@ -1557,12 +1565,24 @@ include __DIR__ . '/include/layout_top.php';
   .attendance-scroll {
     scroll-behavior: smooth;
   }
-  .attendance-daily-table .day-header,
+  .attendance-daily-table .day-header {
+    border-right: 3px solid #b6c2cf;
+    border-left: 3px solid #b6c2cf;
+  }
+  .attendance-daily-table .day-header.is-active {
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.04));
+    box-shadow: inset 0 -2px 0 rgba(37, 99, 235, 0.35);
+  }
+  .attendance-daily-table .day-header.is-active .day-label {
+    font-weight: 700;
+  }
   .attendance-daily-table .day-col.col-final-work-hrs {
     border-right: 3px solid #b6c2cf;
   }
-  .attendance-daily-table .day-header[data-day-index="0"],
-  .attendance-daily-table .day-col.day-0 {
+  .attendance-daily-table .day-col.day-expanded.col-project-login {
+    border-left: 3px solid #b6c2cf;
+  }
+  .attendance-daily-table .day-col.col-final-work-code:not(.day-expanded) {
     border-left: 3px solid #b6c2cf;
   }
   .attendance-daily-table .day-col.day-expanded.col-work-hrs {
@@ -1607,21 +1627,35 @@ include __DIR__ . '/include/layout_top.php';
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     gap: 0.75rem;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid rgba(15, 23, 42, 0.08);
     background: linear-gradient(90deg, rgba(15, 23, 42, 0.06), rgba(15, 23, 42, 0));
   }
   .attendance-pager .pager-meta {
+    order: 2;
+    margin-left: auto;
     font-weight: 600;
     color: #0f172a;
   }
   .attendance-pager .pager-controls {
+    order: 1;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
+  }
+  .attendance-quick-ranges {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.35rem;
+    margin-left: auto;
+  }
+  .attendance-quick-ranges .btn-group {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .attendance-pager .pager-btn {
     border: none;
@@ -1832,14 +1866,6 @@ include __DIR__ . '/include/layout_top.php';
       </div>
       <div class="card-body">
         <form method="get" class="form-row">
-          <div class="form-group col-12">
-            <label class="d-block">Quick ranges</label>
-            <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
-              <a class="btn <?= $isCurrentWeek ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($currentWeekUrl) ?>">Current week</a>
-              <a class="btn <?= $isPrevWeek ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($previousWeekUrl) ?>">Previous week</a>
-              <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last30DaysUrl) ?>">Last 30 days</a>
-            </div>
-          </div>
           <div class="form-group col-md-3">
             <label for="cost_center">Cost center company</label>
             <select id="cost_center" name="cost_center[]" class="form-control js-searchable" data-placeholder="All" multiple>
@@ -1925,9 +1951,15 @@ include __DIR__ . '/include/layout_top.php';
     </div>
 
     <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
         <h3 class="card-title">Weekly attendance</h3>
-        <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
+        <div class="attendance-quick-ranges">
+          <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
+            <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last30DaysUrl ?>">Last 30 days</a>
+            <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last60DaysUrl ?>">Last 60 days</a>
+          </div>
+        </div>
       </div>
       <?php if ($totalPages > 1): ?>
         <div class="attendance-pager" data-total-pages="<?= $totalPages ?>">
@@ -2211,6 +2243,7 @@ include __DIR__ . '/include/layout_top.php';
         const dayIndex = this.getAttribute('data-day-index');
         const expanded = this.getAttribute('aria-expanded') === 'true';
         setDayExpanded(dayIndex, !expanded);
+        setActiveDay(Number(dayIndex), true);
         updateEmptyColspan();
       });
     });
@@ -2233,6 +2266,65 @@ include __DIR__ . '/include/layout_top.php';
       dayStrip.classList.toggle('is-centered', shouldCenter);
     };
 
+    const enableDayStripScroll = () => {
+      if (!dayStrip) {
+        return;
+      }
+      let isDragging = false;
+      let dragStartX = 0;
+      let dragStartScroll = 0;
+      let dragMoved = false;
+      dayStrip.addEventListener(
+        'wheel',
+        (event) => {
+          if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+            return;
+          }
+          dayStrip.scrollLeft += event.deltaY;
+          event.preventDefault();
+        },
+        { passive: false }
+      );
+      dayStrip.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) {
+          return;
+        }
+        isDragging = true;
+        dragMoved = false;
+        dragStartX = event.clientX;
+        dragStartScroll = dayStrip.scrollLeft;
+        dayStrip.classList.add('is-dragging');
+      });
+      dayStrip.addEventListener('mousemove', (event) => {
+        if (!isDragging) {
+          return;
+        }
+        const delta = event.clientX - dragStartX;
+        if (Math.abs(delta) > 3) {
+          dragMoved = true;
+        }
+        dayStrip.scrollLeft = dragStartScroll - delta;
+        if (dragMoved) {
+          event.preventDefault();
+        }
+      });
+      const stopDrag = () => {
+        if (!isDragging) {
+          return;
+        }
+        isDragging = false;
+        dayStrip.classList.remove('is-dragging');
+      };
+      dayStrip.addEventListener('mouseup', stopDrag);
+      dayStrip.addEventListener('mouseleave', stopDrag);
+      dayStrip.addEventListener('click', (event) => {
+        if (dragMoved) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      });
+    };
+
     const getStickyWidth = () => {
       let width = 0;
       table.querySelectorAll('thead .col-fixed').forEach((cell) => {
@@ -2250,6 +2342,11 @@ include __DIR__ . '/include/layout_top.php';
       dayChips.forEach((chip, idx) => {
         chip.classList.toggle('is-active', idx === bounded);
       });
+      if (dayHeaders.length) {
+        dayHeaders.forEach((header, idx) => {
+          header.classList.toggle('is-active', idx === bounded);
+        });
+      }
       if (prevBtn) {
         prevBtn.disabled = bounded <= 0;
       }
@@ -2321,6 +2418,7 @@ include __DIR__ . '/include/layout_top.php';
       updateActiveFromScroll();
     }
 
+    enableDayStripScroll();
     updateDayStripAlignment();
 
     const metaToggle = document.getElementById('toggleMetaColumns');
