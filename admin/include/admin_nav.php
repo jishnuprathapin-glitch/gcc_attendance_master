@@ -1,6 +1,7 @@
 <?php
 $links = [
     ['label' => 'Dashboard', 'path' => 'Attendance_Dashboard.php', 'icon' => 'fas fa-home'],
+    ['label' => 'HR Insights', 'path' => 'Attendance_HRDashboard.php', 'icon' => 'fas fa-heartbeat'],
     ['label' => 'Employees', 'path' => 'Attendance_Employees.php', 'icon' => 'fas fa-users'],
     ['label' => 'Attendance Daily', 'path' => 'Attendance_AttendanceDaily.php', 'icon' => 'fas fa-calendar-alt'],
     ['label' => 'Adjust Time', 'path' => 'Attendance_AttendanceAdjustTime.php', 'icon' => 'fas fa-clock'],
