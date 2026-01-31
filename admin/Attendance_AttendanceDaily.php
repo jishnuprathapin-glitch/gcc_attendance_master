@@ -1569,6 +1569,11 @@ include __DIR__ . '/include/layout_top.php';
     border-right: 3px solid #b6c2cf;
     border-left: 3px solid #b6c2cf;
   }
+  .attendance-daily-table th,
+  .attendance-daily-table td {
+    text-align: center;
+    vertical-align: middle;
+  }
   .attendance-daily-table .day-header.is-active {
     background: linear-gradient(90deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.04));
     box-shadow: inset 0 -2px 0 rgba(37, 99, 235, 0.35);

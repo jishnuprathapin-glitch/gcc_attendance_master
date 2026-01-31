@@ -2329,86 +2329,22 @@ if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
         exit;
     }
 
-    if ($ajaxSection === 'insights-weekday') {
-        $weekdaySql = 'SELECT WEEKDAY(att_date) AS weekday, COUNT(DISTINCT emp_code) AS count ' .
-            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
-            ' GROUP BY weekday ORDER BY weekday';
-        $weekdayResult = db_fetch_all($bd, $weekdaySql, $attTypes, $attParams);
-        $weekdayRows = $weekdayResult['ok'] ? $weekdayResult['rows'] : [];
-        $labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-        $mapped = array_fill(0, 7, 0);
-        foreach ($weekdayRows as $row) {
-            $idx = (int) ($row['weekday'] ?? 0);
-            if ($idx >= 0 && $idx < 7) {
-                $mapped[$idx] = (int) ($row['count'] ?? 0);
-            }
-        }
-        $rows = [];
-        foreach ($labels as $idx => $label) {
-            $rows[] = ['label' => $label, 'count' => $mapped[$idx]];
-        }
-        $payload = [
-            'errors' => $weekdayResult['ok'] ? [] : ['Weekday pulse unavailable.'],
-            'insights' => [
-                'weekday' => $rows,
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
 
-    if ($ajaxSection === 'insights-low-days') {
-        $lowSql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS count ' .
+    if ($ajaxSection === 'insights-workcode-department') {
+        $deptSql = 'SELECT COALESCE(NULLIF(TRIM(department_name), \'\'), \'Unassigned\') AS group_label, ' .
+            'COALESCE(NULLIF(TRIM(work_code), \'\'), \'Unknown\') AS work_code, ' .
+            'COUNT(DISTINCT emp_code) AS count ' .
             'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
-            ' GROUP BY att_date ORDER BY count ASC, att_date ASC LIMIT 6';
-        $lowResult = db_fetch_all($bd, $lowSql, $attTypes, $attParams);
-        $lowRows = $lowResult['ok'] ? $lowResult['rows'] : [];
-        $rows = array_map(static function (array $row): array {
-            $date = (string) ($row['att_date'] ?? '');
-            $label = $date !== '' ? format_display_date($date) : '-';
-            return [
-                'label' => $label,
-                'count' => (int) ($row['count'] ?? 0),
-            ];
-        }, $lowRows);
-        $payload = [
-            'errors' => $lowResult['ok'] ? [] : ['Low attendance days unavailable.'],
-            'insights' => [
-                'lowDays' => $rows,
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-departments') {
-        $deptWhere = 'd.att_date BETWEEN ? AND ? AND (d.is_delete = 0 OR d.is_delete IS NULL) ' .
-            'AND (d.is_deleted = 0 OR d.is_deleted IS NULL)';
-        $deptTypes = 'ss';
-        $deptParams = [$startDate, $endDate];
-        if ($projectCodeFilter !== '') {
-            $deptWhere .= ' AND d.Projectcode_utime = ?';
-            $deptTypes .= 's';
-            $deptParams[] = $projectCodeFilter;
-        }
-        $deptSql = 'SELECT COALESCE(NULLIF(TRIM(h.dept_name), \'\'), \'Unassigned\') AS label, ' .
-            'COUNT(DISTINCT d.emp_code) AS count ' .
-            'FROM gcc_attendance_master.employee_att_daily d ' .
-            'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
-            'ON h.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
-            'WHERE ' . $deptWhere . ' GROUP BY label ORDER BY count DESC LIMIT 10';
-        $deptResult = db_fetch_all($bd, $deptSql, $deptTypes, $deptParams);
+            ' GROUP BY group_label, work_code ORDER BY group_label, work_code';
+        $deptResult = db_fetch_all($bd, $deptSql, $attTypes, $attParams);
         $deptRows = $deptResult['ok'] ? $deptResult['rows'] : [];
         $payload = [
-            'errors' => $deptResult['ok'] ? [] : ['Department breakdown unavailable.'],
+            'errors' => $deptResult['ok'] ? [] : ['Department workcode breakdown unavailable.'],
             'insights' => [
-                'departments' => array_map(static function (array $row): array {
+                'workcodeMatrix' => array_map(static function (array $row): array {
                     return [
-                        'label' => (string) ($row['label'] ?? ''),
+                        'group' => (string) ($row['group_label'] ?? ''),
+                        'workCode' => (string) ($row['work_code'] ?? ''),
                         'count' => (int) ($row['count'] ?? 0),
                     ];
                 }, $deptRows),
@@ -2420,33 +2356,24 @@ if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
         exit;
     }
 
-    if ($ajaxSection === 'insights-designations') {
-        $desgWhere = 'd.att_date BETWEEN ? AND ? AND (d.is_delete = 0 OR d.is_delete IS NULL) ' .
-            'AND (d.is_deleted = 0 OR d.is_deleted IS NULL)';
-        $desgTypes = 'ss';
-        $desgParams = [$startDate, $endDate];
-        if ($projectCodeFilter !== '') {
-            $desgWhere .= ' AND d.Projectcode_utime = ?';
-            $desgTypes .= 's';
-            $desgParams[] = $projectCodeFilter;
-        }
-        $desgSql = 'SELECT COALESCE(NULLIF(TRIM(h.desg_name), \'\'), \'Unassigned\') AS label, ' .
-            'COUNT(DISTINCT d.emp_code) AS count ' .
-            'FROM gcc_attendance_master.employee_att_daily d ' .
-            'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
-            'ON h.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
-            'WHERE ' . $desgWhere . ' GROUP BY label ORDER BY count DESC LIMIT 10';
-        $desgResult = db_fetch_all($bd, $desgSql, $desgTypes, $desgParams);
-        $desgRows = $desgResult['ok'] ? $desgResult['rows'] : [];
+    if ($ajaxSection === 'insights-workcode-project') {
+        $projectSql = 'SELECT COALESCE(NULLIF(TRIM(Projectcode_utime), \'\'), \'Unassigned\') AS group_label, ' .
+            'COALESCE(NULLIF(TRIM(work_code), \'\'), \'Unknown\') AS work_code, ' .
+            'COUNT(DISTINCT emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
+            ' GROUP BY group_label, work_code ORDER BY group_label, work_code';
+        $projectResult = db_fetch_all($bd, $projectSql, $attTypes, $attParams);
+        $projectRows = $projectResult['ok'] ? $projectResult['rows'] : [];
         $payload = [
-            'errors' => $desgResult['ok'] ? [] : ['Designation breakdown unavailable.'],
+            'errors' => $projectResult['ok'] ? [] : ['Project workcode breakdown unavailable.'],
             'insights' => [
-                'designations' => array_map(static function (array $row): array {
+                'workcodeMatrix' => array_map(static function (array $row): array {
                     return [
-                        'label' => (string) ($row['label'] ?? ''),
+                        'group' => (string) ($row['group_label'] ?? ''),
+                        'workCode' => (string) ($row['work_code'] ?? ''),
                         'count' => (int) ($row['count'] ?? 0),
                     ];
-                }, $desgRows),
+                }, $projectRows),
             ],
         ];
         header('Content-Type: application/json; charset=utf-8');
@@ -2455,22 +2382,68 @@ if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
         exit;
     }
 
-    if ($ajaxSection === 'insights-projects') {
-        $projectSql = 'SELECT COALESCE(NULLIF(TRIM(Projectcode_utime), \'\'), \'Unassigned\') AS label, ' .
+    if ($ajaxSection === 'insights-workcode-company') {
+        $companySql = 'SELECT COALESCE(NULLIF(TRIM(company_shortname), \'\'), \'Unassigned\') AS group_label, ' .
+            'COALESCE(NULLIF(TRIM(work_code), \'\'), \'Unknown\') AS work_code, ' .
             'COUNT(DISTINCT emp_code) AS count ' .
             'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
-            ' GROUP BY label ORDER BY count DESC LIMIT 10';
-        $projectResult = db_fetch_all($bd, $projectSql, $attTypes, $attParams);
-        $projectRows = $projectResult['ok'] ? $projectResult['rows'] : [];
+            ' GROUP BY group_label, work_code ORDER BY group_label, work_code';
+        $companyResult = db_fetch_all($bd, $companySql, $attTypes, $attParams);
+        $companyRows = $companyResult['ok'] ? $companyResult['rows'] : [];
         $payload = [
-            'errors' => $projectResult['ok'] ? [] : ['Project breakdown unavailable.'],
+            'errors' => $companyResult['ok'] ? [] : ['Company workcode breakdown unavailable.'],
+            'insights' => [
+                'workcodeMatrix' => array_map(static function (array $row): array {
+                    return [
+                        'group' => (string) ($row['group_label'] ?? ''),
+                        'workCode' => (string) ($row['work_code'] ?? ''),
+                        'count' => (int) ($row['count'] ?? 0),
+                    ];
+                }, $companyRows),
+            ],
+        ];
+        header('Content-Type: application/json; charset=utf-8');
+        header('Cache-Control: no-store');
+        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    if ($ajaxSection === 'insights-project-one-punch') {
+        $punchWhere = 'd.att_date BETWEEN ? AND ? AND (d.is_delete = 0 OR d.is_delete IS NULL) ' .
+            'AND (d.is_deleted = 0 OR d.is_deleted IS NULL)';
+        $punchTypes = 'ss';
+        $punchParams = [$startDate, $endDate];
+        if ($projectCodeFilter !== '') {
+            $punchWhere .= ' AND d.Projectcode_utime = ?';
+            $punchTypes .= 's';
+            $punchParams[] = $projectCodeFilter;
+        }
+        if ($deviceSnParam !== '') {
+            $punchWhere .= ' AND (FIND_IN_SET(p.first_terminal_sn, ?) OR FIND_IN_SET(p.last_terminal_sn, ?))';
+            $punchTypes .= 'ss';
+            $punchParams[] = $deviceSnParam;
+            $punchParams[] = $deviceSnParam;
+        }
+        $punchSql = 'SELECT COALESCE(NULLIF(TRIM(d.Projectcode_utime), \'\'), \'Unassigned\') AS label, ' .
+            'COUNT(DISTINCT d.emp_code) AS count ' .
+            'FROM gcc_attendance_master.employee_att_daily d ' .
+            'INNER JOIN gcc_attendance_master.employee_daily_punch p ' .
+            'ON p.emp_code COLLATE utf8mb4_general_ci = d.emp_code COLLATE utf8mb4_general_ci ' .
+            'AND p.punch_date = d.att_date ' .
+            'WHERE ' . $punchWhere . ' AND ((p.first_log IS NULL AND p.last_log IS NOT NULL) ' .
+            'OR (p.first_log IS NOT NULL AND p.last_log IS NULL)) ' .
+            'GROUP BY label ORDER BY count DESC';
+        $punchResult = db_fetch_all($bd, $punchSql, $punchTypes, $punchParams);
+        $punchRows = $punchResult['ok'] ? $punchResult['rows'] : [];
+        $payload = [
+            'errors' => $punchResult['ok'] ? [] : ['Project one-punch unavailable.'],
             'insights' => [
                 'projects' => array_map(static function (array $row): array {
                     return [
                         'label' => (string) ($row['label'] ?? ''),
                         'count' => (int) ($row['count'] ?? 0),
                     ];
-                }, $projectRows),
+                }, $punchRows),
             ],
         ];
         header('Content-Type: application/json; charset=utf-8');
@@ -2908,12 +2881,48 @@ include __DIR__ . '/include/layout_top.php';
       radial-gradient(600px 300px at 10% -10%, rgba(37, 99, 235, 0.16), transparent 55%),
       radial-gradient(500px 240px at 90% 0%, rgba(20, 184, 166, 0.18), transparent 60%),
       linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+    position: relative;
+    overflow: hidden;
     padding-top: 1rem;
+  }
+
+  .attendance-dashboard::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(420px 240px at 85% 8%, rgba(249, 115, 22, 0.18), transparent 60%),
+      radial-gradient(520px 280px at 8% 18%, rgba(59, 130, 246, 0.18), transparent 60%),
+      repeating-linear-gradient(120deg, rgba(15, 23, 42, 0.04) 0, rgba(15, 23, 42, 0.04) 1px, transparent 1px, transparent 36px);
+    opacity: 0.7;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .attendance-dashboard::after {
+    content: "";
+    position: absolute;
+    inset: 10% 5% auto auto;
+    width: 420px;
+    height: 420px;
+    background: radial-gradient(circle, rgba(20, 184, 166, 0.18), transparent 70%);
+    filter: blur(10px);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .attendance-dashboard > .container-fluid {
+    position: relative;
+    z-index: 1;
   }
 
   .attendance-dashboard-header h1 {
     font-family: "Fraunces", serif;
     letter-spacing: 0.01em;
+    background: linear-gradient(120deg, #0f172a, #2563eb 45%, #14b8a6 90%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .attendance-dashboard-header .badge {
@@ -2930,6 +2939,12 @@ include __DIR__ . '/include/layout_top.php';
     background: rgba(255, 255, 255, 0.9);
     animation: fadeUp 0.55s ease both;
     backdrop-filter: blur(4px);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .dash-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 28px 60px rgba(15, 23, 42, 0.18);
   }
 
   .dash-card .card-header {
@@ -2956,7 +2971,9 @@ include __DIR__ . '/include/layout_top.php';
     border: none;
     color: #fff;
     background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 48%, #14b8a6 100%);
+    background-size: 200% 200%;
     box-shadow: 0 26px 60px rgba(15, 23, 42, 0.35);
+    animation: fadeUp 0.55s ease both, heroShift 12s ease infinite;
   }
 
   .dash-hero::before {
@@ -2975,6 +2992,12 @@ include __DIR__ . '/include/layout_top.php';
       radial-gradient(220px 120px at 75% 15%, rgba(255, 255, 255, 0.2), transparent 60%),
       radial-gradient(240px 140px at 20% 75%, rgba(255, 255, 255, 0.18), transparent 60%);
     pointer-events: none;
+  }
+
+  @keyframes heroShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
   }
 
   .dash-hero-inner {
@@ -3058,6 +3081,8 @@ include __DIR__ . '/include/layout_top.php';
     padding: 18px 20px 16px;
     border-radius: 18px;
     color: #fff;
+    box-shadow: 0 18px 32px rgba(15, 23, 42, 0.25);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
   }
 
   .dash-kpi::after {
@@ -3066,6 +3091,11 @@ include __DIR__ . '/include/layout_top.php';
     inset: 0;
     background: linear-gradient(120deg, rgba(255, 255, 255, 0.08), transparent 60%);
     pointer-events: none;
+  }
+
+  .dash-kpi:hover {
+    transform: translateY(-3px) scale(1.01);
+    box-shadow: 0 22px 40px rgba(15, 23, 42, 0.3);
   }
 
   .dash-kpi--blue {
@@ -3172,6 +3202,12 @@ include __DIR__ . '/include/layout_top.php';
     background: #ffffff;
     border: 1px solid rgba(15, 23, 42, 0.08);
     box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .insight-stat:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 30px rgba(15, 23, 42, 0.14);
   }
 
   .insight-stat--accent {
@@ -3229,6 +3265,7 @@ include __DIR__ . '/include/layout_top.php';
     background: #ffffff;
     border: 1px solid rgba(15, 23, 42, 0.08);
     box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
   }
 
   .insight-panel--cool {
@@ -3245,10 +3282,22 @@ include __DIR__ . '/include/layout_top.php';
     grid-column: span 12;
   }
 
+  .insight-panel:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 36px rgba(15, 23, 42, 0.14);
+  }
+
   .insight-title {
     font-weight: 600;
     margin-bottom: 10px;
     color: var(--dash-ink);
+  }
+
+  .insight-subtitle {
+    margin-top: -4px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    color: var(--dash-muted);
   }
 
   .insight-chart {
@@ -3269,6 +3318,12 @@ include __DIR__ . '/include/layout_top.php';
   .insight-bar-list {
     display: grid;
     gap: 10px;
+  }
+
+  .insight-scroll {
+    max-height: 320px;
+    overflow: auto;
+    padding-right: 4px;
   }
 
   .insight-bar-row {
@@ -3372,6 +3427,144 @@ include __DIR__ . '/include/layout_top.php';
   .insight-empty {
     font-size: 12px;
     color: var(--dash-muted);
+  }
+
+  .insight-table-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .insight-table-search {
+    flex: 1 1 200px;
+    min-width: 180px;
+    border-radius: 999px;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    padding: 8px 14px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.8);
+  }
+
+  .insight-table-search:focus {
+    outline: none;
+    border-color: rgba(37, 99, 235, 0.4);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+  }
+
+  .insight-table-meta {
+    font-size: 12px;
+    color: var(--dash-muted);
+    white-space: nowrap;
+  }
+
+  .insight-matrix-slot {
+    min-height: 120px;
+  }
+
+  .insight-matrix-wrap {
+    border-radius: 14px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+    overflow: auto;
+    max-height: 420px;
+  }
+
+  .insight-matrix {
+    width: 100%;
+    min-width: 720px;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 12px;
+  }
+
+  .insight-matrix thead th {
+    position: sticky;
+    top: 0;
+    background: linear-gradient(120deg, rgba(37, 99, 235, 0.12), rgba(20, 184, 166, 0.1));
+    color: var(--dash-ink);
+    font-weight: 600;
+    padding: 10px 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+    text-align: center;
+    z-index: 2;
+  }
+
+  .insight-matrix thead th:first-child {
+    text-align: left;
+  }
+
+  .insight-matrix th:first-child,
+  .insight-matrix td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #ffffff;
+  }
+
+  .insight-matrix th:first-child {
+    z-index: 3;
+    background: linear-gradient(120deg, rgba(37, 99, 235, 0.14), rgba(20, 184, 166, 0.12));
+  }
+
+  .insight-matrix td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+    white-space: nowrap;
+    text-align: center;
+  }
+
+  .insight-matrix td:first-child {
+    text-align: left;
+  }
+
+  .insight-matrix tbody tr:nth-child(even) td {
+    background: rgba(15, 23, 42, 0.02);
+  }
+
+  .insight-matrix tbody tr:last-child td {
+    background: rgba(15, 23, 42, 0.06);
+  }
+
+  .insight-matrix tbody tr:hover td {
+    background: rgba(15, 23, 42, 0.03);
+  }
+
+  .insight-matrix-group {
+    font-weight: 600;
+    color: var(--dash-ink);
+  }
+
+  .insight-matrix-total {
+    font-weight: 600;
+    color: var(--dash-ink);
+  }
+
+  .insight-matrix-cell {
+    text-align: center;
+    border-radius: 999px;
+    padding: 4px 6px;
+    background: linear-gradient(
+      120deg,
+      rgba(37, 99, 235, calc(0.12 + var(--heat, 0) * 0.6)),
+      rgba(20, 184, 166, calc(0.08 + var(--heat, 0) * 0.4))
+    );
+    color: #0f172a;
+    font-weight: 600;
+    min-width: 36px;
+    display: inline-block;
+    box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.04);
+  }
+
+  .insight-matrix-cell.is-zero {
+    background: rgba(15, 23, 42, 0.06);
+    color: rgba(15, 23, 42, 0.45);
+    font-weight: 500;
   }
 
   @media (max-width: 991px) {
@@ -3661,18 +3854,39 @@ include __DIR__ . '/include/layout_top.php';
           </div>
 
           <div class="insight-panel">
-            <div class="insight-title">Departmentwise attendance</div>
-            <div id="departmentBars" class="insight-bar-list"></div>
+            <div class="insight-title">Projectwise one-punch employees</div>
+            <div class="insight-subtitle">Employees with only one punch in a day.</div>
+            <div id="projectOnePunchBars" class="insight-bar-list insight-scroll"></div>
           </div>
 
-          <div class="insight-panel">
-            <div class="insight-title">Designationwise attendance</div>
-            <div id="designationBars" class="insight-bar-list"></div>
+          <div class="insight-panel insight-panel--wide">
+            <div class="insight-title">Workcode x Department breakdown</div>
+            <div class="insight-subtitle">Employee counts per workcode for each department.</div>
+            <div class="insight-table-toolbar">
+              <input id="deptWorkcodeSearch" class="insight-table-search" type="search" placeholder="Filter departments">
+              <div class="insight-table-meta" id="deptWorkcodeMeta">Loading department breakdown...</div>
+            </div>
+            <div id="deptWorkcodeMatrix" class="insight-matrix-slot"></div>
           </div>
 
-          <div class="insight-panel">
-            <div class="insight-title">Projectwise attendance</div>
-            <div id="projectBars" class="insight-bar-list"></div>
+          <div class="insight-panel insight-panel--wide">
+            <div class="insight-title">Workcode x Project breakdown</div>
+            <div class="insight-subtitle">Employee counts per workcode for each project.</div>
+            <div class="insight-table-toolbar">
+              <input id="projectWorkcodeSearch" class="insight-table-search" type="search" placeholder="Filter projects">
+              <div class="insight-table-meta" id="projectWorkcodeMeta">Loading project breakdown...</div>
+            </div>
+            <div id="projectWorkcodeMatrix" class="insight-matrix-slot"></div>
+          </div>
+
+          <div class="insight-panel insight-panel--wide">
+            <div class="insight-title">Workcode x Company breakdown</div>
+            <div class="insight-subtitle">Employee counts per workcode for each company.</div>
+            <div class="insight-table-toolbar">
+              <input id="companyWorkcodeSearch" class="insight-table-search" type="search" placeholder="Filter companies">
+              <div class="insight-table-meta" id="companyWorkcodeMeta">Loading company breakdown...</div>
+            </div>
+            <div id="companyWorkcodeMatrix" class="insight-matrix-slot"></div>
           </div>
 
           <div class="insight-panel">
@@ -3680,15 +3894,7 @@ include __DIR__ . '/include/layout_top.php';
             <div id="consistencyBars" class="insight-bar-list"></div>
           </div>
 
-          <div class="insight-panel insight-panel--warm">
-            <div class="insight-title">Lowest attendance days</div>
-            <div id="lowDaysBars" class="insight-bar-list"></div>
-          </div>
 
-          <div class="insight-panel">
-            <div class="insight-title">Day-of-week pulse</div>
-            <div id="weekdayBars" class="insight-bar-list"></div>
-          </div>
 
           <div class="insight-panel">
             <div class="insight-title">Punch hour heatmap (last out)</div>
@@ -4158,15 +4364,6 @@ include __DIR__ . '/include/layout_top.php';
       }
       renderPunchHours(Array.isArray(punchHours) ? punchHours : []);
     };
-    const renderInsightsDepartments = (departments) => {
-      renderBarList('departmentBars', Array.isArray(departments) ? departments : []);
-    };
-    const renderInsightsDesignations = (designations) => {
-      renderBarList('designationBars', Array.isArray(designations) ? designations : []);
-    };
-    const renderInsightsProjects = (projects) => {
-      renderBarList('projectBars', Array.isArray(projects) ? projects : []);
-    };
     const renderInsightsOverrides = (overrides) => {
       renderOverrideStatus(overrides || {});
     };
@@ -4179,14 +4376,185 @@ include __DIR__ . '/include/layout_top.php';
     const renderInsightsConsistency = (consistency) => {
       renderBarList('consistencyBars', Array.isArray(consistency) ? consistency : []);
     };
-    const renderInsightsWeekday = (weekday) => {
-      renderBarList('weekdayBars', Array.isArray(weekday) ? weekday : []);
-    };
-    const renderInsightsLowDays = (lowDays) => {
-      renderBarList('lowDaysBars', Array.isArray(lowDays) ? lowDays : []);
-    };
     const renderInsightsPunchOuts = (punchOuts) => {
       renderPunchHours(Array.isArray(punchOuts) ? punchOuts : [], 'punchOutBars');
+    };
+    const renderWorkcodeMatrix = (payload, options) => {
+      const container = document.getElementById(options.containerId);
+      const metaEl = document.getElementById(options.metaId);
+      if (!container) {
+        return;
+      }
+      const rows = Array.isArray(payload) ? payload : [];
+      if (!rows.length) {
+        const emptyText = options.emptyText || 'No workcode data available.';
+        const emptyMeta = options.emptyMeta || 'No records in this range.';
+        container.innerHTML = `<div class="insight-empty">${escapeHtml(emptyText)}</div>`;
+        if (metaEl) {
+          metaEl.textContent = emptyMeta;
+        }
+        return;
+      }
+      const filterText = String(options.filter || '').trim().toLowerCase();
+      const groupMap = new Map();
+      const workcodes = new Set();
+      const groupTotals = new Map();
+      const workcodeTotals = new Map();
+      rows.forEach((row) => {
+        const group = String(row.group || 'Unassigned');
+        const workCode = String(row.workCode || 'Unknown');
+        workcodes.add(workCode);
+        if (!groupMap.has(group)) {
+          groupMap.set(group, {});
+        }
+        const groupEntry = groupMap.get(group);
+        const count = Number(row.count) || 0;
+        groupEntry[workCode] = count;
+        groupTotals.set(group, (groupTotals.get(group) || 0) + count);
+        workcodeTotals.set(workCode, (workcodeTotals.get(workCode) || 0) + count);
+      });
+      const workcodeList = Array.from(workcodes).sort((a, b) => {
+        const diff = (workcodeTotals.get(b) || 0) - (workcodeTotals.get(a) || 0);
+        if (diff !== 0) {
+          return diff;
+        }
+        return String(a).localeCompare(String(b));
+      });
+      const groupList = Array.from(groupMap.keys()).sort((a, b) => {
+        const diff = (groupTotals.get(b) || 0) - (groupTotals.get(a) || 0);
+        if (diff !== 0) {
+          return diff;
+        }
+        return String(a).localeCompare(String(b));
+      }).filter((group) => {
+        if (!filterText) {
+          return true;
+        }
+        return group.toLowerCase().includes(filterText);
+      });
+      const filteredCount = groupList.length;
+      const totalCount = groupMap.size;
+      if (filteredCount === 0) {
+        container.innerHTML = '<div class="insight-empty">No matches for this filter.</div>';
+        if (metaEl) {
+          metaEl.textContent = `0 of ${totalCount} ${options.groupLabel.toLowerCase()}`;
+        }
+        return;
+      }
+      let maxValue = 0;
+      groupList.forEach((group) => {
+        const entry = groupMap.get(group) || {};
+        workcodeList.forEach((code) => {
+          const value = Number(entry[code] || 0);
+          if (value > maxValue) {
+            maxValue = value;
+          }
+        });
+      });
+      const table = document.createElement('table');
+      table.className = 'insight-matrix';
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      const thLabel = document.createElement('th');
+      thLabel.textContent = options.groupLabel;
+      headRow.appendChild(thLabel);
+      workcodeList.forEach((code) => {
+        const th = document.createElement('th');
+        th.textContent = code;
+        headRow.appendChild(th);
+      });
+      const thTotal = document.createElement('th');
+      thTotal.textContent = 'Total';
+      headRow.appendChild(thTotal);
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      const filteredWorkcodeTotals = new Map();
+      let filteredGrandTotal = 0;
+      groupList.forEach((group) => {
+        const rowEl = document.createElement('tr');
+        const labelCell = document.createElement('td');
+        labelCell.textContent = group;
+        labelCell.className = 'insight-matrix-group';
+        rowEl.appendChild(labelCell);
+        const entry = groupMap.get(group) || {};
+        let rowTotal = 0;
+        workcodeList.forEach((code) => {
+          const value = Number(entry[code] || 0);
+          rowTotal += value;
+          filteredWorkcodeTotals.set(code, (filteredWorkcodeTotals.get(code) || 0) + value);
+          const cell = document.createElement('td');
+          const span = document.createElement('span');
+          const heat = maxValue > 0 ? value / maxValue : 0;
+          span.className = 'insight-matrix-cell' + (value === 0 ? ' is-zero' : '');
+          span.style.setProperty('--heat', heat.toFixed(2));
+          span.textContent = value;
+          cell.appendChild(span);
+          rowEl.appendChild(cell);
+        });
+        filteredGrandTotal += rowTotal;
+        const totalCell = document.createElement('td');
+        totalCell.textContent = rowTotal.toLocaleString();
+        totalCell.className = 'insight-matrix-total';
+        rowEl.appendChild(totalCell);
+        tbody.appendChild(rowEl);
+      });
+
+      const totalsRow = document.createElement('tr');
+      const totalsLabel = document.createElement('td');
+      totalsLabel.textContent = 'Total';
+      totalsLabel.className = 'insight-matrix-total';
+      totalsRow.appendChild(totalsLabel);
+      workcodeList.forEach((code) => {
+        const totalValue = Number(filteredWorkcodeTotals.get(code) || 0);
+        const cell = document.createElement('td');
+        const span = document.createElement('span');
+        const heat = maxValue > 0 ? totalValue / maxValue : 0;
+        span.className = 'insight-matrix-cell' + (totalValue === 0 ? ' is-zero' : '');
+        span.style.setProperty('--heat', heat.toFixed(2));
+        span.textContent = totalValue;
+        cell.appendChild(span);
+        totalsRow.appendChild(cell);
+      });
+      const grandCell = document.createElement('td');
+      grandCell.textContent = filteredGrandTotal.toLocaleString();
+      grandCell.className = 'insight-matrix-total';
+      totalsRow.appendChild(grandCell);
+      tbody.appendChild(totalsRow);
+      table.appendChild(tbody);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'insight-matrix-wrap';
+      wrap.appendChild(table);
+      container.innerHTML = '';
+      container.appendChild(wrap);
+      if (metaEl) {
+        const countLabel = filterText ? `${filteredCount} of ${totalCount}` : `${totalCount}`;
+        metaEl.textContent = `${countLabel} ${options.groupLabel.toLowerCase()} · ${workcodeList.length} workcodes`;
+      }
+    };
+
+
+    const bindMatrixSearch = (inputId, stateKey, options) => {
+      const input = document.getElementById(inputId);
+      if (!input) {
+        return;
+      }
+      const apply = () => {
+        matrixState[stateKey].filter = String(input.value || '');
+        renderWorkcodeMatrix(matrixState[stateKey].rows, {
+          containerId: options.containerId,
+          metaId: options.metaId,
+          groupLabel: options.groupLabel,
+          filter: matrixState[stateKey].filter,
+        });
+      };
+      input.addEventListener('input', () => {
+        window.requestAnimationFrame(apply);
+      });
+      input.addEventListener('search', apply);
+      matrixState[stateKey].filter = String(input.value || '');
     };
     const baseUrl = '<?= h(admin_url('Attendance_Dashboard.php')) ?>';
     const renderHrmsSnapshot = (hrms) => {
@@ -4769,6 +5137,12 @@ include __DIR__ . '/include/layout_top.php';
     baseParams.delete('badgeNumber');
     baseParams.set('ajax', '1');
 
+    const matrixState = {
+      department: { rows: [], filter: '' },
+      project: { rows: [], filter: '' },
+      company: { rows: [], filter: '' },
+    };
+
     const panelErrors = new Set();
     const updateErrorBox = () => {
       if (!errorBox) {
@@ -5123,9 +5497,9 @@ include __DIR__ . '/include/layout_top.php';
         });
     };
 
-    const fetchInsightsWeekday = () => {
+    const fetchWorkcodeDepartment = () => {
       const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-weekday');
+      params.set('ajax_section', 'insights-workcode-department');
       const url = baseUrl + '?' + params.toString();
 
       fetch(url, { credentials: 'same-origin' })
@@ -5137,19 +5511,32 @@ include __DIR__ . '/include/layout_top.php';
         })
         .then((data) => {
           const insights = (data && data.insights) || {};
-          renderInsightsWeekday(insights.weekday || []);
+          matrixState.department.rows = Array.isArray(insights.workcodeMatrix) ? insights.workcodeMatrix : [];
+          renderWorkcodeMatrix(matrixState.department.rows, {
+            containerId: 'deptWorkcodeMatrix',
+            metaId: 'deptWorkcodeMeta',
+            groupLabel: 'Departments',
+            filter: matrixState.department.filter,
+          });
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Weekday pulse', errors.length > 0);
+          setPanelError('Dept workcodes', errors.length > 0);
         })
         .catch(() => {
-          renderInsightsWeekday([]);
-          setPanelError('Weekday pulse', true);
+          renderWorkcodeMatrix([], {
+            containerId: 'deptWorkcodeMatrix',
+            metaId: 'deptWorkcodeMeta',
+            groupLabel: 'Departments',
+            filter: '',
+            emptyText: 'Unable to load department workcode breakdown.',
+            emptyMeta: 'Department workcodes unavailable.',
+          });
+          setPanelError('Dept workcodes', true);
         });
     };
 
-    const fetchInsightsLowDays = () => {
+    const fetchWorkcodeProject = () => {
       const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-low-days');
+      params.set('ajax_section', 'insights-workcode-project');
       const url = baseUrl + '?' + params.toString();
 
       fetch(url, { credentials: 'same-origin' })
@@ -5161,19 +5548,32 @@ include __DIR__ . '/include/layout_top.php';
         })
         .then((data) => {
           const insights = (data && data.insights) || {};
-          renderInsightsLowDays(insights.lowDays || []);
+          matrixState.project.rows = Array.isArray(insights.workcodeMatrix) ? insights.workcodeMatrix : [];
+          renderWorkcodeMatrix(matrixState.project.rows, {
+            containerId: 'projectWorkcodeMatrix',
+            metaId: 'projectWorkcodeMeta',
+            groupLabel: 'Projects',
+            filter: matrixState.project.filter,
+          });
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Low days', errors.length > 0);
+          setPanelError('Project workcodes', errors.length > 0);
         })
         .catch(() => {
-          renderInsightsLowDays([]);
-          setPanelError('Low days', true);
+          renderWorkcodeMatrix([], {
+            containerId: 'projectWorkcodeMatrix',
+            metaId: 'projectWorkcodeMeta',
+            groupLabel: 'Projects',
+            filter: '',
+            emptyText: 'Unable to load project workcode breakdown.',
+            emptyMeta: 'Project workcodes unavailable.',
+          });
+          setPanelError('Project workcodes', true);
         });
     };
 
-    const fetchInsightsDepartments = () => {
+    const fetchWorkcodeCompany = () => {
       const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-departments');
+      params.set('ajax_section', 'insights-workcode-company');
       const url = baseUrl + '?' + params.toString();
 
       fetch(url, { credentials: 'same-origin' })
@@ -5185,19 +5585,32 @@ include __DIR__ . '/include/layout_top.php';
         })
         .then((data) => {
           const insights = (data && data.insights) || {};
-          renderInsightsDepartments(insights.departments || []);
+          matrixState.company.rows = Array.isArray(insights.workcodeMatrix) ? insights.workcodeMatrix : [];
+          renderWorkcodeMatrix(matrixState.company.rows, {
+            containerId: 'companyWorkcodeMatrix',
+            metaId: 'companyWorkcodeMeta',
+            groupLabel: 'Companies',
+            filter: matrixState.company.filter,
+          });
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Departments', errors.length > 0);
+          setPanelError('Company workcodes', errors.length > 0);
         })
         .catch(() => {
-          renderInsightsDepartments([]);
-          setPanelError('Departments', true);
+          renderWorkcodeMatrix([], {
+            containerId: 'companyWorkcodeMatrix',
+            metaId: 'companyWorkcodeMeta',
+            groupLabel: 'Companies',
+            filter: '',
+            emptyText: 'Unable to load company workcode breakdown.',
+            emptyMeta: 'Company workcodes unavailable.',
+          });
+          setPanelError('Company workcodes', true);
         });
     };
 
-    const fetchInsightsDesignations = () => {
+    const fetchProjectOnePunch = () => {
       const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-designations');
+      params.set('ajax_section', 'insights-project-one-punch');
       const url = baseUrl + '?' + params.toString();
 
       fetch(url, { credentials: 'same-origin' })
@@ -5209,37 +5622,13 @@ include __DIR__ . '/include/layout_top.php';
         })
         .then((data) => {
           const insights = (data && data.insights) || {};
-          renderInsightsDesignations(insights.designations || []);
+          renderBarList('projectOnePunchBars', Array.isArray(insights.projects) ? insights.projects : []);
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Designations', errors.length > 0);
+          setPanelError('Project one-punch', errors.length > 0);
         })
         .catch(() => {
-          renderInsightsDesignations([]);
-          setPanelError('Designations', true);
-        });
-    };
-
-    const fetchInsightsProjects = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-projects');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsProjects(insights.projects || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Projects', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsProjects([]);
-          setPanelError('Projects', true);
+          renderBarList('projectOnePunchBars', []);
+          setPanelError('Project one-punch', true);
         });
     };
 
@@ -5377,12 +5766,27 @@ include __DIR__ . '/include/layout_top.php';
     fetchInsightsArrivals();
     fetchInsightsDepartures();
     fetchInsightsConsistency();
-    fetchInsightsWeekday();
-    fetchInsightsLowDays();
-    fetchInsightsDepartments();
-    fetchInsightsDesignations();
-    fetchInsightsProjects();
+    fetchProjectOnePunch();
+    fetchWorkcodeDepartment();
+    fetchWorkcodeProject();
+    fetchWorkcodeCompany();
     fetchInsightsOverrides();
+
+    bindMatrixSearch('deptWorkcodeSearch', 'department', {
+      containerId: 'deptWorkcodeMatrix',
+      metaId: 'deptWorkcodeMeta',
+      groupLabel: 'Departments',
+    });
+    bindMatrixSearch('projectWorkcodeSearch', 'project', {
+      containerId: 'projectWorkcodeMatrix',
+      metaId: 'projectWorkcodeMeta',
+      groupLabel: 'Projects',
+    });
+    bindMatrixSearch('companyWorkcodeSearch', 'company', {
+      containerId: 'companyWorkcodeMatrix',
+      metaId: 'companyWorkcodeMeta',
+      groupLabel: 'Companies',
+    });
   })();
 </script>
 
