@@ -188,17 +188,33 @@ if ($isAjax && $ajaxSection === 'summary') {
         $punchTypes .= 'ss';
     }
 
+    $projectSelect = 'COALESCE(NULLIF(pf.pro_code, \'\'), NULLIF(pl.pro_code, \'\'), NULLIF(d.job, \'\'), NULLIF(h.jbno, \'\')) AS project_code';
+    $projectTypes = '';
+    $projectParams = [];
+    if ($deviceSnParam !== '') {
+        $projectSelect = 'COALESCE(' .
+            'NULLIF(IF(FIND_IN_SET(p.first_terminal_sn, ?), pf.pro_code, \'\'), \'\'), ' .
+            'NULLIF(IF(FIND_IN_SET(p.last_terminal_sn, ?), pl.pro_code, \'\'), \'\'), ' .
+            'NULLIF(d.job, \'\'), NULLIF(h.jbno, \'\')) AS project_code';
+        $projectTypes = 'ss';
+        $projectParams = [$deviceSnParam, $deviceSnParam];
+    }
+
     $badgeSql = 'SELECT p.emp_code, p.first_log, p.last_log, p.first_terminal_sn, p.last_terminal_sn, ' .
-        'NULLIF(d.Projectcode_utime, \'\') AS project_code, ' .
+        $projectSelect . ', ' .
         'COALESCE(NULLIF(h.emp_name, \'\'), NULLIF(h.name, \'\')) AS emp_name ' .
         'FROM gcc_attendance_master.employee_daily_punch p ' .
+        'LEFT JOIN gcc_attendance_master.device_project_map df ON df.device_sn = p.first_terminal_sn ' .
+        'LEFT JOIN gcc_it.projects pf ON pf.id = df.project_id ' .
+        'LEFT JOIN gcc_attendance_master.device_project_map dl ON dl.device_sn = p.last_terminal_sn ' .
+        'LEFT JOIN gcc_it.projects pl ON pl.id = dl.project_id ' .
         'LEFT JOIN gcc_attendance_master.employee_att_daily d ' .
         'ON d.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
         'AND d.att_date = p.punch_date ' .
         'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
         'ON h.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
         'WHERE ' . $punchWhere;
-    $badgeResult = db_fetch_all($bd, $badgeSql, $punchTypes, $punchParams);
+    $badgeResult = db_fetch_all($bd, $badgeSql, $projectTypes . $punchTypes, array_merge($projectParams, $punchParams));
     $badgeRows = $badgeResult['ok'] ? $badgeResult['rows'] : [];
     if (!$badgeResult['ok']) {
         $errors[] = 'Daily punches';
@@ -465,73 +481,6 @@ if ($isAjax && $ajaxSection === 'trend') {
     exit;
 }
 
-if ($isAjax && $ajaxSection === 'devices') {
-    $errors = [];
-    $deviceCounts = [];
-    $deviceParams = [$startDate, $endDate, $startDate, $endDate];
-    $deviceTypes = 'ssss';
-    $firstDeviceClause = '';
-    $lastDeviceClause = '';
-    if ($deviceSnParam !== '') {
-        $firstDeviceClause = ' AND FIND_IN_SET(first_terminal_sn, ?)';
-        $lastDeviceClause = ' AND FIND_IN_SET(last_terminal_sn, ?)';
-        $deviceParams[] = $deviceSnParam;
-        $deviceParams[] = $deviceSnParam;
-        $deviceTypes .= 'ss';
-    }
-    $deviceSql = 'SELECT device_sn, COUNT(*) AS total FROM (' .
-        'SELECT first_terminal_sn AS device_sn FROM gcc_attendance_master.employee_daily_punch ' .
-        'WHERE punch_date BETWEEN ? AND ? AND first_terminal_sn IS NOT NULL' . $firstDeviceClause .
-        ' UNION ALL ' .
-        'SELECT last_terminal_sn AS device_sn FROM gcc_attendance_master.employee_daily_punch ' .
-        'WHERE punch_date BETWEEN ? AND ? AND last_terminal_sn IS NOT NULL' . $lastDeviceClause .
-        ') t GROUP BY device_sn ORDER BY total DESC';
-    $deviceResult = db_fetch_all($bd, $deviceSql, $deviceTypes, $deviceParams);
-    if ($deviceResult['ok']) {
-        foreach ($deviceResult['rows'] as $row) {
-            $sn = trim((string) ($row['device_sn'] ?? ''));
-            if ($sn === '') {
-                continue;
-            }
-            $deviceCounts[$sn] = (int) ($row['total'] ?? 0);
-        }
-    } else {
-        $errors[] = 'Device punches';
-    }
-
-    arsort($deviceCounts);
-    $labels = [];
-    $values = [];
-    $index = 0;
-    $otherTotal = 0;
-    foreach ($deviceCounts as $sn => $count) {
-        if ($index < 6) {
-            $labels[] = $sn;
-            $values[] = $count;
-        } else {
-            $otherTotal += $count;
-        }
-        $index++;
-    }
-    if ($otherTotal > 0) {
-        $labels[] = 'Other';
-        $values[] = $otherTotal;
-    }
-
-    $payload = [
-        'ok' => true,
-        'errors' => array_values(array_unique($errors)),
-        'labels' => $labels,
-        'values' => $values,
-        'total' => array_sum($deviceCounts),
-    ];
-
-    header('Content-Type: application/json; charset=utf-8');
-    header('Cache-Control: no-store');
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-    exit;
-}
-
 if ($isAjax && $ajaxSection === 'departments') {
     $errors = [];
     $deptRoster = [];
@@ -553,11 +502,22 @@ if ($isAjax && $ajaxSection === 'departments') {
         $errors[] = 'Department roster';
     }
 
+    $projectMapResult = db_fetch_all($bd, 'SELECT pro_code, name FROM gcc_it.projects');
+    if ($projectMapResult['ok']) {
+        foreach ($projectMapResult['rows'] as $row) {
+            $projectCode = trim((string) ($row['pro_code'] ?? ''));
+            $projectName = trim((string) ($row['name'] ?? ''));
+            if ($projectCode !== '' && $projectName !== '' && !isset($projectNameMap[$projectCode])) {
+                $projectNameMap[$projectCode] = $projectName;
+            }
+        }
+    }
+
     $deptProjectSql = 'SELECT COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\') AS dept_name, ' .
-        'COALESCE(NULLIF(code, \'\'), \'Unassigned\') AS project_code, ' .
-        'MAX(NULLIF(name, \'\')) AS project_name, COUNT(*) AS total ' .
+        'COALESCE(NULLIF(jbno, \'\'), \'Unassigned\') AS project_code, ' .
+        'MAX(NULLIF(jbdesc, \'\')) AS project_name, COUNT(*) AS total ' .
         'FROM gcc_attendance_master.hrmsvw_sync ' .
-        'GROUP BY COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\'), COALESCE(NULLIF(code, \'\'), \'Unassigned\')';
+        'GROUP BY COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\'), COALESCE(NULLIF(jbno, \'\'), \'Unassigned\')';
     $deptProjectResult = db_fetch_all($bd, $deptProjectSql);
     if ($deptProjectResult['ok']) {
         foreach ($deptProjectResult['rows'] as $row) {
@@ -570,7 +530,7 @@ if ($isAjax && $ajaxSection === 'departments') {
                 $projectCode = 'Unassigned';
             }
             $projectName = trim((string) ($row['project_name'] ?? ''));
-            if ($projectName !== '') {
+            if ($projectName !== '' && !isset($projectNameMap[$projectCode])) {
                 $projectNameMap[$projectCode] = $projectName;
             }
             if (!isset($deptProjectRoster[$deptName])) {
@@ -611,17 +571,33 @@ if ($isAjax && $ajaxSection === 'departments') {
         $punchTypes .= 'ss';
     }
 
+    $deptProjectSelect = 'COALESCE(NULLIF(pf.pro_code, \'\'), NULLIF(pl.pro_code, \'\'), NULLIF(d.job, \'\'), NULLIF(h.jbno, \'\')) AS project_code';
+    $deptProjectTypes = '';
+    $deptProjectParams = [];
+    if ($deviceSnParam !== '') {
+        $deptProjectSelect = 'COALESCE(' .
+            'NULLIF(IF(FIND_IN_SET(p.first_terminal_sn, ?), pf.pro_code, \'\'), \'\'), ' .
+            'NULLIF(IF(FIND_IN_SET(p.last_terminal_sn, ?), pl.pro_code, \'\'), \'\'), ' .
+            'NULLIF(d.job, \'\'), NULLIF(h.jbno, \'\')) AS project_code';
+        $deptProjectTypes = 'ss';
+        $deptProjectParams = [$deviceSnParam, $deviceSnParam];
+    }
+
     $deptSql = 'SELECT p.emp_code, p.first_log, p.last_log, ' .
-        'COALESCE(NULLIF(d.Projectcode_utime, \'\'), NULLIF(h.code, \'\')) AS project_code, ' .
+        $deptProjectSelect . ', ' .
         'COALESCE(NULLIF(h.dept_name, \'\'), NULLIF(d.department_name, \'\')) AS dept_name ' .
         'FROM gcc_attendance_master.employee_daily_punch p ' .
+        'LEFT JOIN gcc_attendance_master.device_project_map df ON df.device_sn = p.first_terminal_sn ' .
+        'LEFT JOIN gcc_it.projects pf ON pf.id = df.project_id ' .
+        'LEFT JOIN gcc_attendance_master.device_project_map dl ON dl.device_sn = p.last_terminal_sn ' .
+        'LEFT JOIN gcc_it.projects pl ON pl.id = dl.project_id ' .
         'LEFT JOIN gcc_attendance_master.employee_att_daily d ' .
         'ON d.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
         'AND d.att_date = p.punch_date ' .
         'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
         'ON h.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
         'WHERE ' . $punchWhere;
-    $deptResult = db_fetch_all($bd, $deptSql, $punchTypes, $punchParams);
+    $deptResult = db_fetch_all($bd, $deptSql, $deptProjectTypes . $punchTypes, array_merge($deptProjectParams, $punchParams));
     $deptRows = $deptResult['ok'] ? $deptResult['rows'] : [];
     if (!$deptResult['ok']) {
         $errors[] = 'Department punches';
@@ -1350,14 +1326,6 @@ if ($isAjax && $ajaxSection === 'departments') {
       </div>
 
       <div class="card hr-card hr-span-4">
-        <h4>Device heat</h4>
-        <p class="text-muted mb-2">Top devices by punches.</p>
-        <div class="hr-chart">
-          <canvas id="deviceChart"></canvas>
-        </div>
-      </div>
-
-      <div class="card hr-card hr-span-4">
         <h4>Recent activity</h4>
         <div class="hr-list" id="recentList">
           <div class="hr-skeleton" style="height: 48px;"></div>
@@ -1534,29 +1502,6 @@ if ($isAjax && $ajaxSection === 'departments') {
           maintainAspectRatio: false,
           plugins: { legend: { position: 'bottom' } },
           cutout: '65%'
-        }
-      });
-    };
-
-    const createHorizontalChart = (ctx, labels, values, colors) => {
-      return new Chart(ctx, {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [{
-            data: values,
-            backgroundColor: colors,
-            borderRadius: 8
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          indexAxis: 'y',
-          plugins: { legend: { display: false } },
-          scales: {
-            x: { beginAtZero: true, ticks: { precision: 0 } }
-          }
         }
       });
     };
@@ -1757,20 +1702,20 @@ if ($isAjax && $ajaxSection === 'departments') {
         projectTitle.textContent = 'Project mix';
         projectWrap.appendChild(projectTitle);
 
-        const projectLabels = (dept.projects && dept.projects.labels) ? dept.projects.labels : [];
-        const projectCounts = (dept.projects && dept.projects.counts) ? dept.projects.counts : [];
-        const projectTotal = (dept.projects && Number.isFinite(dept.projects.total))
-          ? dept.projects.total
-          : projectCounts.reduce((sum, val) => sum + (Number(val) || 0), 0);
+        const projectItems = (dept.projects && Array.isArray(dept.projects.items)) ? dept.projects.items : [];
+        const projectTotal = (dept.projects && Number.isFinite(dept.projects.totalLogged))
+          ? dept.projects.totalLogged
+          : projectItems.reduce((sum, item) => sum + (Number(item.loggedCount) || 0), 0);
 
-        if (projectLabels.length === 0) {
+        if (projectItems.length === 0) {
           const empty = document.createElement('div');
           empty.className = 'text-muted';
           empty.textContent = 'No project breakdown available.';
           projectWrap.appendChild(empty);
         } else {
-          projectLabels.forEach((label, idx) => {
-            const count = Number(projectCounts[idx]) || 0;
+          projectItems.forEach((item) => {
+            const label = item.label || item.code || 'Unassigned';
+            const count = Number(item.loggedCount) || 0;
             const pct = projectTotal > 0 ? Math.round((count / projectTotal) * 100) : 0;
             const project = document.createElement('div');
             project.className = 'hr-project';
@@ -1907,19 +1852,6 @@ if ($isAjax && $ajaxSection === 'departments') {
         });
     };
 
-    const loadDevices = () => {
-      fetchSection('devices')
-        .then((data) => {
-          if (!data) return;
-          updateChart('devices', () => createHorizontalChart(
-            document.getElementById('deviceChart').getContext('2d'),
-            data.labels || [],
-            data.values || [],
-            [palette.orange, palette.gold, palette.blue, palette.violet, palette.teal, palette.rose, '#94a3b8']
-          ));
-        });
-    };
-
     const loadDepartments = () => {
       fetchSection('departments')
         .then((data) => {
@@ -1995,7 +1927,6 @@ if ($isAjax && $ajaxSection === 'departments') {
     bindToggles();
     loadSummary();
     loadTrend();
-    loadDevices();
     loadDepartments();
   });
 </script>
