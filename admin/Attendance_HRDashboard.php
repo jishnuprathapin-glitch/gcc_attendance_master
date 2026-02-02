@@ -1,7 +1,6 @@
 
 <?php
 require __DIR__ . '/include/bootstrap.php';
-require __DIR__ . '/include/attendance_api.php';
 
 $page_title = 'HR Insights Dashboard';
 $flash = get_flash();
@@ -16,14 +15,6 @@ function normalize_date(?string $value, string $fallback): string {
         return $fallback;
     }
     return $dt->format('Y-m-d');
-}
-
-function date_add_days(string $date, int $days): string {
-    $dt = DateTimeImmutable::createFromFormat('Y-m-d', $date);
-    if (!$dt) {
-        $dt = new DateTimeImmutable('today');
-    }
-    return $dt->modify(($days >= 0 ? '+' : '') . $days . ' days')->format('Y-m-d');
 }
 
 function parse_time_minutes(?string $value): ?int {
@@ -57,19 +48,40 @@ function format_time_minutes(?int $minutes): string {
     return $dt->format('h:i A');
 }
 
-function extract_count_value($data, array $keys): ?int {
-    if (is_numeric($data)) {
-        return (int) $data;
+function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
+    if ($types === '' || empty($params)) {
+        return;
     }
-    if (!is_array($data)) {
-        return null;
+    $bind = [$types];
+    foreach ($params as $index => $value) {
+        $bind[] = &$params[$index];
     }
-    foreach ($keys as $key) {
-        if (array_key_exists($key, $data)) {
-            return (int) $data[$key];
+    call_user_func_array([$stmt, 'bind_param'], $bind);
+}
+
+function db_fetch_all(mysqli $bd, string $sql, string $types = '', array $params = []): array {
+    $stmt = $bd->prepare($sql);
+    if (!$stmt) {
+        return ['ok' => false, 'rows' => [], 'error' => $bd->error ?: 'prepare_failed'];
+    }
+    if ($types !== '' && !empty($params)) {
+        bind_params($stmt, $types, $params);
+    }
+    if (!$stmt->execute()) {
+        $error = $stmt->error ?: 'execute_failed';
+        $stmt->close();
+        return ['ok' => false, 'rows' => [], 'error' => $error];
+    }
+    $rows = [];
+    $result = $stmt->get_result();
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
         }
+        $result->free();
     }
-    return null;
+    $stmt->close();
+    return ['ok' => true, 'rows' => $rows, 'error' => null];
 }
 
 function build_date_series(string $startDate, string $endDate): array {
@@ -102,8 +114,6 @@ if ($startDate > $endDate) {
     $startDate = $endDate;
     $endDate = $tmp;
 }
-$endDateParam = date_add_days($endDate, 1);
-
 $deviceSnInput = trim((string) ($_GET['deviceSn'] ?? ''));
 $deviceSnList = [];
 if ($deviceSnInput !== '') {
@@ -122,80 +132,81 @@ $ajaxSection = strtolower(trim((string) ($_GET['ajax_section'] ?? '')));
 if ($isAjax && $ajaxSection === 'summary') {
     $errors = [];
     $activeCount = null;
-    $loggedCount = null;
+    $loggedCount = 0;
     $deviceOnline = null;
     $deviceTotal = null;
 
-    $hrmsResult = hrms_api_get('/api/employees/active/count');
-    if ($hrmsResult['ok'] && is_array($hrmsResult['data'])) {
-        $activeCount = extract_count_value($hrmsResult['data'], ['count', 'total', 'activeCount']);
+    $activeResult = db_fetch_all($bd, 'SELECT COUNT(*) AS total FROM gcc_attendance_master.hrmsvw_sync');
+    if ($activeResult['ok'] && !empty($activeResult['rows'])) {
+        $activeCount = (int) ($activeResult['rows'][0]['total'] ?? 0);
     } else {
-        $hrmsFallback = hrms_api_get('/api/employees/active');
-        if ($hrmsFallback['ok'] && is_array($hrmsFallback['data'])) {
-            $activeCount = extract_count_value($hrmsFallback['data'], ['count', 'total']);
-            if ($activeCount === null) {
-                $employees = $hrmsFallback['data']['employees'] ?? null;
-                if (is_array($employees)) {
-                    $activeCount = count($employees);
-                }
-            }
-        } else {
-            $errors[] = 'HRMS active count';
+        $errors[] = 'Employee roster';
+    }
+
+    if (!empty($deviceSnList)) {
+        $deviceTotal = count($deviceSnList);
+    } else {
+        $deviceTotalResult = db_fetch_all($bd, 'SELECT COUNT(*) AS total FROM gcc_attendance_master.device_project_map');
+        if ($deviceTotalResult['ok'] && !empty($deviceTotalResult['rows'])) {
+            $deviceTotal = (int) ($deviceTotalResult['rows'][0]['total'] ?? 0);
         }
+    }
+
+    $deviceParams = [$startDate, $endDate, $startDate, $endDate];
+    $deviceTypes = 'ssss';
+    $firstDeviceClause = '';
+    $lastDeviceClause = '';
+    if ($deviceSnParam !== '') {
+        $firstDeviceClause = ' AND FIND_IN_SET(first_terminal_sn, ?)';
+        $lastDeviceClause = ' AND FIND_IN_SET(last_terminal_sn, ?)';
+        $deviceParams[] = $deviceSnParam;
+        $deviceParams[] = $deviceSnParam;
+        $deviceTypes .= 'ss';
+    }
+    $deviceActiveSql = 'SELECT COUNT(DISTINCT device_sn) AS total FROM (' .
+        'SELECT first_terminal_sn AS device_sn FROM gcc_attendance_master.employee_daily_punch ' .
+        'WHERE punch_date BETWEEN ? AND ? AND first_terminal_sn IS NOT NULL' . $firstDeviceClause .
+        ' UNION ALL ' .
+        'SELECT last_terminal_sn AS device_sn FROM gcc_attendance_master.employee_daily_punch ' .
+        'WHERE punch_date BETWEEN ? AND ? AND last_terminal_sn IS NOT NULL' . $lastDeviceClause .
+        ') t';
+    $deviceActiveResult = db_fetch_all($bd, $deviceActiveSql, $deviceTypes, $deviceParams);
+    if ($deviceActiveResult['ok'] && !empty($deviceActiveResult['rows'])) {
+        $deviceOnline = (int) ($deviceActiveResult['rows'][0]['total'] ?? 0);
+    } else {
+        $errors[] = 'Device punches';
     }
 
     $pulseDate = $endDate;
-    $pulseEnd = date_add_days($pulseDate, 1);
-
-    $badgeCountResult = attendance_api_get('attendance/badges/count', [
-        'startDate' => $pulseDate,
-        'endDate' => $pulseEnd,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-    ], 12);
-    if ($badgeCountResult['ok'] && is_array($badgeCountResult['data'])) {
-        $loggedCount = extract_count_value($badgeCountResult['data'], ['count', 'total', 'badgeCount']);
-    } else {
-        $errors[] = 'Logged in count';
+    $punchWhere = 'p.punch_date = ? AND (p.first_log IS NOT NULL OR p.last_log IS NOT NULL)';
+    $punchTypes = 's';
+    $punchParams = [$pulseDate];
+    if ($deviceSnParam !== '') {
+        $punchWhere .= ' AND (FIND_IN_SET(p.first_terminal_sn, ?) OR FIND_IN_SET(p.last_terminal_sn, ?))';
+        $punchParams[] = $deviceSnParam;
+        $punchParams[] = $deviceSnParam;
+        $punchTypes .= 'ss';
     }
 
-    $deviceStatusResult = attendance_api_get('devices/status/counts', [
-        'startDate' => $startDate,
-        'endDate' => $endDateParam,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-    ], 12);
-    if ($deviceStatusResult['ok'] && is_array($deviceStatusResult['data'])) {
-        $statusData = $deviceStatusResult['data'];
-        if (isset($statusData['counts']) && is_array($statusData['counts'])) {
-            $statusData = $statusData['counts'];
-        }
-        $deviceOnline = (int) ($statusData['totalActive'] ?? ($statusData['active'] ?? ($statusData['online'] ?? 0)));
-        $deviceTotal = (int) ($statusData['total']
-            ?? ($deviceOnline
-                + (int) ($statusData['totalInactive'] ?? ($statusData['inactive'] ?? ($statusData['offline'] ?? 0)))
-                + (int) ($statusData['totalUnknown'] ?? ($statusData['unknown'] ?? 0))));
-    } else {
-        $errors[] = 'Device status';
+    $badgeSql = 'SELECT p.emp_code, p.first_log, p.last_log, p.first_terminal_sn, p.last_terminal_sn, ' .
+        'NULLIF(d.Projectcode_utime, \'\') AS project_code, ' .
+        'COALESCE(NULLIF(h.emp_name, \'\'), NULLIF(h.name, \'\')) AS emp_name ' .
+        'FROM gcc_attendance_master.employee_daily_punch p ' .
+        'LEFT JOIN gcc_attendance_master.employee_att_daily d ' .
+        'ON d.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
+        'AND d.att_date = p.punch_date ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
+        'ON h.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
+        'WHERE ' . $punchWhere;
+    $badgeResult = db_fetch_all($bd, $badgeSql, $punchTypes, $punchParams);
+    $badgeRows = $badgeResult['ok'] ? $badgeResult['rows'] : [];
+    if (!$badgeResult['ok']) {
+        $errors[] = 'Daily punches';
     }
 
-    $badgeRows = [];
-    $badgeTotal = 0;
+    $badgeSampleCount = count($badgeRows);
+    $badgeTotal = $badgeSampleCount;
     $badgeSampled = false;
-    $badgeSampleCount = 0;
-    $badgeResult = attendance_api_get('attendance/badges/with-names', [
-        'startDate' => $pulseDate,
-        'endDate' => $pulseEnd,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-        'page' => 1,
-        'pageSize' => 200,
-    ], 18);
-    if ($badgeResult['ok'] && is_array($badgeResult['data'])) {
-        $badgeRows = is_array($badgeResult['data']['rows'] ?? null) ? $badgeResult['data']['rows'] : [];
-        $badgeSampleCount = count($badgeRows);
-        $badgeTotal = (int) ($badgeResult['data']['total'] ?? $badgeSampleCount);
-        $badgeSampled = $badgeTotal > $badgeSampleCount;
-    } else {
-        $errors[] = 'Badge details';
-    }
 
     $lateThreshold = 10 * 60;
     $earlyLeaveThreshold = 16 * 60;
@@ -216,13 +227,18 @@ if ($isAjax && $ajaxSection === 'summary') {
 
     $projectCounts = [];
     $recentRows = [];
+    $uniqueEmployees = [];
 
     foreach ($badgeRows as $row) {
         if (!is_array($row)) {
             continue;
         }
-        $firstMinutesValue = parse_time_minutes($row['firstLoginTime'] ?? null);
-        $lastMinutesValue = parse_time_minutes($row['lastLoginTime'] ?? null);
+        $empCode = trim((string) ($row['emp_code'] ?? ''));
+        if ($empCode !== '') {
+            $uniqueEmployees[$empCode] = true;
+        }
+        $firstMinutesValue = parse_time_minutes($row['first_log'] ?? null);
+        $lastMinutesValue = parse_time_minutes($row['last_log'] ?? null);
 
         if ($firstMinutesValue !== null) {
             $firstMinutes[] = $firstMinutesValue;
@@ -252,10 +268,7 @@ if ($isAjax && $ajaxSection === 'summary') {
             $completionCount++;
         }
 
-        $project = trim((string) ($row['lastLoginProjectName'] ?? ''));
-        if ($project === '') {
-            $project = trim((string) ($row['firstLoginProjectName'] ?? ''));
-        }
+        $project = trim((string) ($row['project_code'] ?? ''));
         if ($project === '') {
             $project = 'Unassigned';
         }
@@ -264,7 +277,7 @@ if ($isAjax && $ajaxSection === 'summary') {
         }
         $projectCounts[$project]++;
 
-        $lastTime = $row['lastLoginTime'] ?? $row['firstLoginTime'] ?? null;
+        $lastTime = $row['last_log'] ?? $row['first_log'] ?? null;
         $timestamp = null;
         if ($lastTime) {
             try {
@@ -274,13 +287,15 @@ if ($isAjax && $ajaxSection === 'summary') {
             }
         }
         $recentRows[] = [
-            'badge' => trim((string) ($row['badgeNumber'] ?? '')),
-            'name' => trim((string) ($row['name'] ?? '')),
+            'badge' => $empCode,
+            'name' => trim((string) ($row['emp_name'] ?? '')),
             'project' => $project,
             'time' => $lastTime ? (string) $lastTime : '',
             'timestamp' => $timestamp ?? 0,
         ];
     }
+
+    $loggedCount = count($uniqueEmployees);
 
     arsort($projectCounts);
     $projectLabels = [];
@@ -321,7 +336,7 @@ if ($isAjax && $ajaxSection === 'summary') {
     }
 
     $coveragePercent = null;
-    if ($activeCount !== null && $activeCount > 0 && $loggedCount !== null) {
+    if ($activeCount !== null && $activeCount > 0) {
         $coveragePercent = (int) round(($loggedCount / $activeCount) * 100);
     }
 
@@ -387,25 +402,32 @@ if ($isAjax && $ajaxSection === 'trend') {
     $errors = [];
     $labels = [];
     $values = [];
-    $dailyResult = attendance_api_get('attendance/daily/by-devices', [
-        'startDate' => $startDate,
-        'endDate' => $endDateParam,
-        'deviceSn' => $deviceSnParam !== '' ? $deviceSnParam : null,
-    ], 12);
-    if ($dailyResult['ok'] && is_array($dailyResult['data'])) {
-        $rows = $dailyResult['data']['rows'] ?? [];
+    if ($deviceSnParam !== '') {
+        $dailySql = 'SELECT punch_date AS date_key, COUNT(DISTINCT emp_code) AS total ' .
+            'FROM gcc_attendance_master.employee_daily_punch ' .
+            'WHERE punch_date BETWEEN ? AND ? ' .
+            'AND (first_log IS NOT NULL OR last_log IS NOT NULL) ' .
+            'AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?)) ' .
+            'GROUP BY punch_date';
+        $dailyResult = db_fetch_all($bd, $dailySql, 'ssss', [$startDate, $endDate, $deviceSnParam, $deviceSnParam]);
+    } else {
+        $dailySql = 'SELECT att_date AS date_key, COUNT(DISTINCT emp_code) AS total ' .
+            'FROM gcc_attendance_master.employee_att_daily ' .
+            'WHERE att_date BETWEEN ? AND ? ' .
+            'AND (is_delete = 0 OR is_delete IS NULL) ' .
+            'AND (is_deleted = 0 OR is_deleted IS NULL) ' .
+            'GROUP BY att_date';
+        $dailyResult = db_fetch_all($bd, $dailySql, 'ss', [$startDate, $endDate]);
+    }
+
+    if ($dailyResult['ok']) {
         $map = [];
-        if (is_array($rows)) {
-            foreach ($rows as $row) {
-                if (!is_array($row)) {
-                    continue;
-                }
-                $dateKey = trim((string) ($row['date'] ?? ''));
-                if ($dateKey === '') {
-                    continue;
-                }
-                $map[$dateKey] = (int) ($row['total'] ?? 0);
+        foreach ($dailyResult['rows'] as $row) {
+            $dateKey = trim((string) ($row['date_key'] ?? ''));
+            if ($dateKey === '') {
+                continue;
             }
+            $map[$dateKey] = (int) ($row['total'] ?? 0);
         }
         $series = build_date_series($startDate, $endDate);
         foreach ($series as $dateKey) {
@@ -446,21 +468,29 @@ if ($isAjax && $ajaxSection === 'trend') {
 if ($isAjax && $ajaxSection === 'devices') {
     $errors = [];
     $deviceCounts = [];
-    $deviceResult = attendance_api_get('attendance/counts', [
-        'groupBy' => 'deviceSn',
-        'startDate' => $startDate,
-        'endDate' => $endDateParam,
-    ], 12);
-    if ($deviceResult['ok'] && is_array($deviceResult['data'])) {
-        foreach ($deviceResult['data'] as $row) {
-            if (!is_array($row)) {
-                continue;
-            }
-            $sn = trim((string) ($row['value'] ?? ''));
+    $deviceParams = [$startDate, $endDate, $startDate, $endDate];
+    $deviceTypes = 'ssss';
+    $firstDeviceClause = '';
+    $lastDeviceClause = '';
+    if ($deviceSnParam !== '') {
+        $firstDeviceClause = ' AND FIND_IN_SET(first_terminal_sn, ?)';
+        $lastDeviceClause = ' AND FIND_IN_SET(last_terminal_sn, ?)';
+        $deviceParams[] = $deviceSnParam;
+        $deviceParams[] = $deviceSnParam;
+        $deviceTypes .= 'ss';
+    }
+    $deviceSql = 'SELECT device_sn, COUNT(*) AS total FROM (' .
+        'SELECT first_terminal_sn AS device_sn FROM gcc_attendance_master.employee_daily_punch ' .
+        'WHERE punch_date BETWEEN ? AND ? AND first_terminal_sn IS NOT NULL' . $firstDeviceClause .
+        ' UNION ALL ' .
+        'SELECT last_terminal_sn AS device_sn FROM gcc_attendance_master.employee_daily_punch ' .
+        'WHERE punch_date BETWEEN ? AND ? AND last_terminal_sn IS NOT NULL' . $lastDeviceClause .
+        ') t GROUP BY device_sn ORDER BY total DESC';
+    $deviceResult = db_fetch_all($bd, $deviceSql, $deviceTypes, $deviceParams);
+    if ($deviceResult['ok']) {
+        foreach ($deviceResult['rows'] as $row) {
+            $sn = trim((string) ($row['device_sn'] ?? ''));
             if ($sn === '') {
-                continue;
-            }
-            if (!empty($deviceSnList) && !in_array($sn, $deviceSnList, true)) {
                 continue;
             }
             $deviceCounts[$sn] = (int) ($row['total'] ?? 0);
@@ -494,6 +524,304 @@ if ($isAjax && $ajaxSection === 'devices') {
         'labels' => $labels,
         'values' => $values,
         'total' => array_sum($deviceCounts),
+    ];
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+if ($isAjax && $ajaxSection === 'departments') {
+    $errors = [];
+    $deptRoster = [];
+    $deptProjectRoster = [];
+    $projectNameMap = [];
+    $deptRosterSql = 'SELECT COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\') AS dept_name, ' .
+        'COUNT(*) AS total FROM gcc_attendance_master.hrmsvw_sync ' .
+        'GROUP BY COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\')';
+    $deptRosterResult = db_fetch_all($bd, $deptRosterSql);
+    if ($deptRosterResult['ok']) {
+        foreach ($deptRosterResult['rows'] as $row) {
+            $deptName = trim((string) ($row['dept_name'] ?? ''));
+            if ($deptName === '') {
+                $deptName = 'Unassigned';
+            }
+            $deptRoster[$deptName] = (int) ($row['total'] ?? 0);
+        }
+    } else {
+        $errors[] = 'Department roster';
+    }
+
+    $deptProjectSql = 'SELECT COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\') AS dept_name, ' .
+        'COALESCE(NULLIF(code, \'\'), \'Unassigned\') AS project_code, ' .
+        'MAX(NULLIF(name, \'\')) AS project_name, COUNT(*) AS total ' .
+        'FROM gcc_attendance_master.hrmsvw_sync ' .
+        'GROUP BY COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\'), COALESCE(NULLIF(code, \'\'), \'Unassigned\')';
+    $deptProjectResult = db_fetch_all($bd, $deptProjectSql);
+    if ($deptProjectResult['ok']) {
+        foreach ($deptProjectResult['rows'] as $row) {
+            $deptName = trim((string) ($row['dept_name'] ?? ''));
+            if ($deptName === '') {
+                $deptName = 'Unassigned';
+            }
+            $projectCode = trim((string) ($row['project_code'] ?? ''));
+            if ($projectCode === '') {
+                $projectCode = 'Unassigned';
+            }
+            $projectName = trim((string) ($row['project_name'] ?? ''));
+            if ($projectName !== '') {
+                $projectNameMap[$projectCode] = $projectName;
+            }
+            if (!isset($deptProjectRoster[$deptName])) {
+                $deptProjectRoster[$deptName] = [];
+            }
+            $deptProjectRoster[$deptName][$projectCode] = (int) ($row['total'] ?? 0);
+        }
+    } else {
+        $errors[] = 'Project roster';
+    }
+
+    $deptStats = [];
+    foreach ($deptRoster as $deptName => $count) {
+        $deptStats[$deptName] = [
+            'name' => $deptName,
+            'activeCount' => $count,
+            'employees' => [],
+            'lateCount' => 0,
+            'earlyLeaveCount' => 0,
+            'overtimeCount' => 0,
+            'completionCount' => 0,
+            'sampleCount' => 0,
+            'firstTotal' => 0,
+            'firstCount' => 0,
+            'lastTotal' => 0,
+            'lastCount' => 0,
+            'projects' => [],
+        ];
+    }
+
+    $punchWhere = 'p.punch_date = ? AND (p.first_log IS NOT NULL OR p.last_log IS NOT NULL)';
+    $punchTypes = 's';
+    $punchParams = [$endDate];
+    if ($deviceSnParam !== '') {
+        $punchWhere .= ' AND (FIND_IN_SET(p.first_terminal_sn, ?) OR FIND_IN_SET(p.last_terminal_sn, ?))';
+        $punchParams[] = $deviceSnParam;
+        $punchParams[] = $deviceSnParam;
+        $punchTypes .= 'ss';
+    }
+
+    $deptSql = 'SELECT p.emp_code, p.first_log, p.last_log, ' .
+        'COALESCE(NULLIF(d.Projectcode_utime, \'\'), NULLIF(h.code, \'\')) AS project_code, ' .
+        'COALESCE(NULLIF(h.dept_name, \'\'), NULLIF(d.department_name, \'\')) AS dept_name ' .
+        'FROM gcc_attendance_master.employee_daily_punch p ' .
+        'LEFT JOIN gcc_attendance_master.employee_att_daily d ' .
+        'ON d.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
+        'AND d.att_date = p.punch_date ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
+        'ON h.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
+        'WHERE ' . $punchWhere;
+    $deptResult = db_fetch_all($bd, $deptSql, $punchTypes, $punchParams);
+    $deptRows = $deptResult['ok'] ? $deptResult['rows'] : [];
+    if (!$deptResult['ok']) {
+        $errors[] = 'Department punches';
+    }
+
+    $lateThreshold = 10 * 60;
+    $earlyLeaveThreshold = 16 * 60;
+    $overtimeThreshold = 19 * 60;
+
+    foreach ($deptRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $deptName = trim((string) ($row['dept_name'] ?? ''));
+        if ($deptName === '') {
+            $deptName = 'Unassigned';
+        }
+        if (!isset($deptStats[$deptName])) {
+            $deptStats[$deptName] = [
+                'name' => $deptName,
+                'activeCount' => $deptRoster[$deptName] ?? null,
+                'employees' => [],
+                'lateCount' => 0,
+                'earlyLeaveCount' => 0,
+                'overtimeCount' => 0,
+                'completionCount' => 0,
+                'sampleCount' => 0,
+                'firstTotal' => 0,
+                'firstCount' => 0,
+                'lastTotal' => 0,
+                'lastCount' => 0,
+                'projects' => [],
+            ];
+        }
+
+        $deptStats[$deptName]['sampleCount']++;
+
+        $empCode = trim((string) ($row['emp_code'] ?? ''));
+        if ($empCode !== '') {
+            $deptStats[$deptName]['employees'][$empCode] = true;
+        }
+
+        $firstMinutesValue = parse_time_minutes($row['first_log'] ?? null);
+        $lastMinutesValue = parse_time_minutes($row['last_log'] ?? null);
+
+        if ($firstMinutesValue !== null) {
+            $deptStats[$deptName]['firstTotal'] += $firstMinutesValue;
+            $deptStats[$deptName]['firstCount']++;
+            if ($firstMinutesValue > $lateThreshold) {
+                $deptStats[$deptName]['lateCount']++;
+            }
+        }
+        if ($lastMinutesValue !== null) {
+            $deptStats[$deptName]['lastTotal'] += $lastMinutesValue;
+            $deptStats[$deptName]['lastCount']++;
+            if ($lastMinutesValue < $earlyLeaveThreshold) {
+                $deptStats[$deptName]['earlyLeaveCount']++;
+            }
+            if ($lastMinutesValue > $overtimeThreshold) {
+                $deptStats[$deptName]['overtimeCount']++;
+            }
+        }
+        if ($firstMinutesValue !== null && $lastMinutesValue !== null) {
+            $deptStats[$deptName]['completionCount']++;
+        }
+
+        $project = trim((string) ($row['project_code'] ?? ''));
+        if ($project === '') {
+            $project = 'Unassigned';
+        }
+        if (!isset($deptStats[$deptName]['projects'][$project])) {
+            $deptStats[$deptName]['projects'][$project] = 0;
+        }
+        $deptStats[$deptName]['projects'][$project]++;
+    }
+
+    $departments = [];
+    foreach ($deptStats as $deptName => $stats) {
+        $loggedCount = count($stats['employees']);
+        $coveragePercent = null;
+        if ($stats['activeCount'] !== null && $stats['activeCount'] > 0) {
+            $coveragePercent = (int) round(($loggedCount / $stats['activeCount']) * 100);
+        }
+        $absentCount = null;
+        if ($stats['activeCount'] !== null) {
+            $absentCount = max(0, $stats['activeCount'] - $loggedCount);
+        }
+
+        $completionRate = null;
+        if ($stats['sampleCount'] > 0) {
+            $completionRate = (int) round(($stats['completionCount'] / $stats['sampleCount']) * 100);
+        }
+
+        $avgFirst = null;
+        if ($stats['firstCount'] > 0) {
+            $avgFirst = (int) round($stats['firstTotal'] / $stats['firstCount']);
+        }
+        $avgLast = null;
+        if ($stats['lastCount'] > 0) {
+            $avgLast = (int) round($stats['lastTotal'] / $stats['lastCount']);
+        }
+
+        $projectCounts = $stats['projects'];
+        $projectRoster = $deptProjectRoster[$deptName] ?? [];
+        $projectKeys = array_unique(array_merge(array_keys($projectRoster), array_keys($projectCounts)));
+        $projectItems = [];
+        $projectTotalActive = 0;
+        $projectTotalLogged = 0;
+        $projectTotalAbsent = 0;
+        foreach ($projectKeys as $projectCode) {
+            $activeCount = (int) ($projectRoster[$projectCode] ?? 0);
+            $loggedProjectCount = (int) ($projectCounts[$projectCode] ?? 0);
+            $absentProjectCount = max(0, $activeCount - $loggedProjectCount);
+            $projectTotalActive += $activeCount;
+            $projectTotalLogged += $loggedProjectCount;
+            $projectTotalAbsent += $absentProjectCount;
+            $label = $projectCode;
+            if ($projectCode !== 'Unassigned' && isset($projectNameMap[$projectCode])) {
+                $label = $projectCode . ' - ' . $projectNameMap[$projectCode];
+            } elseif (isset($projectNameMap[$projectCode]) && $projectNameMap[$projectCode] !== '') {
+                $label = $projectNameMap[$projectCode];
+            }
+            $projectItems[] = [
+                'code' => $projectCode,
+                'label' => $label,
+                'activeCount' => $activeCount,
+                'loggedCount' => $loggedProjectCount,
+                'absentCount' => $absentProjectCount,
+            ];
+        }
+
+        usort($projectItems, function (array $a, array $b): int {
+            $absentCompare = ($b['absentCount'] ?? 0) <=> ($a['absentCount'] ?? 0);
+            if ($absentCompare !== 0) {
+                return $absentCompare;
+            }
+            return ($b['loggedCount'] ?? 0) <=> ($a['loggedCount'] ?? 0);
+        });
+
+        $projectLimit = 4;
+        $projectItemsLimited = array_slice($projectItems, 0, $projectLimit);
+        $projectItemsRemainder = array_slice($projectItems, $projectLimit);
+        if (!empty($projectItemsRemainder)) {
+            $otherActive = 0;
+            $otherLogged = 0;
+            $otherAbsent = 0;
+            foreach ($projectItemsRemainder as $item) {
+                $otherActive += (int) ($item['activeCount'] ?? 0);
+                $otherLogged += (int) ($item['loggedCount'] ?? 0);
+                $otherAbsent += (int) ($item['absentCount'] ?? 0);
+            }
+            $projectItemsLimited[] = [
+                'code' => 'Other',
+                'label' => 'Other',
+                'activeCount' => $otherActive,
+                'loggedCount' => $otherLogged,
+                'absentCount' => $otherAbsent,
+            ];
+        }
+
+        $departments[] = [
+            'name' => $deptName,
+            'kpis' => [
+                'activeCount' => $stats['activeCount'],
+                'loggedCount' => $loggedCount,
+                'coveragePercent' => $coveragePercent,
+                'absentCount' => $absentCount,
+            ],
+            'timeMetrics' => [
+                'lateCount' => $stats['lateCount'],
+                'earlyLeaveCount' => $stats['earlyLeaveCount'],
+                'overtimeCount' => $stats['overtimeCount'],
+                'avgFirst' => format_time_minutes($avgFirst),
+                'avgLast' => format_time_minutes($avgLast),
+                'completionRate' => $completionRate,
+            ],
+            'projects' => [
+                'items' => $projectItemsLimited,
+                'totalActive' => $projectTotalActive,
+                'totalLogged' => $projectTotalLogged,
+                'totalAbsent' => $projectTotalAbsent,
+            ],
+            'meta' => [
+                'sampleCount' => $stats['sampleCount'],
+            ],
+        ];
+    }
+
+    usort($departments, function (array $a, array $b): int {
+        return ($b['kpis']['loggedCount'] ?? 0) <=> ($a['kpis']['loggedCount'] ?? 0);
+    });
+
+    $payload = [
+        'ok' => true,
+        'errors' => array_values(array_unique($errors)),
+        'meta' => [
+            'pulseDate' => $endDate,
+            'departmentCount' => count($departments),
+        ],
+        'departments' => $departments,
     ];
 
     header('Content-Type: application/json; charset=utf-8');
@@ -690,6 +1018,178 @@ if ($isAjax && $ajaxSection === 'devices') {
     background: linear-gradient(120deg, transparent, rgba(255, 255, 255, 0.7), transparent);
     animation: hr-shimmer 1.5s infinite;
   }
+  .hr-pill-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+  .hr-dept-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+  }
+  .hr-dept-card {
+    position: relative;
+    border-radius: 20px;
+    padding: 1rem 1.1rem;
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.98), #ffffff);
+    box-shadow: var(--hr-shadow);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    overflow: hidden;
+  }
+  .hr-dept-card::before {
+    content: "";
+    position: absolute;
+    inset: -40% -20% auto auto;
+    width: 240px;
+    height: 240px;
+    background: radial-gradient(circle, var(--accent-soft, rgba(56, 189, 248, 0.25)), transparent 65%);
+    opacity: 0.9;
+  }
+  .hr-dept-card.is-low {
+    border-color: rgba(248, 113, 113, 0.4);
+    box-shadow: 0 20px 40px rgba(248, 113, 113, 0.2);
+  }
+  .hr-dept-header {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+  .hr-dept-title h5 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--hr-ink);
+  }
+  .hr-dept-sub {
+    font-size: 0.85rem;
+    color: var(--att-muted);
+  }
+  .hr-ring {
+    --value: 0;
+    width: 68px;
+    height: 68px;
+    border-radius: 50%;
+    background: conic-gradient(var(--accent, #38bdf8) calc(var(--value) * 1%), rgba(148, 163, 184, 0.2) 0);
+    display: grid;
+    place-items: center;
+    position: relative;
+  }
+  .hr-ring::after {
+    content: "";
+    position: absolute;
+    inset: 8px;
+    border-radius: 50%;
+    background: #ffffff;
+  }
+  .hr-ring span,
+  .hr-ring small {
+    position: relative;
+    z-index: 1;
+    display: block;
+    text-align: center;
+  }
+  .hr-ring span {
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--hr-ink);
+  }
+  .hr-ring small {
+    font-size: 0.65rem;
+    color: var(--att-muted);
+    margin-top: -2px;
+  }
+  .hr-coverage {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 0.35rem;
+  }
+  .hr-coverage-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--hr-ink-soft);
+  }
+  .hr-coverage-bar {
+    height: 8px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent, #38bdf8) calc(var(--coverage) * 1%), rgba(148, 163, 184, 0.25) 0);
+  }
+  .hr-chip-row {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .hr-chip {
+    padding: 0.28rem 0.6rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    background: rgba(15, 23, 42, 0.08);
+    color: var(--hr-ink);
+  }
+  .hr-chip.is-warn {
+    background: rgba(248, 113, 113, 0.2);
+    color: #b91c1c;
+  }
+  .hr-chip.is-ok {
+    background: rgba(16, 185, 129, 0.2);
+    color: #047857;
+  }
+  .hr-chip.is-neutral {
+    background: rgba(59, 130, 246, 0.18);
+    color: #1d4ed8;
+  }
+  .hr-dept-insights {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.5rem;
+  }
+  .hr-dept-card .hr-insight {
+    padding: 0.45rem 0.6rem;
+    font-size: 0.78rem;
+  }
+  .hr-dept-projects {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 0.5rem;
+  }
+  .hr-project-title {
+    font-weight: 700;
+    font-size: 0.85rem;
+    color: var(--hr-ink-soft);
+  }
+  .hr-project {
+    display: grid;
+    gap: 0.25rem;
+  }
+  .hr-project-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--hr-ink);
+  }
+  .hr-project-bar {
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent, #38bdf8) calc(var(--pct) * 1%), rgba(148, 163, 184, 0.25) 0);
+  }
+  .hr-dept-sample {
+    position: relative;
+    z-index: 1;
+    font-size: 0.72rem;
+    color: var(--att-muted);
+  }
   @keyframes hr-pop {
     from { transform: scale(0.96); color: #0ea5e9; }
     to { transform: scale(1); color: inherit; }
@@ -812,7 +1312,7 @@ if ($isAjax && $ajaxSection === 'devices') {
       <div class="hr-kpi">
         <h3>Device uptime</h3>
         <div class="hr-kpi-value" id="kpiDevices">-</div>
-        <div class="hr-kpi-sub" id="kpiDevicesSub">Online / total</div>
+        <div class="hr-kpi-sub" id="kpiDevicesSub">Active / total devices</div>
       </div>
     </div>
 
@@ -882,6 +1382,27 @@ if ($isAjax && $ajaxSection === 'devices') {
           <canvas id="completionChart"></canvas>
         </div>
       </div>
+
+      <div class="card hr-card">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <div>
+            <h4>Department focus</h4>
+            <p class="text-muted mb-2">All core insights by department with project mix.</p>
+          </div>
+          <div class="hr-pill-row">
+            <span class="hr-pill" id="deptCountPill">Departments: -</span>
+            <span class="hr-pill" id="deptPulsePill">Pulse: <?= h($endDate) ?></span>
+          </div>
+        </div>
+        <div class="hr-dept-grid" id="deptInsights">
+          <div class="hr-dept-card">
+            <div class="hr-skeleton" style="height: 200px;"></div>
+          </div>
+          <div class="hr-dept-card">
+            <div class="hr-skeleton" style="height: 200px;"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </section>
@@ -905,6 +1426,16 @@ if ($isAjax && $ajaxSection === 'devices') {
       teal: '#14b8a6',
       rose: '#f43f5e'
     };
+    const accentPalette = [
+      palette.blue,
+      palette.orange,
+      palette.gold,
+      palette.violet,
+      palette.teal,
+      palette.rose,
+      '#22c55e',
+      '#0ea5e9'
+    ];
 
     const setText = (id, value) => {
       const el = document.getElementById(id);
@@ -918,6 +1449,19 @@ if ($isAjax && $ajaxSection === 'devices') {
       const el = document.getElementById(id);
       if (!el) return;
       el.textContent = text;
+    };
+
+    const hexToRgba = (hex, alpha) => {
+      if (!hex) return `rgba(56, 189, 248, ${alpha})`;
+      const cleaned = hex.replace('#', '');
+      const full = cleaned.length === 3
+        ? cleaned.split('').map((ch) => ch + ch).join('')
+        : cleaned;
+      if (full.length !== 6) return `rgba(56, 189, 248, ${alpha})`;
+      const r = parseInt(full.slice(0, 2), 16);
+      const g = parseInt(full.slice(2, 4), 16);
+      const b = parseInt(full.slice(4, 6), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     };
 
     const createLineChart = (ctx, labels, values) => {
@@ -1069,19 +1613,17 @@ if ($isAjax && $ajaxSection === 'devices') {
       });
     };
 
-    const renderInsights = (summary) => {
-      const list = document.getElementById('insightList');
-      if (!list) return;
-      list.innerHTML = '';
-
+    const buildInsightLines = (summary) => {
       const insights = [];
-      const coverage = summary.kpis.coveragePercent;
-      const late = summary.timeMetrics.lateCount;
-      const early = summary.timeMetrics.earlyLeaveCount;
-      const overtime = summary.timeMetrics.overtimeCount;
-      const completion = summary.timeMetrics.completionRate;
+      const kpis = summary.kpis || {};
+      const timeMetrics = summary.timeMetrics || {};
+      const coverage = kpis.coveragePercent;
+      const late = timeMetrics.lateCount ?? 0;
+      const early = timeMetrics.earlyLeaveCount ?? 0;
+      const overtime = timeMetrics.overtimeCount ?? 0;
+      const completion = timeMetrics.completionRate;
 
-      if (coverage !== null) {
+      if (coverage !== null && coverage !== undefined) {
         insights.push(`Coverage at ${coverage}%. ${coverage < 70 ? 'Needs attention.' : 'Healthy range.'}`);
       } else {
         insights.push('Coverage data unavailable. Check HRMS or attendance API.');
@@ -1091,15 +1633,175 @@ if ($isAjax && $ajaxSection === 'devices') {
       insights.push(`Early leaves: ${early}. ${early > 8 ? 'Review shift adherence.' : 'Stable departures.'}`);
       insights.push(`Overtime: ${overtime}. ${overtime > 6 ? 'Check workload balance.' : 'Overtime controlled.'}`);
 
-      if (completion !== null) {
+      if (completion !== null && completion !== undefined) {
         insights.push(`Completeness: ${completion}% of badges have both in/out.`);
+      } else {
+        insights.push('Completeness data unavailable.');
       }
 
+      return insights;
+    };
+
+    const renderInsights = (summary, listEl) => {
+      const list = listEl || document.getElementById('insightList');
+      if (!list) return;
+      list.innerHTML = '';
+      const insights = buildInsightLines(summary || {});
       insights.slice(0, 5).forEach((text) => {
         const item = document.createElement('div');
         item.className = 'hr-insight';
         item.textContent = text;
         list.appendChild(item);
+      });
+    };
+
+    const createChip = (label, value, threshold) => {
+      const chip = document.createElement('div');
+      const numeric = Number.isFinite(value) ? value : 0;
+      let state = 'is-neutral';
+      if (threshold !== null && threshold !== undefined) {
+        state = numeric > threshold ? 'is-warn' : 'is-ok';
+      }
+      chip.className = `hr-chip ${state}`;
+      chip.textContent = `${label}: ${numeric}`;
+      return chip;
+    };
+
+    const renderDepartments = (data) => {
+      const container = document.getElementById('deptInsights');
+      if (!container) return;
+      container.innerHTML = '';
+
+      const departments = (data && data.departments) ? data.departments : [];
+
+      setPill('deptCountPill', `Departments: ${departments.length}`);
+      if (data && data.meta && data.meta.pulseDate) {
+        setPill('deptPulsePill', `Pulse: ${data.meta.pulseDate}`);
+      }
+
+      if (departments.length === 0) {
+        container.innerHTML = '<div class="text-muted">No department insights available.</div>';
+        return;
+      }
+
+      departments.forEach((dept, index) => {
+        const accent = accentPalette[index % accentPalette.length];
+        const card = document.createElement('div');
+        card.className = 'hr-dept-card';
+        card.style.setProperty('--accent', accent);
+        card.style.setProperty('--accent-soft', hexToRgba(accent, 0.25));
+
+        const kpis = dept.kpis || {};
+        const timeMetrics = dept.timeMetrics || {};
+        const logged = kpis.loggedCount ?? 0;
+        const active = (kpis.activeCount !== null && kpis.activeCount !== undefined) ? kpis.activeCount : '-';
+        const coverage = kpis.coveragePercent;
+        const coverageValue = (coverage !== null && coverage !== undefined) ? coverage : 0;
+
+        if (coverage !== null && coverage !== undefined && coverage < 70) {
+          card.classList.add('is-low');
+        }
+
+        const header = document.createElement('div');
+        header.className = 'hr-dept-header';
+        const titleWrap = document.createElement('div');
+        titleWrap.className = 'hr-dept-title';
+        const title = document.createElement('h5');
+        title.textContent = dept.name || 'Unassigned';
+        const subtitle = document.createElement('div');
+        subtitle.className = 'hr-dept-sub';
+        subtitle.textContent = `Logged ${logged} / ${active}`;
+        titleWrap.appendChild(title);
+        titleWrap.appendChild(subtitle);
+
+        const ring = document.createElement('div');
+        ring.className = 'hr-ring';
+        const completion = timeMetrics.completionRate;
+        const completionValue = Number.isFinite(completion) ? completion : null;
+        ring.style.setProperty('--value', completionValue ?? 0);
+        const ringValue = document.createElement('span');
+        ringValue.textContent = completionValue !== null ? `${completionValue}%` : '--';
+        const ringLabel = document.createElement('small');
+        ringLabel.textContent = 'Complete';
+        ring.appendChild(ringValue);
+        ring.appendChild(ringLabel);
+
+        header.appendChild(titleWrap);
+        header.appendChild(ring);
+
+        const coverageWrap = document.createElement('div');
+        coverageWrap.className = 'hr-coverage';
+        const coverageLabel = document.createElement('div');
+        coverageLabel.className = 'hr-coverage-label';
+        coverageLabel.textContent = `Coverage ${coverage !== null && coverage !== undefined ? coverage + '%' : 'n/a'}`;
+        const coverageBar = document.createElement('div');
+        coverageBar.className = 'hr-coverage-bar';
+        coverageBar.style.setProperty('--coverage', coverageValue);
+        coverageWrap.appendChild(coverageLabel);
+        coverageWrap.appendChild(coverageBar);
+
+        const chipRow = document.createElement('div');
+        chipRow.className = 'hr-chip-row';
+        chipRow.appendChild(createChip('Late', timeMetrics.lateCount, 10));
+        chipRow.appendChild(createChip('Early', timeMetrics.earlyLeaveCount, 8));
+        chipRow.appendChild(createChip('Overtime', timeMetrics.overtimeCount, 6));
+
+        const insightWrap = document.createElement('div');
+        insightWrap.className = 'hr-dept-insights';
+        renderInsights({ kpis, timeMetrics }, insightWrap);
+
+        const projectWrap = document.createElement('div');
+        projectWrap.className = 'hr-dept-projects';
+        const projectTitle = document.createElement('div');
+        projectTitle.className = 'hr-project-title';
+        projectTitle.textContent = 'Project mix';
+        projectWrap.appendChild(projectTitle);
+
+        const projectLabels = (dept.projects && dept.projects.labels) ? dept.projects.labels : [];
+        const projectCounts = (dept.projects && dept.projects.counts) ? dept.projects.counts : [];
+        const projectTotal = (dept.projects && Number.isFinite(dept.projects.total))
+          ? dept.projects.total
+          : projectCounts.reduce((sum, val) => sum + (Number(val) || 0), 0);
+
+        if (projectLabels.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'text-muted';
+          empty.textContent = 'No project breakdown available.';
+          projectWrap.appendChild(empty);
+        } else {
+          projectLabels.forEach((label, idx) => {
+            const count = Number(projectCounts[idx]) || 0;
+            const pct = projectTotal > 0 ? Math.round((count / projectTotal) * 100) : 0;
+            const project = document.createElement('div');
+            project.className = 'hr-project';
+            const head = document.createElement('div');
+            head.className = 'hr-project-head';
+            const name = document.createElement('span');
+            name.textContent = label;
+            const value = document.createElement('span');
+            value.textContent = count;
+            head.appendChild(name);
+            head.appendChild(value);
+            const bar = document.createElement('div');
+            bar.className = 'hr-project-bar';
+            bar.style.setProperty('--pct', pct);
+            project.appendChild(head);
+            project.appendChild(bar);
+            projectWrap.appendChild(project);
+          });
+        }
+
+        const sampleNote = document.createElement('div');
+        sampleNote.className = 'hr-dept-sample';
+        sampleNote.textContent = `Pulse sample: ${dept.meta && dept.meta.sampleCount ? dept.meta.sampleCount : 0}`;
+
+        card.appendChild(header);
+        card.appendChild(coverageWrap);
+        card.appendChild(chipRow);
+        card.appendChild(insightWrap);
+        card.appendChild(projectWrap);
+        card.appendChild(sampleNote);
+        container.appendChild(card);
       });
     };
 
@@ -1218,6 +1920,20 @@ if ($isAjax && $ajaxSection === 'devices') {
         });
     };
 
+    const loadDepartments = () => {
+      fetchSection('departments')
+        .then((data) => {
+          if (!data) return;
+          renderDepartments(data);
+        })
+        .catch(() => {
+          const container = document.getElementById('deptInsights');
+          if (container) {
+            container.innerHTML = '<div class="text-muted">Department insights unavailable.</div>';
+          }
+        });
+    };
+
     const bindQuickRanges = () => {
       const buttons = document.querySelectorAll('[data-range]');
       buttons.forEach((button) => {
@@ -1280,6 +1996,7 @@ if ($isAjax && $ajaxSection === 'devices') {
     loadSummary();
     loadTrend();
     loadDevices();
+    loadDepartments();
   });
 </script>
 
