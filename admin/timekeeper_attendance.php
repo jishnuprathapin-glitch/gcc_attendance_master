@@ -309,6 +309,10 @@ function render_attendance_results(array $context): string {
             <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last30DaysUrl) ?>">Last 30 days</a>
             <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last60DaysUrl) ?>">Last 60 days</a>
           </div>
+          <div class="override-actions">
+            <button type="button" class="btn btn-sm btn-success js-save-overrides">Save overrides</button>
+            <span class="text-muted small override-save-status" aria-live="polite"></span>
+          </div>
         </div>
       </div>
       <?php if ($totalPages > 1): ?>
@@ -457,8 +461,32 @@ function render_attendance_results(array $context): string {
                     <td class="day-col <?= h($dayClass) ?> col-extra col-login"><?= h(format_time_value($firstLog)) ?></td>
                     <td class="day-col <?= h($dayClass) ?> col-extra col-logout"><?= h(format_time_value($lastLog)) ?></td>
                     <td class="day-col <?= h($dayClass) ?> col-extra col-work-hrs"><?= h($workHours) ?></td>
-                    <td class="day-col <?= h($dayClass) ?> col-extra col-override-hrs<?= $overrideClass ?>"><?= h($overrideHours) ?></td>
-                    <td class="day-col <?= h($dayClass) ?> col-extra col-override-code<?= $overrideClass ?>"><?= h($overrideCode) ?></td>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-override-hrs<?= $overrideClass ?>">
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        class="override-input override-hours"
+                        value="<?= h($overrideHours) ?>"
+                        data-override-key="<?= h($empCode . '|' . $date) ?>"
+                        data-override-field="hours"
+                        data-emp-code="<?= h($empCode) ?>"
+                        data-att-date="<?= h($date) ?>"
+                        data-original="<?= h($overrideHours) ?>"
+                      >
+                    </td>
+                    <td class="day-col <?= h($dayClass) ?> col-extra col-override-code<?= $overrideClass ?>">
+                      <input
+                        type="text"
+                        class="override-input override-code"
+                        value="<?= h($overrideCode) ?>"
+                        data-override-key="<?= h($empCode . '|' . $date) ?>"
+                        data-override-field="code"
+                        data-emp-code="<?= h($empCode) ?>"
+                        data-att-date="<?= h($date) ?>"
+                        data-original="<?= h($overrideCode) ?>"
+                      >
+                    </td>
                     <td class="day-col <?= h($dayClass) ?> col-final-work-code"><?= h($finalWorkCode) ?></td>
                     <td class="day-col <?= h($dayClass) ?> col-final-work-hrs"><?= h($finalWorkHours) ?></td>
                   <?php endforeach; ?>
@@ -1035,7 +1063,154 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     if (!ensure_timekeeper_project_map_table($bd)) {
         $loadError = 'Unable to load project access configuration.';
     } else {
-        if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_project_mapping') {
+        $rawBody = '';
+        $jsonPayload = null;
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            $rawBody = file_get_contents('php://input');
+            if ($rawBody !== '') {
+                $decoded = json_decode($rawBody, true);
+                if (is_array($decoded)) {
+                    $jsonPayload = $decoded;
+                }
+            }
+        }
+        $action = $jsonPayload['action'] ?? ($_POST['action'] ?? '');
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'save_inline_overrides') {
+            header('Content-Type: application/json; charset=utf-8');
+            header('Cache-Control: no-store');
+            if (!verify_csrf($jsonPayload['csrf'] ?? null)) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'message' => 'Invalid request token.'], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+            if (!ensure_attendance_override_table($bd)) {
+                http_response_code(500);
+                echo json_encode(['ok' => false, 'message' => 'Override table not available.'], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+            $changes = $jsonPayload['changes'] ?? null;
+            if (!is_array($changes)) {
+                http_response_code(400);
+                echo json_encode(['ok' => false, 'message' => 'Invalid changes payload.'], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+
+            $userEmail = trim((string) ($_SESSION['user_email'] ?? ''));
+            $userName = trim((string) ($_SESSION['user_name'] ?? ''));
+            $changeDate = gmdate('Y-m-d H:i:s');
+            $insertSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
+                '(emp_code, att_date, override_work_hours, override_work_code, override_change_date, ' .
+                'override_changed_by_email, override_changed_by_name, override_is_approved, ' .
+                'override_approved_by_email, override_approved_by_name, override_approved_date) ' .
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
+                'ON DUPLICATE KEY UPDATE ' .
+                'override_work_hours = VALUES(override_work_hours), ' .
+                'override_work_code = VALUES(override_work_code), ' .
+                'override_change_date = VALUES(override_change_date), ' .
+                'override_changed_by_email = VALUES(override_changed_by_email), ' .
+                'override_changed_by_name = VALUES(override_changed_by_name), ' .
+                'override_is_approved = 0, ' .
+                'override_approved_by_email = NULL, ' .
+                'override_approved_by_name = NULL, ' .
+                'override_approved_date = NULL';
+            $deleteSql = 'DELETE FROM `gcc_attendance_master`.`employee_att_daily_overrides` WHERE emp_code = ? AND att_date = ?';
+            $insertStmt = $bd->prepare($insertSql);
+            $deleteStmt = $bd->prepare($deleteSql);
+            if (!$insertStmt || !$deleteStmt) {
+                http_response_code(500);
+                echo json_encode(['ok' => false, 'message' => 'Unable to prepare override update.'], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+
+            $errors = [];
+            $updated = 0;
+            $deleted = 0;
+            $seen = [];
+            foreach ($changes as $change) {
+                if (!is_array($change)) {
+                    continue;
+                }
+                $empCode = trim((string) ($change['empCode'] ?? ''));
+                $attDate = trim((string) ($change['attDate'] ?? ''));
+                if ($empCode === '' || $attDate === '' || !preg_match('/^\\d{4}-\\d{2}-\\d{2}$/', $attDate)) {
+                    $errors[] = 'Invalid employee/date in request.';
+                    continue;
+                }
+                $key = $empCode . '|' . $attDate;
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+
+                $hoursRaw = $change['overrideWorkHours'] ?? null;
+                $hours = null;
+                if ($hoursRaw !== null && $hoursRaw !== '') {
+                    if (!is_numeric($hoursRaw)) {
+                        $errors[] = 'Invalid override hours for ' . $empCode . ' on ' . $attDate . '.';
+                        continue;
+                    }
+                    $hours = number_format((float) $hoursRaw, 2, '.', '');
+                }
+
+                $code = trim((string) ($change['overrideWorkCode'] ?? ''));
+                if ($code === '') {
+                    $code = null;
+                }
+
+                if ($hours === null && $code === null) {
+                    $deleteStmt->bind_param('ss', $empCode, $attDate);
+                    if ($deleteStmt->execute()) {
+                        $deleted++;
+                    } else {
+                        $errors[] = 'Unable to clear override for ' . $empCode . ' on ' . $attDate . '.';
+                    }
+                    continue;
+                }
+
+                $approved = 0;
+                $approvedByEmail = null;
+                $approvedByName = null;
+                $approvedDate = null;
+                $emailParam = $userEmail !== '' ? $userEmail : null;
+                $nameParam = $userName !== '' ? $userName : null;
+                $insertStmt->bind_param(
+                    'sssssssisss',
+                    $empCode,
+                    $attDate,
+                    $hours,
+                    $code,
+                    $changeDate,
+                    $emailParam,
+                    $nameParam,
+                    $approved,
+                    $approvedByEmail,
+                    $approvedByName,
+                    $approvedDate
+                );
+                if ($insertStmt->execute()) {
+                    $updated++;
+                } else {
+                    $errors[] = 'Unable to save override for ' . $empCode . ' on ' . $attDate . '.';
+                }
+            }
+            $insertStmt->close();
+            $deleteStmt->close();
+
+            $ok = empty($errors);
+            if (!$ok) {
+                http_response_code(400);
+            }
+            echo json_encode([
+                'ok' => $ok,
+                'updated' => $updated,
+                'deleted' => $deleted,
+                'errors' => $errors,
+            ], JSON_UNESCAPED_SLASHES);
+            exit;
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'save_project_mapping') {
             if (!verify_csrf($_POST['csrf'] ?? null)) {
                 $mappingError = 'Invalid request token.';
             } else {
@@ -1789,6 +1964,31 @@ include __DIR__ . '/include/layout_top.php';
     flex-wrap: wrap;
     justify-content: flex-end;
   }
+  .override-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .override-input {
+    width: 100%;
+    min-width: 64px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    border: 1px solid rgba(15, 23, 42, 0.2);
+    background: transparent;
+    font-size: 0.78rem;
+    text-align: center;
+  }
+  .override-input:focus {
+    outline: none;
+    background: #fff;
+    border-color: rgba(59, 130, 246, 0.6);
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+  }
+  .override-input.is-dirty {
+    border-color: rgba(249, 115, 22, 0.7);
+    background: rgba(255, 237, 213, 0.7);
+  }
   .attendance-pager .pager-btn {
     border: none;
     padding: 0.45rem 0.9rem;
@@ -2122,6 +2322,10 @@ include __DIR__ . '/include/layout_top.php';
             <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last30DaysUrl ?>">Last 30 days</a>
             <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last60DaysUrl ?>">Last 60 days</a>
           </div>
+          <div class="override-actions">
+            <button type="button" class="btn btn-sm btn-success js-save-overrides">Save overrides</button>
+            <span class="text-muted small override-save-status" aria-live="polite"></span>
+          </div>
         </div>
       </div>
       <?php if ($totalPages > 1): ?>
@@ -2270,8 +2474,32 @@ include __DIR__ . '/include/layout_top.php';
                     <td class="day-col <?= $dayClass ?> col-extra col-login"><?= h(format_time_value($firstLog)) ?></td>
                     <td class="day-col <?= $dayClass ?> col-extra col-logout"><?= h(format_time_value($lastLog)) ?></td>
                     <td class="day-col <?= $dayClass ?> col-extra col-work-hrs"><?= h($workHours) ?></td>
-                    <td class="day-col <?= $dayClass ?> col-extra col-override-hrs<?= $overrideClass ?>"><?= h($overrideHours) ?></td>
-                    <td class="day-col <?= $dayClass ?> col-extra col-override-code<?= $overrideClass ?>"><?= h($overrideCode) ?></td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-override-hrs<?= $overrideClass ?>">
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        class="override-input override-hours"
+                        value="<?= h($overrideHours) ?>"
+                        data-override-key="<?= h($empCode . '|' . $date) ?>"
+                        data-override-field="hours"
+                        data-emp-code="<?= h($empCode) ?>"
+                        data-att-date="<?= h($date) ?>"
+                        data-original="<?= h($overrideHours) ?>"
+                      >
+                    </td>
+                    <td class="day-col <?= $dayClass ?> col-extra col-override-code<?= $overrideClass ?>">
+                      <input
+                        type="text"
+                        class="override-input override-code"
+                        value="<?= h($overrideCode) ?>"
+                        data-override-key="<?= h($empCode . '|' . $date) ?>"
+                        data-override-field="code"
+                        data-emp-code="<?= h($empCode) ?>"
+                        data-att-date="<?= h($date) ?>"
+                        data-original="<?= h($overrideCode) ?>"
+                      >
+                    </td>
                     <td class="day-col <?= $dayClass ?> col-final-work-code"><?= h($finalWorkCode) ?></td>
                     <td class="day-col <?= $dayClass ?> col-final-work-hrs"><?= h($finalWorkHours) ?></td>
                   <?php endforeach; ?>
@@ -2660,6 +2888,121 @@ include __DIR__ . '/include/layout_top.php';
           window.location.href = buildPagerUrl(target || 1, Number(perSelect.value));
         });
       }
+    });
+
+    const overrideCsrf = <?= json_encode(csrf_token()) ?>;
+    const overrideInputs = Array.from(document.querySelectorAll('.override-input'));
+    const overrideButtons = Array.from(document.querySelectorAll('.js-save-overrides'));
+    const overrideStatusEls = Array.from(document.querySelectorAll('.override-save-status'));
+
+    const setOverrideStatus = (message, isError = false) => {
+      overrideStatusEls.forEach((el) => {
+        el.textContent = message;
+        el.style.color = isError ? '#b91c1c' : '';
+      });
+    };
+
+    const updateDirtyState = (input) => {
+      const original = String(input.dataset.original || '').trim();
+      const current = String(input.value || '').trim();
+      input.classList.toggle('is-dirty', current !== original);
+    };
+
+    overrideInputs.forEach((input) => {
+      updateDirtyState(input);
+      input.addEventListener('input', () => updateDirtyState(input));
+      input.addEventListener('change', () => updateDirtyState(input));
+    });
+
+    const collectOverrideChanges = () => {
+      const groups = new Map();
+      overrideInputs.forEach((input) => {
+        const key = input.dataset.overrideKey || '';
+        if (key === '') {
+          return;
+        }
+        if (!groups.has(key)) {
+          groups.set(key, { hours: null, code: null });
+        }
+        const entry = groups.get(key);
+        if (input.dataset.overrideField === 'hours') {
+          entry.hours = input;
+        } else if (input.dataset.overrideField === 'code') {
+          entry.code = input;
+        }
+      });
+
+      const changes = [];
+      groups.forEach((entry) => {
+        const hoursInput = entry.hours;
+        const codeInput = entry.code;
+        const hoursValue = hoursInput ? String(hoursInput.value || '').trim() : '';
+        const codeValue = codeInput ? String(codeInput.value || '').trim() : '';
+        const hoursOriginal = hoursInput ? String(hoursInput.dataset.original || '').trim() : '';
+        const codeOriginal = codeInput ? String(codeInput.dataset.original || '').trim() : '';
+        if (hoursValue === hoursOriginal && codeValue === codeOriginal) {
+          return;
+        }
+        const empCode = hoursInput?.dataset.empCode || codeInput?.dataset.empCode || '';
+        const attDate = hoursInput?.dataset.attDate || codeInput?.dataset.attDate || '';
+        if (!empCode || !attDate) {
+          return;
+        }
+        changes.push({
+          empCode,
+          attDate,
+          overrideWorkHours: hoursValue === '' ? null : hoursValue,
+          overrideWorkCode: codeValue === '' ? null : codeValue,
+        });
+      });
+      return changes;
+    };
+
+    const setButtonsDisabled = (disabled) => {
+      overrideButtons.forEach((btn) => {
+        btn.disabled = disabled;
+      });
+    };
+
+    const saveOverrides = () => {
+      const changes = collectOverrideChanges();
+      if (!changes.length) {
+        setOverrideStatus('No changes to save.');
+        return;
+      }
+      setButtonsDisabled(true);
+      setOverrideStatus('Saving...');
+      fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_inline_overrides',
+          csrf: overrideCsrf,
+          changes,
+        }),
+        credentials: 'same-origin',
+      })
+        .then((response) => response.json().catch(() => null))
+        .then((data) => {
+          if (!data || data.ok !== true) {
+            const message = data?.message || (Array.isArray(data?.errors) ? data.errors[0] : '') || 'Unable to save overrides.';
+            setOverrideStatus(message, true);
+            setButtonsDisabled(false);
+            return;
+          }
+          setOverrideStatus('Overrides saved. Reloading...');
+          window.setTimeout(() => {
+            window.location.reload();
+          }, 600);
+        })
+        .catch(() => {
+          setOverrideStatus('Unable to save overrides.', true);
+          setButtonsDisabled(false);
+        });
+    };
+
+    overrideButtons.forEach((btn) => {
+      btn.addEventListener('click', saveOverrides);
     });
   });
 </script>
