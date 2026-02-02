@@ -1573,104 +1573,6 @@ if ($isAjax && $ajaxSection === 'logged-badges') {
     exit;
 }
 
-if ($isAjax && $ajaxSection === 'active-devices') {
-    $apiErrors = [];
-    $deviceCountsOk = false;
-    $deviceCounts = [];
-    if ($deviceScope === 'none') {
-        $deviceCountsOk = true;
-    } else {
-        $deviceCountsResult = attendance_api_get('attendance/counts', [
-            'groupBy' => 'deviceSn',
-            'startDate' => $startDateParam,
-            'endDate' => $endDateParam,
-        ]);
-        if ($deviceCountsResult['ok'] && is_array($deviceCountsResult['data'])) {
-            $deviceCountsOk = true;
-            foreach ($deviceCountsResult['data'] as $row) {
-                if (!is_array($row)) {
-                    continue;
-                }
-                $sn = trim((string) ($row['value'] ?? ''));
-                if ($sn === '') {
-                    continue;
-                }
-                if (!empty($deviceSnList) && !in_array($sn, $deviceSnList, true)) {
-                    continue;
-                }
-                $deviceCounts[$sn] = (int) ($row['total'] ?? 0);
-            }
-        } else {
-            $apiErrors[] = 'Project counts';
-        }
-    }
-
-    arsort($deviceCounts);
-    $projectSummary = build_project_device_summary($deviceCounts, $deviceMap, $deviceTotalsByProject);
-    $activeDeviceCount = $projectSummary['count'];
-    $activeDeviceMeta = $projectSummary['meta'];
-    $activeDeviceMetaIsList = false;
-
-    $employeeCountsOk = false;
-    $employeeSummary = ['count' => 0, 'meta' => '', 'projects' => []];
-    if ($deviceScope === 'none') {
-        $employeeCountsOk = true;
-    } else {
-        $loggedBadgesAll = load_logged_in_badges(
-            $startDateParam,
-            $endDateParam,
-            $deviceSnParam,
-            false,
-            1,
-            200,
-            true
-        );
-        if ($loggedBadgesAll['ok']) {
-            $employeeCountsOk = true;
-            $employeeSummary = build_project_badge_summary(
-                $loggedBadgesAll['rows'],
-                $projectCodeById,
-                $deviceMap
-            );
-        } else {
-            $apiErrors[] = 'Employee counts';
-        }
-    }
-
-    if ($deviceScope === 'none') {
-        $activeDeviceMeta = $deviceScopeNote !== '' ? $deviceScopeNote : 'No devices selected.';
-    } elseif ($deviceCountsOk && $employeeCountsOk) {
-        $activeDeviceMeta = build_project_device_employee_meta($projectSummary, $employeeSummary);
-        $activeDeviceMetaIsList = ($activeDeviceMeta !== 'No devices with punches');
-    } elseif ($deviceCountsOk) {
-        $activeDeviceMeta = 'Devices: ' . $projectSummary['meta'] . ' | Employees: unavailable';
-    } elseif ($employeeCountsOk) {
-        $activeDeviceMeta = 'Employees: ' . $employeeSummary['meta'] . ' | Devices: unavailable';
-    } else {
-        $activeDeviceMeta = 'Project counts unavailable';
-    }
-
-    $activeDeviceCountText = $deviceCountsOk ? (string) $activeDeviceCount : '-';
-    $activeDeviceLabel = 'Projects with punches';
-    if ($activeDeviceMetaIsList) {
-        $activeDeviceLabel .= ' (Devices active/total / Employees)';
-    }
-
-    $payload = [
-        'errors' => array_values(array_unique($apiErrors)),
-        'activeDevices' => [
-            'activeDeviceCountText' => $activeDeviceCountText,
-            'activeDeviceLabel' => $activeDeviceLabel,
-            'activeDeviceMeta' => $activeDeviceMeta,
-        ],
-    ];
-
-    header('Content-Type: application/json; charset=utf-8');
-    header('Cache-Control: no-store');
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-    exit;
-}
-
 if ($isAjax && $ajaxSection === 'device-status') {
     $apiErrors = [];
     $deviceStatusOk = false;
@@ -1915,85 +1817,6 @@ if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
         exit;
     }
 
-    if ($ajaxSection === 'insights-momentum') {
-        $errors = [];
-        $startObj = DateTimeImmutable::createFromFormat('Y-m-d', $startDate);
-        $endObj = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
-        $rangeDays = 1;
-        if ($startObj instanceof DateTimeImmutable && $endObj instanceof DateTimeImmutable) {
-            $rangeDays = max(1, $startObj->diff($endObj)->days + 1);
-        }
-        $prevEndObj = $startObj instanceof DateTimeImmutable ? $startObj->modify('-1 day') : null;
-        $prevStartObj = $prevEndObj ? $prevEndObj->modify('-' . ($rangeDays - 1) . ' days') : null;
-
-        $dailySql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS employee_count ' .
-            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
-            ' GROUP BY att_date ORDER BY att_date';
-        $currentResult = db_fetch_all($bd, $dailySql, $attTypes, $attParams);
-        $currentTotal = 0;
-        if ($currentResult['ok']) {
-            foreach ($currentResult['rows'] as $row) {
-                $currentTotal += (int) ($row['employee_count'] ?? 0);
-            }
-        } else {
-            $errors[] = 'Momentum unavailable.';
-        }
-
-        $prevTotal = 0;
-        if ($prevStartObj && $prevEndObj) {
-            $prevParams = $attParams;
-            $prevParams[0] = $prevStartObj->format('Y-m-d');
-            $prevParams[1] = $prevEndObj->format('Y-m-d');
-            $prevResult = db_fetch_all($bd, $dailySql, $attTypes, $prevParams);
-            if ($prevResult['ok']) {
-                foreach ($prevResult['rows'] as $row) {
-                    $prevTotal += (int) ($row['employee_count'] ?? 0);
-                }
-            } else {
-                $errors[] = 'Previous period unavailable.';
-            }
-        }
-
-        $deltaPercent = null;
-        $direction = 'flat';
-        if ($prevTotal > 0) {
-            $deltaPercent = round((($currentTotal - $prevTotal) / $prevTotal) * 100, 1);
-        } elseif ($currentTotal > 0) {
-            $deltaPercent = 100.0;
-        }
-        if ($deltaPercent !== null) {
-            if ($deltaPercent > 1) {
-                $direction = 'up';
-            } elseif ($deltaPercent < -1) {
-                $direction = 'down';
-            }
-        }
-
-        $label = 'vs previous period';
-        if ($prevStartObj && $prevEndObj) {
-            $label = 'Prev ' . format_display_date($prevStartObj->format('Y-m-d')) .
-                ' to ' . format_display_date($prevEndObj->format('Y-m-d'));
-        }
-
-        $payload = [
-            'errors' => $errors,
-            'insights' => [
-                'momentum' => [
-                    'deltaPercent' => $deltaPercent,
-                    'direction' => $direction,
-                    'currentTotal' => $currentTotal,
-                    'previousTotal' => $prevTotal,
-                    'label' => $label,
-                    'rangeDays' => $rangeDays,
-                ],
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
     if ($ajaxSection === 'insights-summary') {
         $dailySql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS employee_count, ' .
             'ROUND(SUM(COALESCE(work_hours, work_hours_utime, 0)), 2) AS total_hours ' .
@@ -2005,33 +1828,36 @@ if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
         if (!$dailyResult['ok']) {
             $errors[] = 'Summary unavailable.';
         }
-        $totalAttendance = 0;
+        $uniqueTotal = 0;
+        $uniqueSql = 'SELECT COUNT(DISTINCT emp_code) AS employee_count ' .
+            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere;
+        $uniqueResult = db_fetch_all($bd, $uniqueSql, $attTypes, $attParams);
+        if ($uniqueResult['ok'] && !empty($uniqueResult['rows'])) {
+            $uniqueRow = $uniqueResult['rows'][0];
+            $uniqueTotal = (int) ($uniqueRow['employee_count'] ?? 0);
+        } else {
+            $errors[] = 'Unique attendance unavailable.';
+        }
         $totalHours = 0.0;
-        $peakDay = '';
-        $peakCount = 0;
         foreach ($dailyRows as $row) {
             $count = (int) ($row['employee_count'] ?? 0);
             $hours = (float) ($row['total_hours'] ?? 0);
-            $totalAttendance += $count;
             $totalHours += $hours;
-            if ($count > $peakCount) {
-                $peakCount = $count;
-                $peakDay = (string) ($row['att_date'] ?? '');
-            }
         }
         $dayCount = count($dailyRows);
-        $avgDaily = $dayCount > 0 ? round($totalAttendance / $dayCount, 1) : 0;
-        $avgHours = $totalAttendance > 0 ? round($totalHours / $totalAttendance, 2) : 0;
-        $peakDayLabel = $peakDay !== '' ? format_display_date($peakDay) : '';
+        $avgDaily = $dayCount > 0
+            ? round(array_sum(array_map(static function (array $row): int {
+                return (int) ($row['employee_count'] ?? 0);
+            }, $dailyRows)) / $dayCount, 1)
+            : 0;
+        $avgHours = $uniqueTotal > 0 ? round($totalHours / $uniqueTotal, 2) : 0;
         $payload = [
             'errors' => $errors,
             'insights' => [
                 'summary' => [
-                    'totalAttendance' => $totalAttendance,
+                    'totalAttendance' => $uniqueTotal,
                     'avgDailyAttendance' => $avgDaily,
                     'avgWorkHours' => $avgHours,
-                    'peakDay' => $peakDayLabel,
-                    'peakCount' => $peakCount,
                     'dayCount' => $dayCount,
                 ],
                 'meta' => $metaText,
@@ -2042,293 +1868,6 @@ if ($isAjax && strpos($ajaxSection, 'insights-') === 0) {
         echo json_encode($payload, JSON_UNESCAPED_SLASHES);
         exit;
     }
-
-    if ($ajaxSection === 'insights-daily') {
-        $dailySql = 'SELECT att_date, COUNT(DISTINCT emp_code) AS employee_count, ' .
-            'ROUND(AVG(COALESCE(work_hours, work_hours_utime)), 2) AS avg_hours, ' .
-            'ROUND(SUM(COALESCE(work_hours, work_hours_utime, 0)), 2) AS total_hours ' .
-            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
-            ' GROUP BY att_date ORDER BY att_date';
-        $dailyResult = db_fetch_all($bd, $dailySql, $attTypes, $attParams);
-        $dailyRows = $dailyResult['ok'] ? $dailyResult['rows'] : [];
-        $payload = [
-            'errors' => $dailyResult['ok'] ? [] : ['Daily trend unavailable.'],
-            'insights' => [
-                'dailyTrend' => array_map(static function (array $row): array {
-                    return [
-                        'date' => (string) ($row['att_date'] ?? ''),
-                        'count' => (int) ($row['employee_count'] ?? 0),
-                        'avgHours' => (float) ($row['avg_hours'] ?? 0),
-                        'totalHours' => (float) ($row['total_hours'] ?? 0),
-                    ];
-                }, $dailyRows),
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-work-hours') {
-        $hoursSql = 'SELECT ' .
-            'SUM(CASE WHEN hours < 4 THEN 1 ELSE 0 END) AS under4, ' .
-            'SUM(CASE WHEN hours >= 4 AND hours < 6 THEN 1 ELSE 0 END) AS h4_6, ' .
-            'SUM(CASE WHEN hours >= 6 AND hours < 8 THEN 1 ELSE 0 END) AS h6_8, ' .
-            'SUM(CASE WHEN hours >= 8 AND hours < 10 THEN 1 ELSE 0 END) AS h8_10, ' .
-            'SUM(CASE WHEN hours >= 10 THEN 1 ELSE 0 END) AS h10_plus ' .
-            'FROM (SELECT COALESCE(work_hours, work_hours_utime) AS hours ' .
-            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere . ') t ' .
-            'WHERE hours IS NOT NULL';
-        $hoursResult = db_fetch_all($bd, $hoursSql, $attTypes, $attParams);
-        $hoursRow = $hoursResult['ok'] && !empty($hoursResult['rows']) ? $hoursResult['rows'][0] : [];
-        $workHours = [
-            ['label' => '< 4h', 'count' => (int) ($hoursRow['under4'] ?? 0)],
-            ['label' => '4-6h', 'count' => (int) ($hoursRow['h4_6'] ?? 0)],
-            ['label' => '6-8h', 'count' => (int) ($hoursRow['h6_8'] ?? 0)],
-            ['label' => '8-10h', 'count' => (int) ($hoursRow['h8_10'] ?? 0)],
-            ['label' => '10h+', 'count' => (int) ($hoursRow['h10_plus'] ?? 0)],
-        ];
-        $payload = [
-            'errors' => $hoursResult['ok'] ? [] : ['Work hours distribution unavailable.'],
-            'insights' => [
-                'workHours' => $workHours,
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-punch-hours') {
-        $punchRows = [];
-        $errors = [];
-        if ($deviceScope === 'none') {
-            $punchRows = [];
-        } else {
-            $punchWhere = 'punch_date BETWEEN ? AND ?';
-            $punchTypes = 'ss';
-            $punchParams = [$startDate, $endDate];
-            if ($deviceSnParam !== '') {
-                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
-                $punchTypes .= 'ss';
-                $punchParams[] = $deviceSnParam;
-                $punchParams[] = $deviceSnParam;
-            }
-            $punchFirstSql = 'SELECT HOUR(first_log) AS hour, COUNT(*) AS count ' .
-                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
-                ' AND first_log IS NOT NULL GROUP BY hour ORDER BY hour';
-            $punchFirstResult = db_fetch_all($bd, $punchFirstSql, $punchTypes, $punchParams);
-            if (!$punchFirstResult['ok']) {
-                $errors[] = 'Punch hour distribution unavailable.';
-            }
-            $punchRows = $punchFirstResult['ok'] ? $punchFirstResult['rows'] : [];
-        }
-        $payload = [
-            'errors' => $errors,
-            'insights' => [
-                'punchHours' => [
-                    'first' => array_map(static function (array $row): array {
-                        return [
-                            'hour' => (int) ($row['hour'] ?? 0),
-                            'count' => (int) ($row['count'] ?? 0),
-                        ];
-                    }, $punchRows),
-                ],
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-punch-outs') {
-        $punchRows = [];
-        $errors = [];
-        if ($deviceScope === 'none') {
-            $punchRows = [];
-        } else {
-            $punchWhere = 'punch_date BETWEEN ? AND ?';
-            $punchTypes = 'ss';
-            $punchParams = [$startDate, $endDate];
-            if ($deviceSnParam !== '') {
-                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
-                $punchTypes .= 'ss';
-                $punchParams[] = $deviceSnParam;
-                $punchParams[] = $deviceSnParam;
-            }
-            $punchLastSql = 'SELECT HOUR(last_log) AS hour, COUNT(*) AS count ' .
-                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
-                ' AND last_log IS NOT NULL GROUP BY hour ORDER BY hour';
-            $punchLastResult = db_fetch_all($bd, $punchLastSql, $punchTypes, $punchParams);
-            if (!$punchLastResult['ok']) {
-                $errors[] = 'Punch out distribution unavailable.';
-            }
-            $punchRows = $punchLastResult['ok'] ? $punchLastResult['rows'] : [];
-        }
-        $payload = [
-            'errors' => $errors,
-            'insights' => [
-                'punchOuts' => array_map(static function (array $row): array {
-                    return [
-                        'hour' => (int) ($row['hour'] ?? 0),
-                        'count' => (int) ($row['count'] ?? 0),
-                    ];
-                }, $punchRows),
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-arrivals') {
-        $rows = [];
-        $errors = [];
-        if ($deviceScope === 'none') {
-            $rows = [];
-        } else {
-            $punchWhere = 'punch_date BETWEEN ? AND ?';
-            $punchTypes = 'ss';
-            $punchParams = [$startDate, $endDate];
-            if ($deviceSnParam !== '') {
-                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
-                $punchTypes .= 'ss';
-                $punchParams[] = $deviceSnParam;
-                $punchParams[] = $deviceSnParam;
-            }
-            $arrivalSql = 'SELECT ' .
-                'SUM(CASE WHEN HOUR(first_log) < 7 THEN 1 ELSE 0 END) AS before7, ' .
-                'SUM(CASE WHEN HOUR(first_log) >= 7 AND HOUR(first_log) < 8 THEN 1 ELSE 0 END) AS h7_8, ' .
-                'SUM(CASE WHEN HOUR(first_log) >= 8 AND HOUR(first_log) < 9 THEN 1 ELSE 0 END) AS h8_9, ' .
-                'SUM(CASE WHEN HOUR(first_log) >= 9 AND HOUR(first_log) < 10 THEN 1 ELSE 0 END) AS h9_10, ' .
-                'SUM(CASE WHEN HOUR(first_log) >= 10 THEN 1 ELSE 0 END) AS h10_plus ' .
-                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
-                ' AND first_log IS NOT NULL';
-            $arrivalResult = db_fetch_all($bd, $arrivalSql, $punchTypes, $punchParams);
-            if (!$arrivalResult['ok']) {
-                $errors[] = 'Arrival distribution unavailable.';
-            } else {
-                $row = $arrivalResult['rows'][0] ?? [];
-                $rows = [
-                    ['label' => 'Before 7', 'count' => (int) ($row['before7'] ?? 0)],
-                    ['label' => '7-8', 'count' => (int) ($row['h7_8'] ?? 0)],
-                    ['label' => '8-9', 'count' => (int) ($row['h8_9'] ?? 0)],
-                    ['label' => '9-10', 'count' => (int) ($row['h9_10'] ?? 0)],
-                    ['label' => '10+', 'count' => (int) ($row['h10_plus'] ?? 0)],
-                ];
-            }
-        }
-        $payload = [
-            'errors' => $errors,
-            'insights' => [
-                'arrivals' => $rows,
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-departures') {
-        $rows = [];
-        $errors = [];
-        if ($deviceScope === 'none') {
-            $rows = [];
-        } else {
-            $punchWhere = 'punch_date BETWEEN ? AND ?';
-            $punchTypes = 'ss';
-            $punchParams = [$startDate, $endDate];
-            if ($deviceSnParam !== '') {
-                $punchWhere .= ' AND (FIND_IN_SET(first_terminal_sn, ?) OR FIND_IN_SET(last_terminal_sn, ?))';
-                $punchTypes .= 'ss';
-                $punchParams[] = $deviceSnParam;
-                $punchParams[] = $deviceSnParam;
-            }
-            $departureSql = 'SELECT ' .
-                'SUM(CASE WHEN HOUR(last_log) < 16 THEN 1 ELSE 0 END) AS before16, ' .
-                'SUM(CASE WHEN HOUR(last_log) >= 16 AND HOUR(last_log) < 18 THEN 1 ELSE 0 END) AS h16_18, ' .
-                'SUM(CASE WHEN HOUR(last_log) >= 18 AND HOUR(last_log) < 20 THEN 1 ELSE 0 END) AS h18_20, ' .
-                'SUM(CASE WHEN HOUR(last_log) >= 20 THEN 1 ELSE 0 END) AS h20_plus ' .
-                'FROM gcc_attendance_master.employee_daily_punch WHERE ' . $punchWhere .
-                ' AND last_log IS NOT NULL';
-            $departureResult = db_fetch_all($bd, $departureSql, $punchTypes, $punchParams);
-            if (!$departureResult['ok']) {
-                $errors[] = 'Departure distribution unavailable.';
-            } else {
-                $row = $departureResult['rows'][0] ?? [];
-                $rows = [
-                    ['label' => 'Before 4', 'count' => (int) ($row['before16'] ?? 0)],
-                    ['label' => '4-6', 'count' => (int) ($row['h16_18'] ?? 0)],
-                    ['label' => '6-8', 'count' => (int) ($row['h18_20'] ?? 0)],
-                    ['label' => '8+', 'count' => (int) ($row['h20_plus'] ?? 0)],
-                ];
-            }
-        }
-        $payload = [
-            'errors' => $errors,
-            'insights' => [
-                'departures' => $rows,
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    if ($ajaxSection === 'insights-consistency') {
-        $errors = [];
-        $startObj = DateTimeImmutable::createFromFormat('Y-m-d', $startDate);
-        $endObj = DateTimeImmutable::createFromFormat('Y-m-d', $endDate);
-        $rangeDays = 1;
-        if ($startObj instanceof DateTimeImmutable && $endObj instanceof DateTimeImmutable) {
-            $rangeDays = max(1, $startObj->diff($endObj)->days + 1);
-        }
-        $threshold1 = max(1, (int) ceil($rangeDays * 0.25));
-        $threshold2 = max($threshold1, (int) ceil($rangeDays * 0.5));
-        $threshold3 = max($threshold2, (int) ceil($rangeDays * 0.75));
-
-        $consistencySql = 'SELECT ' .
-            'SUM(CASE WHEN days_present < ? THEN 1 ELSE 0 END) AS under25, ' .
-            'SUM(CASE WHEN days_present >= ? AND days_present < ? THEN 1 ELSE 0 END) AS p25_50, ' .
-            'SUM(CASE WHEN days_present >= ? AND days_present < ? THEN 1 ELSE 0 END) AS p50_75, ' .
-            'SUM(CASE WHEN days_present >= ? THEN 1 ELSE 0 END) AS p75_100 ' .
-            'FROM (SELECT emp_code, COUNT(DISTINCT att_date) AS days_present ' .
-            'FROM gcc_attendance_master.employee_att_daily WHERE ' . $attWhere .
-            ' GROUP BY emp_code) t';
-        $consistencyParams = array_merge([$threshold1, $threshold1, $threshold2, $threshold2, $threshold3, $threshold3], $attParams);
-        $consistencyTypes = 'iiiiii' . $attTypes;
-        $consistencyResult = db_fetch_all($bd, $consistencySql, $consistencyTypes, $consistencyParams);
-        $rows = [];
-        if ($consistencyResult['ok'] && !empty($consistencyResult['rows'])) {
-            $row = $consistencyResult['rows'][0];
-            $rows = [
-                ['label' => '< 25%', 'count' => (int) ($row['under25'] ?? 0)],
-                ['label' => '25-50%', 'count' => (int) ($row['p25_50'] ?? 0)],
-                ['label' => '50-75%', 'count' => (int) ($row['p50_75'] ?? 0)],
-                ['label' => '75-100%', 'count' => (int) ($row['p75_100'] ?? 0)],
-            ];
-        } else {
-            $errors[] = 'Consistency unavailable.';
-        }
-
-        $payload = [
-            'errors' => $errors,
-            'insights' => [
-                'consistency' => $rows,
-            ],
-        ];
-        header('Content-Type: application/json; charset=utf-8');
-        header('Cache-Control: no-store');
-        echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
 
     if ($ajaxSection === 'insights-workcode-department') {
         $deptSql = 'SELECT COALESCE(NULLIF(TRIM(department_name), \'\'), \'Unassigned\') AS group_label, ' .
@@ -3730,14 +3269,6 @@ include __DIR__ . '/include/layout_top.php';
           <div class="dash-kpi-meta" id="deviceStatusMeta"><?= h($deviceStatusMeta) ?></div>
         </div>
       </div>
-      <div class="col-lg-4 col-md-6 mb-4">
-        <div class="dash-kpi dash-kpi--amber dash-card" style="animation-delay: 0.2s;">
-          <div class="dash-kpi-icon"><i class="fas fa-microchip"></i></div>
-          <div class="dash-kpi-label" id="activeDeviceLabel"><?= h($activeDeviceLabel) ?></div>
-          <div class="dash-kpi-value" id="activeDeviceCount"><?= h($activeDeviceCountText) ?></div>
-          <div class="dash-kpi-meta" id="activeDeviceMeta"><?= h($activeDeviceMeta) ?></div>
-        </div>
-      </div>
     </div>
 
     <div class="card mb-4 dash-card" style="animation-delay: 0.05s;">
@@ -3805,7 +3336,7 @@ include __DIR__ . '/include/layout_top.php';
       <div class="card-body">
         <div class="insight-highlights">
           <div class="insight-stat">
-            <div class="insight-stat-label">Total attendance</div>
+            <div class="insight-stat-label">Unique employees present</div>
             <div class="insight-stat-value" id="insightTotalAttendance">-</div>
             <div class="insight-stat-meta" id="insightAvgDaily">Avg per day: -</div>
           </div>
@@ -3814,45 +3345,9 @@ include __DIR__ . '/include/layout_top.php';
             <div class="insight-stat-value" id="insightAvgHours">-</div>
             <div class="insight-stat-meta" id="insightDayCount">Days in range: -</div>
           </div>
-          <div class="insight-stat">
-            <div class="insight-stat-label">Peak day</div>
-            <div class="insight-stat-value" id="insightPeakDay">-</div>
-            <div class="insight-stat-meta" id="insightPeakCount">Peak attendance: -</div>
-          </div>
-          <div class="insight-stat insight-stat--accent" id="insightMomentum">
-            <div class="insight-stat-label">Momentum</div>
-            <div class="insight-stat-value" id="insightMomentumValue">-</div>
-            <div class="insight-stat-meta" id="insightMomentumMeta">vs previous period</div>
-          </div>
         </div>
 
         <div class="insights-grid">
-          <div class="insight-panel insight-panel--wide">
-            <div class="insight-title">Daily attendance trend</div>
-            <svg id="attendanceTrendChart" class="insight-chart" viewBox="0 0 640 220" preserveAspectRatio="none"></svg>
-            <div id="attendanceTrendLegend" class="insight-legend"></div>
-          </div>
-
-          <div class="insight-panel">
-            <div class="insight-title">Work hours distribution</div>
-            <div id="workHoursBars" class="insight-bar-list"></div>
-          </div>
-
-          <div class="insight-panel">
-            <div class="insight-title">Punch hour heatmap (first in)</div>
-            <div id="punchHourBars" class="insight-hour-grid"></div>
-          </div>
-
-          <div class="insight-panel insight-panel--cool">
-            <div class="insight-title">Arrival windows</div>
-            <div id="arrivalBars" class="insight-bar-list"></div>
-          </div>
-
-          <div class="insight-panel insight-panel--cool">
-            <div class="insight-title">Departure windows</div>
-            <div id="departureBars" class="insight-bar-list"></div>
-          </div>
-
           <div class="insight-panel">
             <div class="insight-title">Projectwise one-punch employees</div>
             <div class="insight-subtitle">Employees with only one punch in a day.</div>
@@ -3887,18 +3382,6 @@ include __DIR__ . '/include/layout_top.php';
               <div class="insight-table-meta" id="companyWorkcodeMeta">Loading company breakdown...</div>
             </div>
             <div id="companyWorkcodeMatrix" class="insight-matrix-slot"></div>
-          </div>
-
-          <div class="insight-panel">
-            <div class="insight-title">Attendance consistency</div>
-            <div id="consistencyBars" class="insight-bar-list"></div>
-          </div>
-
-
-
-          <div class="insight-panel">
-            <div class="insight-title">Punch hour heatmap (last out)</div>
-            <div id="punchOutBars" class="insight-hour-grid"></div>
           </div>
 
           <div class="insight-panel">
@@ -4002,203 +3485,6 @@ include __DIR__ . '/include/layout_top.php';
       }
       return num.toLocaleString(undefined, options);
     };
-    const updateProjectPunchesSummary = (labelText) => {
-      const countEl = document.getElementById('activeDeviceReportCount');
-      const titleEl = document.getElementById('activeDeviceReportLabel');
-      const subEl = document.getElementById('activeDeviceReportSub');
-      const rawLabel = String(labelText || '');
-      let count = '';
-      let title = rawLabel;
-      let sub = '';
-      const match = rawLabel.match(/^(\d+)\s+(.*)$/);
-      if (match) {
-        count = match[1];
-        title = match[2];
-      }
-      if (title.includes('(Devices active/total / Employees:)')) {
-        title = title.replace('(Devices active/total / Employees:)', '').trim();
-        sub = 'Devices active/total / Employees';
-      } else if (title.includes('(Devices/Employees:)')) {
-        title = title.replace('(Devices/Employees:)', '').trim();
-        sub = 'Devices / Employees';
-      }
-      if (countEl) {
-        countEl.textContent = count || '-';
-      }
-      if (titleEl) {
-        titleEl.textContent = title || 'Projects with punches';
-      }
-      if (subEl) {
-        subEl.textContent = sub;
-        subEl.classList.toggle('d-none', !sub);
-      }
-    };
-    const parseProjectPunchesMeta = (metaText) => {
-      const raw = String(metaText || '');
-      if (!raw || raw.includes('unavailable') || raw.includes('No devices')) {
-        return [];
-      }
-      const parts = raw.split(' | ');
-      const rows = [];
-      for (const part of parts) {
-        const trimmed = part.trim();
-        if (!trimmed) {
-          continue;
-        }
-        const matchThree = trimmed.match(/^(.*)\s+(\d+)\/(\d+)\/(\d+)$/);
-        if (matchThree) {
-          rows.push({
-            label: matchThree[1].trim(),
-            devicesActive: Number(matchThree[2]),
-            devicesTotal: Number(matchThree[3]),
-            employees: Number(matchThree[4]),
-          });
-          continue;
-        }
-        const matchTwo = trimmed.match(/^(.*)\s+(\d+)\/(\d+)$/);
-        if (!matchTwo) {
-          return [];
-        }
-        rows.push({
-          label: matchTwo[1].trim(),
-          devicesActive: Number(matchTwo[2]),
-          devicesTotal: null,
-          employees: Number(matchTwo[3]),
-        });
-      }
-      return rows;
-    };
-    const renderProjectPunches = (metaText) => {
-      const chart = document.getElementById('activeDeviceReportChart');
-      const fallback = document.getElementById('activeDeviceReportMeta');
-      if (!chart) {
-        return;
-      }
-      chart.innerHTML = '';
-      const rows = parseProjectPunchesMeta(metaText);
-      if (!rows.length) {
-        chart.classList.add('d-none');
-        if (fallback) {
-          fallback.textContent = metaText || '';
-          fallback.classList.toggle('d-none', !(metaText || ''));
-        }
-        return;
-      }
-      const maxDevices = Math.max(...rows.map((row) => row.devicesActive), 0);
-      const maxEmployees = Math.max(...rows.map((row) => row.employees), 0);
-      const fragment = document.createDocumentFragment();
-      rows.forEach((row) => {
-        const item = document.createElement('div');
-        item.className = 'project-punches-item';
-        const hasTotal = Number.isFinite(row.devicesTotal);
-        const totalDevices = hasTotal ? row.devicesTotal : row.devicesActive;
-        const devicePct = hasTotal
-          ? (totalDevices > 0 ? (row.devicesActive / totalDevices) * 100 : 0)
-          : (maxDevices > 0 ? (row.devicesActive / maxDevices) * 100 : 0);
-        const employeePct = maxEmployees > 0 ? (row.employees / maxEmployees) * 100 : 0;
-        const deviceCountText = hasTotal ? `${row.devicesActive} / ${totalDevices}` : `${row.devicesActive}`;
-        const deviceLabel = hasTotal ? 'Devices (active/total)' : 'Devices';
-        item.innerHTML = `
-          <div class="project-punches-item-title">${escapeHtml(row.label)}</div>
-          <div class="project-punches-item-counts">${deviceCountText} devices · ${row.employees} employees</div>
-          <div class="project-punches-bars">
-            <div class="project-punches-metric">
-              <div class="project-punches-metric-label">
-                <span>${deviceLabel}</span>
-                <span class="project-punches-metric-value">${deviceCountText}</span>
-              </div>
-              <div class="project-punches-bar" style="--bar-size:${devicePct.toFixed(1)}%; --bar-color:#1b4f9a"></div>
-            </div>
-            <div class="project-punches-metric">
-              <div class="project-punches-metric-label">
-                <span>Employees</span>
-                <span class="project-punches-metric-value">${row.employees}</span>
-              </div>
-              <div class="project-punches-bar" style="--bar-size:${employeePct.toFixed(1)}%; --bar-color:#2f855a"></div>
-            </div>
-          </div>
-        `;
-        fragment.appendChild(item);
-      });
-      chart.appendChild(fragment);
-      chart.classList.remove('d-none');
-      if (fallback) {
-        fallback.classList.add('d-none');
-      }
-    };
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const formatMonthDay = (value) => {
-      const parts = String(value ?? '').split('-');
-      if (parts.length !== 3) {
-        return value;
-      }
-      const month = months[Number(parts[1]) - 1];
-      if (!month) {
-        return value;
-      }
-      return `${month} ${parts[2]}`;
-    };
-
-    const renderTrendChart = (rows) => {
-      const chart = document.getElementById('attendanceTrendChart');
-      const legend = document.getElementById('attendanceTrendLegend');
-      if (!chart) {
-        return;
-      }
-      const data = Array.isArray(rows) ? rows : [];
-      if (!data.length) {
-        chart.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#94a3b8" font-size="12">No data</text>';
-        if (legend) {
-          legend.textContent = 'No attendance data available.';
-        }
-        return;
-      }
-      const width = 640;
-      const height = 220;
-      const padding = 32;
-      const values = data.map((row) => Number(row.count) || 0);
-      const maxValue = Math.max(...values, 1);
-      const step = data.length > 1 ? (width - padding * 2) / (data.length - 1) : 0;
-      const points = data.map((row, index) => {
-        const x = padding + step * index;
-        const value = Number(row.count) || 0;
-        const y = height - padding - ((value / maxValue) * (height - padding * 2));
-        return { x, y, value, date: row.date };
-      });
-      const linePath = points.map((point, index) => {
-        const cmd = index === 0 ? 'M' : 'L';
-        return `${cmd} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
-      }).join(' ');
-      const areaPath = `${linePath} L ${points[points.length - 1].x.toFixed(2)} ${height - padding} ` +
-        `L ${points[0].x.toFixed(2)} ${height - padding} Z`;
-      const gridLines = [0.25, 0.5, 0.75].map((fraction) => {
-        const y = height - padding - (height - padding * 2) * fraction;
-        return `<line x1="${padding}" y1="${y.toFixed(2)}" x2="${width - padding}" y2="${y.toFixed(2)}" stroke="rgba(15,23,42,0.08)" stroke-dasharray="4 6" />`;
-      }).join('');
-      const lastPoint = points[points.length - 1];
-      chart.innerHTML = `
-        <defs>
-          <linearGradient id="trendStroke" x1="0" x2="1">
-            <stop offset="0%" stop-color="#2563eb" />
-            <stop offset="100%" stop-color="#14b8a6" />
-          </linearGradient>
-          <linearGradient id="trendArea" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stop-color="rgba(37,99,235,0.35)" />
-            <stop offset="100%" stop-color="rgba(20,184,166,0.05)" />
-          </linearGradient>
-        </defs>
-        ${gridLines}
-        <path d="${areaPath}" fill="url(#trendArea)" />
-        <path d="${linePath}" fill="none" stroke="url(#trendStroke)" stroke-width="3" stroke-linecap="round" />
-        <circle cx="${lastPoint.x.toFixed(2)}" cy="${lastPoint.y.toFixed(2)}" r="4" fill="#f97316" stroke="#ffffff" stroke-width="2" />
-      `;
-      if (legend) {
-        const startLabel = formatMonthDay(data[0].date);
-        const endLabel = formatMonthDay(data[data.length - 1].date);
-        legend.innerHTML = `<span>${startLabel} to ${endLabel}</span><span>Peak: ${maxValue}</span>`;
-      }
-    };
-
     const renderBarList = (containerId, items) => {
       const container = document.getElementById(containerId);
       if (!container) {
@@ -4221,35 +3507,6 @@ include __DIR__ . '/include/layout_top.php';
               <div class="insight-bar-fill" style="--bar-size:${percent.toFixed(2)}%;"></div>
             </div>
             <div class="insight-bar-value">${count}</div>
-          </div>
-        `;
-      }).join('');
-    };
-
-    const renderPunchHours = (rows, containerId = 'punchHourBars') => {
-      const container = document.getElementById(containerId);
-      if (!container) {
-        return;
-      }
-      if (!Array.isArray(rows) || rows.length === 0) {
-        container.innerHTML = '<div class="insight-empty">No punch data available.</div>';
-        return;
-      }
-      const hours = Array.from({ length: 24 }, () => 0);
-      (Array.isArray(rows) ? rows : []).forEach((row) => {
-        const hour = Number(row.hour);
-        if (Number.isFinite(hour) && hour >= 0 && hour < 24) {
-          hours[hour] = Number(row.count) || 0;
-        }
-      });
-      const max = Math.max(...hours, 1);
-      container.innerHTML = hours.map((count, hour) => {
-        const label = (hour % 6 === 0 || hour === 23) ? String(hour) : '';
-        const percent = count > 0 ? Math.max(4, (count / max) * 100) : 0;
-        return `
-          <div class="insight-hour-col">
-            <div class="insight-hour-bar" style="--bar-size:${percent.toFixed(2)}%;"></div>
-            <div class="insight-hour-label">${label}</div>
           </div>
         `;
       }).join('');
@@ -4304,34 +3561,6 @@ include __DIR__ . '/include/layout_top.php';
       setText('heroHoursMeta', avgHoursText);
     };
 
-    const renderMomentum = (momentum) => {
-      const card = document.getElementById('insightMomentum');
-      const delta = Number(momentum.deltaPercent);
-      let valueText = '-';
-      if (Number.isFinite(delta)) {
-        const sign = delta > 0 ? '+' : '';
-        valueText = `${sign}${delta.toFixed(1)}%`;
-      }
-      setText('insightMomentumValue', valueText);
-      const label = momentum.label || 'vs previous period';
-      const currentTotal = Number(momentum.currentTotal);
-      const previousTotal = Number(momentum.previousTotal);
-      const totalsLabel = Number.isFinite(currentTotal) && Number.isFinite(previousTotal)
-        ? `${formatNumber(currentTotal)} now | ${formatNumber(previousTotal)} prev`
-        : '';
-      setText('insightMomentumMeta', totalsLabel ? `${label} | ${totalsLabel}` : label);
-      if (card) {
-        card.classList.remove('insight-stat--positive', 'insight-stat--negative');
-        if (Number.isFinite(delta)) {
-          if (delta > 1) {
-            card.classList.add('insight-stat--positive');
-          } else if (delta < -1) {
-            card.classList.add('insight-stat--negative');
-          }
-        }
-      }
-    };
-
     const renderInsightsSummary = (summary, meta) => {
       const metaEl = document.getElementById('insightsMeta');
       if (metaEl) {
@@ -4346,38 +3575,9 @@ include __DIR__ . '/include/layout_top.php';
       setText('insightDayCount', Number.isFinite(Number(safeSummary.dayCount))
         ? `Days in range: ${safeSummary.dayCount}`
         : 'Days in range: -');
-      setText('insightPeakDay', safeSummary.peakDay || '-');
-      setText('insightPeakCount', Number.isFinite(Number(safeSummary.peakCount))
-        ? `Peak attendance: ${safeSummary.peakCount}`
-        : 'Peak attendance: -');
-    };
-    const renderInsightsDaily = (dailyTrend) => {
-      renderTrendChart(Array.isArray(dailyTrend) ? dailyTrend : []);
-    };
-    const renderInsightsWorkHours = (workHours) => {
-      renderBarList('workHoursBars', Array.isArray(workHours) ? workHours : []);
-    };
-    const renderInsightsPunchHours = (punchHours) => {
-      if (punchHours && Array.isArray(punchHours.first)) {
-        renderPunchHours(punchHours.first);
-        return;
-      }
-      renderPunchHours(Array.isArray(punchHours) ? punchHours : []);
     };
     const renderInsightsOverrides = (overrides) => {
       renderOverrideStatus(overrides || {});
-    };
-    const renderInsightsArrivals = (arrivals) => {
-      renderBarList('arrivalBars', Array.isArray(arrivals) ? arrivals : []);
-    };
-    const renderInsightsDepartures = (departures) => {
-      renderBarList('departureBars', Array.isArray(departures) ? departures : []);
-    };
-    const renderInsightsConsistency = (consistency) => {
-      renderBarList('consistencyBars', Array.isArray(consistency) ? consistency : []);
-    };
-    const renderInsightsPunchOuts = (punchOuts) => {
-      renderPunchHours(Array.isArray(punchOuts) ? punchOuts : [], 'punchOutBars');
     };
     const renderWorkcodeMatrix = (payload, options) => {
       const container = document.getElementById(options.containerId);
@@ -5167,38 +4367,6 @@ include __DIR__ . '/include/layout_top.php';
       updateErrorBox();
     };
 
-    const fetchActiveDevices = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'active-devices');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const activeDevices = (data && data.activeDevices) || {};
-          setText('activeDeviceCount', activeDevices.activeDeviceCountText || '-');
-          setText('activeDeviceLabel', activeDevices.activeDeviceLabel || 'Projects with punches');
-          setText('activeDeviceMeta', activeDevices.activeDeviceMeta || '');
-          updateProjectPunchesSummary(activeDevices.activeDeviceLabel || 'Projects with punches');
-          renderProjectPunches(activeDevices.activeDeviceMeta || '');
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Project counts', errors.length > 0);
-        })
-        .catch(() => {
-          setText('activeDeviceCount', '-');
-          setText('activeDeviceLabel', 'Projects with punches');
-          setText('activeDeviceMeta', 'Project counts unavailable');
-          updateProjectPunchesSummary('Projects with punches');
-          renderProjectPunches('Project counts unavailable');
-          setPanelError('Project counts', true);
-        });
-    };
-
     const fetchDeviceStatus = () => {
       const params = new URLSearchParams(baseParams);
       params.set('ajax_section', 'device-status');
@@ -5281,30 +4449,6 @@ include __DIR__ . '/include/layout_top.php';
         });
     };
 
-    const fetchMomentum = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-momentum');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderMomentum(insights.momentum || {});
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Momentum', errors.length > 0);
-        })
-        .catch(() => {
-          renderMomentum({});
-          setPanelError('Momentum', true);
-        });
-    };
-
     const fetchInsightsSummary = () => {
       const params = new URLSearchParams(baseParams);
       params.set('ajax_section', 'insights-summary');
@@ -5328,175 +4472,6 @@ include __DIR__ . '/include/layout_top.php';
           setPanelError('Insights summary', true);
         });
     };
-
-    const fetchInsightsDaily = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-daily');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsDaily(insights.dailyTrend || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Daily trend', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsDaily([]);
-          setPanelError('Daily trend', true);
-        });
-    };
-
-    const fetchInsightsWorkHours = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-work-hours');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsWorkHours(insights.workHours || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Work hours', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsWorkHours([]);
-          setPanelError('Work hours', true);
-        });
-    };
-
-    const fetchInsightsPunchHours = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-punch-hours');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsPunchHours(insights.punchHours || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Punch hours', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsPunchHours([]);
-          setPanelError('Punch hours', true);
-        });
-    };
-
-    const fetchInsightsPunchOuts = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-punch-outs');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsPunchOuts(insights.punchOuts || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Punch outs', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsPunchOuts([]);
-          setPanelError('Punch outs', true);
-        });
-    };
-
-    const fetchInsightsArrivals = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-arrivals');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsArrivals(insights.arrivals || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Arrivals', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsArrivals([]);
-          setPanelError('Arrivals', true);
-        });
-    };
-
-    const fetchInsightsDepartures = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-departures');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsDepartures(insights.departures || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Departures', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsDepartures([]);
-          setPanelError('Departures', true);
-        });
-    };
-
-    const fetchInsightsConsistency = () => {
-      const params = new URLSearchParams(baseParams);
-      params.set('ajax_section', 'insights-consistency');
-      const url = baseUrl + '?' + params.toString();
-
-      fetch(url, { credentials: 'same-origin' })
-        .then((response) => {
-          if (!response.ok) {
-            throw new Error('Request failed');
-          }
-          return response.json();
-        })
-        .then((data) => {
-          const insights = (data && data.insights) || {};
-          renderInsightsConsistency(insights.consistency || []);
-          const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
-          setPanelError('Consistency', errors.length > 0);
-        })
-        .catch(() => {
-          renderInsightsConsistency([]);
-          setPanelError('Consistency', true);
-        });
-    };
-
     const fetchWorkcodeDepartment = () => {
       const params = new URLSearchParams(baseParams);
       params.set('ajax_section', 'insights-workcode-department');
@@ -5748,24 +4723,10 @@ include __DIR__ . '/include/layout_top.php';
       fetchLoggedBadges(safePage, loggedBadgesState.pageSize);
     };
 
-    const initialLabelEl = document.getElementById('activeDeviceLabel');
-    const initialMetaEl = document.getElementById('activeDeviceMeta');
-    updateProjectPunchesSummary(initialLabelEl ? initialLabelEl.textContent : '');
-    renderProjectPunches(initialMetaEl ? initialMetaEl.textContent : '');
-
-    fetchActiveDevices();
     fetchDeviceStatus();
     fetchBadgeRatio();
     fetchHeroMetrics();
-    fetchMomentum();
     fetchInsightsSummary();
-    fetchInsightsDaily();
-    fetchInsightsWorkHours();
-    fetchInsightsPunchHours();
-    fetchInsightsPunchOuts();
-    fetchInsightsArrivals();
-    fetchInsightsDepartures();
-    fetchInsightsConsistency();
     fetchProjectOnePunch();
     fetchWorkcodeDepartment();
     fetchWorkcodeProject();
