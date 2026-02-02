@@ -1261,9 +1261,22 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     color: var(--att-muted);
   }
   .hr-bento {
+    position: relative;
     display: grid;
     grid-template-columns: repeat(12, 1fr);
     gap: 1rem;
+  }
+  .hr-bento::before {
+    content: "";
+    position: absolute;
+    inset: -10px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.7);
+    pointer-events: none;
+  }
+  .hr-bento > * {
+    position: relative;
+    z-index: 1;
   }
   .hr-card {
     grid-column: span 12;
@@ -1273,8 +1286,36 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     font-weight: 700;
     margin-bottom: 0.5rem;
   }
+  .hr-card p {
+    margin-bottom: 0.6rem;
+  }
   .hr-chart {
     height: 260px;
+  }
+  .hr-chart--spotlight {
+    height: 300px;
+  }
+  .hr-chart--completion {
+    height: 300px;
+    position: relative;
+  }
+  .hr-chart-center {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    text-align: center;
+  }
+  .hr-chart-center span {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: var(--hr-ink);
+  }
+  .hr-chart-center small {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--att-muted);
   }
   .hr-list {
     display: grid;
@@ -1288,8 +1329,36 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     border-radius: 12px;
     background: rgba(15, 23, 42, 0.04);
     border: 1px solid rgba(15, 23, 42, 0.08);
+    align-items: center;
   }
-  .hr-list-item small {
+  .hr-list-main {
+    min-width: 0;
+  }
+  .hr-list-name {
+    font-weight: 600;
+    color: var(--hr-ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hr-list-project {
+    font-size: 0.75rem;
+    color: var(--att-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hr-list-meta {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .hr-list-time {
+    font-weight: 600;
+    color: var(--hr-ink);
+    font-size: 0.8rem;
+  }
+  .hr-list-badge {
+    font-size: 0.75rem;
     color: var(--att-muted);
   }
   .hr-insights {
@@ -1302,6 +1371,46 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     background: linear-gradient(135deg, rgba(14, 165, 233, 0.15), rgba(251, 191, 36, 0.12));
     border: 1px solid rgba(15, 23, 42, 0.08);
     font-weight: 600;
+  }
+  .hr-legend-list {
+    display: grid;
+    gap: 0.4rem;
+    margin-top: 0.6rem;
+    max-height: 120px;
+    overflow: auto;
+    padding-right: 4px;
+  }
+  .hr-legend-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--hr-ink-soft);
+  }
+  .hr-legend-left {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+  }
+  .hr-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--legend-color, #94a3b8);
+    flex: 0 0 auto;
+  }
+  .hr-legend-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .hr-card--spotlight {
+    border-top: 3px solid rgba(14, 165, 233, 0.6);
+  }
+  .hr-card--activity {
+    border-top: 3px solid rgba(249, 115, 22, 0.6);
   }
   .hr-skeleton {
     position: relative;
@@ -1703,15 +1812,16 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         </div>
       </div>
 
-      <div class="card hr-card hr-span-4">
+      <div class="card hr-card hr-span-4 hr-card--spotlight">
         <h4>Project spotlight</h4>
         <p class="text-muted mb-2">Where attendance energy is concentrated.</p>
-        <div class="hr-chart">
+        <div class="hr-chart hr-chart--spotlight">
           <canvas id="projectChart"></canvas>
         </div>
+        <div id="projectLegend" class="hr-legend-list"></div>
       </div>
 
-      <div class="card hr-card hr-span-4">
+      <div class="card hr-card hr-span-4 hr-card--activity">
         <h4>Recent activity</h4>
         <div class="hr-list" id="recentList">
           <div class="hr-skeleton" style="height: 48px;"></div>
@@ -1732,8 +1842,12 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       <div class="card hr-card hr-span-6">
         <h4>Attendance completeness</h4>
         <p class="text-muted mb-2">Percent of badges with both first and last login.</p>
-        <div class="hr-chart">
+        <div class="hr-chart hr-chart--completion">
           <canvas id="completionChart"></canvas>
+          <div class="hr-chart-center">
+            <span id="completionValue">-</span>
+            <small>Complete</small>
+          </div>
         </div>
       </div>
 
@@ -1919,7 +2033,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          plugins: { legend: { position: 'bottom' } },
+          plugins: { legend: { display: false } },
           cutout: '65%'
         }
       });
@@ -1960,17 +2074,22 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         list.innerHTML = '<div class="text-muted">No recent activity available.</div>';
         return;
       }
+      const formatRecentTime = (value) => {
+        const text = String(value || '').replace(',', ' ');
+        return text.replace(/\s+/g, ' ').trim();
+      };
       rows.forEach((row) => {
         const item = document.createElement('div');
         item.className = 'hr-list-item';
+        const timeText = formatRecentTime(row.time);
         item.innerHTML = `
-          <div>
-            <div><strong>${row.name}</strong></div>
-            <small>${row.project || 'Unassigned'}</small>
+          <div class="hr-list-main">
+            <div class="hr-list-name">${row.name || '-'}</div>
+            <div class="hr-list-project">${row.project || 'Unassigned'}</div>
           </div>
-          <div class="text-right">
-            <div>${row.time || '-'}</div>
-            <small>${row.badge || ''}</small>
+          <div class="hr-list-meta">
+            <div class="hr-list-time">${timeText || '-'}</div>
+            <div class="hr-list-badge">${row.badge || ''}</div>
           </div>
         `;
         list.appendChild(item);
@@ -1987,23 +2106,57 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       const overtime = timeMetrics.overtimeCount ?? 0;
       const completion = timeMetrics.completionRate;
 
-      if (coverage !== null && coverage !== undefined) {
-        insights.push(`Coverage at ${coverage}%. ${coverage < 70 ? 'Needs attention.' : 'Healthy range.'}`);
-      } else {
-        insights.push('Coverage data unavailable. Check HRMS or attendance API.');
+      if (coverage !== null && coverage !== undefined && coverage < 70) {
+        insights.push(`Coverage at ${coverage}%. Needs attention.`);
       }
-
-      insights.push(`Late arrivals: ${late}. ${late > 10 ? 'High variance detected.' : 'On track today.'}`);
-      insights.push(`Early leaves: ${early}. ${early > 8 ? 'Review shift adherence.' : 'Stable departures.'}`);
-      insights.push(`Overtime: ${overtime}. ${overtime > 6 ? 'Check workload balance.' : 'Overtime controlled.'}`);
-
-      if (completion !== null && completion !== undefined) {
+      if (late > 10) {
+        insights.push(`Late arrivals: ${late}. High variance detected.`);
+      }
+      if (early > 8) {
+        insights.push(`Early leaves: ${early}. Review shift adherence.`);
+      }
+      if (overtime > 6) {
+        insights.push(`Overtime: ${overtime}. Check workload balance.`);
+      }
+      if (completion !== null && completion !== undefined && completion < 90) {
         insights.push(`Completeness: ${completion}% of badges have both in/out.`);
-      } else {
-        insights.push('Completeness data unavailable.');
+      }
+      if (insights.length === 0) {
+        insights.push('No critical actions detected for this pulse day.');
       }
 
       return insights;
+    };
+
+    const renderProjectLegend = (projects, colors) => {
+      const container = document.getElementById('projectLegend');
+      if (!container) return;
+      const labels = projects.labels || [];
+      const counts = projects.counts || [];
+      if (labels.length === 0) {
+        container.innerHTML = '<div class="text-muted">No project breakdown available.</div>';
+        return;
+      }
+      container.innerHTML = '';
+      labels.forEach((label, idx) => {
+        const item = document.createElement('div');
+        item.className = 'hr-legend-item';
+        const left = document.createElement('div');
+        left.className = 'hr-legend-left';
+        const dot = document.createElement('span');
+        dot.className = 'hr-legend-dot';
+        dot.style.setProperty('--legend-color', colors[idx % colors.length]);
+        const text = document.createElement('span');
+        text.className = 'hr-legend-label';
+        text.textContent = label;
+        left.appendChild(dot);
+        left.appendChild(text);
+        const value = document.createElement('span');
+        value.textContent = counts[idx] ?? 0;
+        item.appendChild(left);
+        item.appendChild(value);
+        container.appendChild(item);
+      });
     };
 
     const renderInsights = (summary, listEl) => {
@@ -2506,12 +2659,14 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
           }
 
           if (data.projects) {
+            const projectColors = [palette.blue, palette.gold, palette.orange, palette.violet, palette.teal, palette.rose, '#94a3b8', '#22c55e'];
             updateChart('projects', () => createDonutChart(
               document.getElementById('projectChart').getContext('2d'),
               data.projects.labels || [],
               data.projects.counts || [],
-              [palette.blue, palette.gold, palette.orange, palette.violet, palette.teal, palette.rose, '#94a3b8']
+              projectColors
             ));
+            renderProjectLegend(data.projects, projectColors);
           }
 
           const completion = timeMetrics.completionRate ?? 0;
@@ -2519,12 +2674,18 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
             document.getElementById('completionChart').getContext('2d'),
             completion
           ));
+          setText('completionValue', `${completion}%`);
 
           renderRecent(data.recent || []);
           renderInsights(data);
         })
         .catch(() => {
           setText('kpiActive', '-');
+          setText('completionValue', '-');
+          const legend = document.getElementById('projectLegend');
+          if (legend) {
+            legend.innerHTML = '<div class="text-muted">Project breakdown unavailable.</div>';
+          }
         });
     };
 
