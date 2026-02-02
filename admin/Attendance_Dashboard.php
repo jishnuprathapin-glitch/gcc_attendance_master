@@ -2999,6 +2999,111 @@ include __DIR__ . '/include/layout_top.php';
     white-space: nowrap;
   }
 
+  .focus-grid {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  }
+
+  .focus-card {
+    position: relative;
+    padding: 16px;
+    border-radius: 16px;
+    background: #ffffff;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+    overflow: hidden;
+  }
+
+  .focus-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(20, 184, 166, 0.08));
+    opacity: 0.7;
+    pointer-events: none;
+  }
+
+  .focus-card > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .focus-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .focus-title {
+    font-weight: 600;
+    color: var(--dash-ink);
+  }
+
+  .focus-meta {
+    font-size: 12px;
+    color: var(--dash-muted);
+  }
+
+  .focus-pill {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    background: rgba(37, 99, 235, 0.12);
+    color: #1d4ed8;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .focus-workcodes {
+    display: grid;
+    gap: 8px;
+    max-height: 220px;
+    overflow: auto;
+    padding-right: 4px;
+  }
+
+  .focus-workcode-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 1fr auto;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+  }
+
+  .focus-workcode-label {
+    color: var(--dash-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .focus-workcode-bar {
+    height: 6px;
+    background: #e2e8f0;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .focus-workcode-bar span {
+    display: block;
+    height: 100%;
+    width: var(--bar-size, 0%);
+    border-radius: inherit;
+    background: linear-gradient(90deg, #0ea5e9, #14b8a6);
+  }
+
+  .focus-workcode-count {
+    font-weight: 600;
+    color: var(--dash-ink);
+  }
+
   .insight-matrix-slot {
     min-height: 120px;
   }
@@ -3365,6 +3470,15 @@ include __DIR__ . '/include/layout_top.php';
           </div>
 
           <div class="insight-panel insight-panel--wide">
+            <div class="insight-title">Department focus</div>
+            <div class="insight-subtitle">Attendance totals with workcode mix per department.</div>
+            <div class="insight-table-toolbar">
+              <div class="insight-table-meta" id="deptFocusMeta">Loading department focus...</div>
+            </div>
+            <div id="deptFocusGrid" class="focus-grid"></div>
+          </div>
+
+          <div class="insight-panel insight-panel--wide">
             <div class="insight-title">Workcode x Project breakdown</div>
             <div class="insight-subtitle">Employee counts per workcode for each project.</div>
             <div class="insight-table-toolbar">
@@ -3372,6 +3486,15 @@ include __DIR__ . '/include/layout_top.php';
               <div class="insight-table-meta" id="projectWorkcodeMeta">Loading project breakdown...</div>
             </div>
             <div id="projectWorkcodeMatrix" class="insight-matrix-slot"></div>
+          </div>
+
+          <div class="insight-panel insight-panel--wide">
+            <div class="insight-title">Project focus</div>
+            <div class="insight-subtitle">Attendance totals with workcode mix per project.</div>
+            <div class="insight-table-toolbar">
+              <div class="insight-table-meta" id="projectFocusMeta">Loading project focus...</div>
+            </div>
+            <div id="projectFocusGrid" class="focus-grid"></div>
           </div>
 
           <div class="insight-panel insight-panel--wide">
@@ -3579,6 +3702,95 @@ include __DIR__ . '/include/layout_top.php';
     const renderInsightsOverrides = (overrides) => {
       renderOverrideStatus(overrides || {});
     };
+    const renderFocusCards = (payload, options) => {
+      const container = document.getElementById(options.containerId);
+      const metaEl = document.getElementById(options.metaId);
+      if (!container) {
+        return;
+      }
+      const rows = Array.isArray(payload) ? payload : [];
+      if (!rows.length) {
+        container.innerHTML = '<div class="insight-empty">No focus data available.</div>';
+        if (metaEl) {
+          metaEl.textContent = options.emptyMeta || 'No records in this range.';
+        }
+        return;
+      }
+      const filterText = String(options.filter || '').trim().toLowerCase();
+      const groupMap = new Map();
+      rows.forEach((row) => {
+        const group = String(row.group || 'Unassigned');
+        const workCode = String(row.workCode || 'Unknown');
+        const count = Number(row.count) || 0;
+        if (!groupMap.has(group)) {
+          groupMap.set(group, new Map());
+        }
+        const workcodes = groupMap.get(group);
+        workcodes.set(workCode, (workcodes.get(workCode) || 0) + count);
+      });
+      const groupList = Array.from(groupMap.entries()).map(([group, workcodes]) => {
+        let total = 0;
+        workcodes.forEach((count) => {
+          total += count;
+        });
+        return { group, workcodes, total };
+      }).sort((a, b) => {
+        const diff = b.total - a.total;
+        if (diff !== 0) {
+          return diff;
+        }
+        return String(a.group).localeCompare(String(b.group));
+      });
+      const filtered = groupList.filter((item) => {
+        if (!filterText) {
+          return true;
+        }
+        return String(item.group).toLowerCase().includes(filterText);
+      });
+      if (metaEl) {
+        metaEl.textContent = `${filtered.length} of ${groupList.length} ${options.groupLabel.toLowerCase()}`;
+      }
+      if (!filtered.length) {
+        container.innerHTML = '<div class="insight-empty">No matches for this filter.</div>';
+        return;
+      }
+      container.innerHTML = '';
+      const fragment = document.createDocumentFragment();
+      filtered.forEach((item) => {
+        const card = document.createElement('div');
+        card.className = 'focus-card';
+        const workcodeRows = Array.from(item.workcodes.entries()).sort((a, b) => {
+          const diff = b[1] - a[1];
+          if (diff !== 0) {
+            return diff;
+          }
+          return String(a[0]).localeCompare(String(b[0]));
+        });
+        const total = item.total || 0;
+        const workcodeHtml = workcodeRows.map(([code, count]) => {
+          const pct = total > 0 ? Math.max(4, (count / total) * 100) : 0;
+          return `
+            <div class="focus-workcode-row">
+              <div class="focus-workcode-label">${escapeHtml(code)}</div>
+              <div class="focus-workcode-bar"><span style="--bar-size:${pct.toFixed(2)}%;"></span></div>
+              <div class="focus-workcode-count">${formatNumber(count)}</div>
+            </div>
+          `;
+        }).join('');
+        card.innerHTML = `
+          <div class="focus-header">
+            <div>
+              <div class="focus-title">${escapeHtml(item.group)}</div>
+              <div class="focus-meta">Present: ${formatNumber(total)}</div>
+            </div>
+            <div class="focus-pill">${formatNumber(workcodeRows.length)} workcodes</div>
+          </div>
+          <div class="focus-workcodes">${workcodeHtml || '<div class="insight-empty">No workcodes in range.</div>'}</div>
+        `;
+        fragment.appendChild(card);
+      });
+      container.appendChild(fragment);
+    };
     const renderWorkcodeMatrix = (payload, options) => {
       const container = document.getElementById(options.containerId);
       const metaEl = document.getElementById(options.metaId);
@@ -3749,6 +3961,9 @@ include __DIR__ . '/include/layout_top.php';
           groupLabel: options.groupLabel,
           filter: matrixState[stateKey].filter,
         });
+        if (typeof options.onFilter === 'function') {
+          options.onFilter(matrixState[stateKey].filter);
+        }
       };
       input.addEventListener('input', () => {
         window.requestAnimationFrame(apply);
@@ -4493,6 +4708,12 @@ include __DIR__ . '/include/layout_top.php';
             groupLabel: 'Departments',
             filter: matrixState.department.filter,
           });
+          renderFocusCards(matrixState.department.rows, {
+            containerId: 'deptFocusGrid',
+            metaId: 'deptFocusMeta',
+            groupLabel: 'Departments',
+            filter: matrixState.department.filter,
+          });
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
           setPanelError('Dept workcodes', errors.length > 0);
         })
@@ -4504,6 +4725,13 @@ include __DIR__ . '/include/layout_top.php';
             filter: '',
             emptyText: 'Unable to load department workcode breakdown.',
             emptyMeta: 'Department workcodes unavailable.',
+          });
+          renderFocusCards([], {
+            containerId: 'deptFocusGrid',
+            metaId: 'deptFocusMeta',
+            groupLabel: 'Departments',
+            filter: '',
+            emptyMeta: 'Department focus unavailable.',
           });
           setPanelError('Dept workcodes', true);
         });
@@ -4530,6 +4758,12 @@ include __DIR__ . '/include/layout_top.php';
             groupLabel: 'Projects',
             filter: matrixState.project.filter,
           });
+          renderFocusCards(matrixState.project.rows, {
+            containerId: 'projectFocusGrid',
+            metaId: 'projectFocusMeta',
+            groupLabel: 'Projects',
+            filter: matrixState.project.filter,
+          });
           const errors = Array.isArray(data.errors) ? data.errors.filter(Boolean) : [];
           setPanelError('Project workcodes', errors.length > 0);
         })
@@ -4541,6 +4775,13 @@ include __DIR__ . '/include/layout_top.php';
             filter: '',
             emptyText: 'Unable to load project workcode breakdown.',
             emptyMeta: 'Project workcodes unavailable.',
+          });
+          renderFocusCards([], {
+            containerId: 'projectFocusGrid',
+            metaId: 'projectFocusMeta',
+            groupLabel: 'Projects',
+            filter: '',
+            emptyMeta: 'Project focus unavailable.',
           });
           setPanelError('Project workcodes', true);
         });
@@ -4737,11 +4978,27 @@ include __DIR__ . '/include/layout_top.php';
       containerId: 'deptWorkcodeMatrix',
       metaId: 'deptWorkcodeMeta',
       groupLabel: 'Departments',
+      onFilter: (filter) => {
+        renderFocusCards(matrixState.department.rows, {
+          containerId: 'deptFocusGrid',
+          metaId: 'deptFocusMeta',
+          groupLabel: 'Departments',
+          filter,
+        });
+      },
     });
     bindMatrixSearch('projectWorkcodeSearch', 'project', {
       containerId: 'projectWorkcodeMatrix',
       metaId: 'projectWorkcodeMeta',
       groupLabel: 'Projects',
+      onFilter: (filter) => {
+        renderFocusCards(matrixState.project.rows, {
+          containerId: 'projectFocusGrid',
+          metaId: 'projectFocusMeta',
+          groupLabel: 'Projects',
+          filter,
+        });
+      },
     });
     bindMatrixSearch('companyWorkcodeSearch', 'company', {
       containerId: 'companyWorkcodeMatrix',
