@@ -806,6 +806,328 @@ if ($isAjax && $ajaxSection === 'departments') {
     exit;
 }
 
+if ($isAjax && $ajaxSection === 'projects-focus') {
+    $errors = [];
+    $projectRoster = [];
+    $projectDeptRoster = [];
+    $projectNameMap = [];
+
+    $projectRosterSql = 'SELECT COALESCE(NULLIF(jbno, \'\'), \'Unassigned\') AS project_code, ' .
+        'COUNT(*) AS total FROM gcc_attendance_master.hrmsvw_sync ' .
+        'GROUP BY COALESCE(NULLIF(jbno, \'\'), \'Unassigned\')';
+    $projectRosterResult = db_fetch_all($bd, $projectRosterSql);
+    if ($projectRosterResult['ok']) {
+        foreach ($projectRosterResult['rows'] as $row) {
+            $projectCode = trim((string) ($row['project_code'] ?? ''));
+            if ($projectCode === '') {
+                $projectCode = 'Unassigned';
+            }
+            $projectRoster[$projectCode] = (int) ($row['total'] ?? 0);
+        }
+    } else {
+        $errors[] = 'Project roster';
+    }
+
+    $projectDeptSql = 'SELECT COALESCE(NULLIF(jbno, \'\'), \'Unassigned\') AS project_code, ' .
+        'COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\') AS dept_name, ' .
+        'COUNT(*) AS total FROM gcc_attendance_master.hrmsvw_sync ' .
+        'GROUP BY COALESCE(NULLIF(jbno, \'\'), \'Unassigned\'), COALESCE(NULLIF(dept_name, \'\'), \'Unassigned\')';
+    $projectDeptResult = db_fetch_all($bd, $projectDeptSql);
+    if ($projectDeptResult['ok']) {
+        foreach ($projectDeptResult['rows'] as $row) {
+            $projectCode = trim((string) ($row['project_code'] ?? ''));
+            if ($projectCode === '') {
+                $projectCode = 'Unassigned';
+            }
+            $deptName = trim((string) ($row['dept_name'] ?? ''));
+            if ($deptName === '') {
+                $deptName = 'Unassigned';
+            }
+            if (!isset($projectDeptRoster[$projectCode])) {
+                $projectDeptRoster[$projectCode] = [];
+            }
+            $projectDeptRoster[$projectCode][$deptName] = (int) ($row['total'] ?? 0);
+        }
+    } else {
+        $errors[] = 'Department roster';
+    }
+
+    $projectMapResult = db_fetch_all($bd, 'SELECT pro_code, name FROM gcc_it.projects');
+    if ($projectMapResult['ok']) {
+        foreach ($projectMapResult['rows'] as $row) {
+            $projectCode = trim((string) ($row['pro_code'] ?? ''));
+            $projectName = trim((string) ($row['name'] ?? ''));
+            if ($projectCode !== '' && $projectName !== '' && !isset($projectNameMap[$projectCode])) {
+                $projectNameMap[$projectCode] = $projectName;
+            }
+        }
+    }
+
+    $projectStats = [];
+    foreach ($projectRoster as $projectCode => $count) {
+        $projectStats[$projectCode] = [
+            'code' => $projectCode,
+            'activeCount' => $count,
+            'employees' => [],
+            'departments' => [],
+            'lateCount' => 0,
+            'earlyLeaveCount' => 0,
+            'overtimeCount' => 0,
+            'completionCount' => 0,
+            'sampleCount' => 0,
+            'firstTotal' => 0,
+            'firstCount' => 0,
+            'lastTotal' => 0,
+            'lastCount' => 0,
+        ];
+    }
+
+    $punchWhere = 'p.punch_date = ? AND (p.first_log IS NOT NULL OR p.last_log IS NOT NULL)';
+    $punchTypes = 's';
+    $punchParams = [$endDate];
+    if ($deviceSnParam !== '') {
+        $punchWhere .= ' AND (FIND_IN_SET(p.first_terminal_sn, ?) OR FIND_IN_SET(p.last_terminal_sn, ?))';
+        $punchParams[] = $deviceSnParam;
+        $punchParams[] = $deviceSnParam;
+        $punchTypes .= 'ss';
+    }
+
+    $projectSelect = 'COALESCE(NULLIF(pf.pro_code, \'\'), NULLIF(pl.pro_code, \'\'), NULLIF(d.job, \'\'), NULLIF(h.jbno, \'\')) AS project_code';
+    $projectTypes = '';
+    $projectParams = [];
+    if ($deviceSnParam !== '') {
+        $projectSelect = 'COALESCE(' .
+            'NULLIF(IF(FIND_IN_SET(p.first_terminal_sn, ?), pf.pro_code, \'\'), \'\'), ' .
+            'NULLIF(IF(FIND_IN_SET(p.last_terminal_sn, ?), pl.pro_code, \'\'), \'\'), ' .
+            'NULLIF(d.job, \'\'), NULLIF(h.jbno, \'\')) AS project_code';
+        $projectTypes = 'ss';
+        $projectParams = [$deviceSnParam, $deviceSnParam];
+    }
+
+    $projectSql = 'SELECT p.emp_code, p.first_log, p.last_log, ' . $projectSelect . ', ' .
+        'COALESCE(NULLIF(h.dept_name, \'\'), NULLIF(d.department_name, \'\')) AS dept_name ' .
+        'FROM gcc_attendance_master.employee_daily_punch p ' .
+        'LEFT JOIN gcc_attendance_master.device_project_map df ON df.device_sn = p.first_terminal_sn ' .
+        'LEFT JOIN gcc_it.projects pf ON pf.id = df.project_id ' .
+        'LEFT JOIN gcc_attendance_master.device_project_map dl ON dl.device_sn = p.last_terminal_sn ' .
+        'LEFT JOIN gcc_it.projects pl ON pl.id = dl.project_id ' .
+        'LEFT JOIN gcc_attendance_master.employee_att_daily d ' .
+        'ON d.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
+        'AND d.att_date = p.punch_date ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ' .
+        'ON h.emp_code COLLATE utf8mb4_general_ci = p.emp_code COLLATE utf8mb4_general_ci ' .
+        'WHERE ' . $punchWhere;
+    $projectResult = db_fetch_all($bd, $projectSql, $projectTypes . $punchTypes, array_merge($projectParams, $punchParams));
+    $projectRows = $projectResult['ok'] ? $projectResult['rows'] : [];
+    if (!$projectResult['ok']) {
+        $errors[] = 'Project punches';
+    }
+
+    $lateThreshold = 10 * 60;
+    $earlyLeaveThreshold = 16 * 60;
+    $overtimeThreshold = 19 * 60;
+
+    foreach ($projectRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $projectCode = trim((string) ($row['project_code'] ?? ''));
+        if ($projectCode === '') {
+            $projectCode = 'Unassigned';
+        }
+        if (!isset($projectStats[$projectCode])) {
+            $projectStats[$projectCode] = [
+                'code' => $projectCode,
+                'activeCount' => $projectRoster[$projectCode] ?? null,
+                'employees' => [],
+                'departments' => [],
+                'lateCount' => 0,
+                'earlyLeaveCount' => 0,
+                'overtimeCount' => 0,
+                'completionCount' => 0,
+                'sampleCount' => 0,
+                'firstTotal' => 0,
+                'firstCount' => 0,
+                'lastTotal' => 0,
+                'lastCount' => 0,
+            ];
+        }
+
+        $projectStats[$projectCode]['sampleCount']++;
+
+        $empCode = trim((string) ($row['emp_code'] ?? ''));
+        if ($empCode !== '') {
+            $projectStats[$projectCode]['employees'][$empCode] = true;
+        }
+
+        $firstMinutesValue = parse_time_minutes($row['first_log'] ?? null);
+        $lastMinutesValue = parse_time_minutes($row['last_log'] ?? null);
+
+        if ($firstMinutesValue !== null) {
+            $projectStats[$projectCode]['firstTotal'] += $firstMinutesValue;
+            $projectStats[$projectCode]['firstCount']++;
+            if ($firstMinutesValue > $lateThreshold) {
+                $projectStats[$projectCode]['lateCount']++;
+            }
+        }
+        if ($lastMinutesValue !== null) {
+            $projectStats[$projectCode]['lastTotal'] += $lastMinutesValue;
+            $projectStats[$projectCode]['lastCount']++;
+            if ($lastMinutesValue < $earlyLeaveThreshold) {
+                $projectStats[$projectCode]['earlyLeaveCount']++;
+            }
+            if ($lastMinutesValue > $overtimeThreshold) {
+                $projectStats[$projectCode]['overtimeCount']++;
+            }
+        }
+        if ($firstMinutesValue !== null && $lastMinutesValue !== null) {
+            $projectStats[$projectCode]['completionCount']++;
+        }
+
+        $deptName = trim((string) ($row['dept_name'] ?? ''));
+        if ($deptName === '') {
+            $deptName = 'Unassigned';
+        }
+        if (!isset($projectStats[$projectCode]['departments'][$deptName])) {
+            $projectStats[$projectCode]['departments'][$deptName] = 0;
+        }
+        $projectStats[$projectCode]['departments'][$deptName]++;
+    }
+
+    $projects = [];
+    foreach ($projectStats as $projectCode => $stats) {
+        $loggedCount = count($stats['employees']);
+        $coveragePercent = null;
+        if ($stats['activeCount'] !== null && $stats['activeCount'] > 0) {
+            $coveragePercent = (int) round(($loggedCount / $stats['activeCount']) * 100);
+        }
+        $absentCount = null;
+        if ($stats['activeCount'] !== null) {
+            $absentCount = max(0, $stats['activeCount'] - $loggedCount);
+        }
+
+        $completionRate = null;
+        if ($stats['sampleCount'] > 0) {
+            $completionRate = (int) round(($stats['completionCount'] / $stats['sampleCount']) * 100);
+        }
+
+        $avgFirst = null;
+        if ($stats['firstCount'] > 0) {
+            $avgFirst = (int) round($stats['firstTotal'] / $stats['firstCount']);
+        }
+        $avgLast = null;
+        if ($stats['lastCount'] > 0) {
+            $avgLast = (int) round($stats['lastTotal'] / $stats['lastCount']);
+        }
+
+        $deptCounts = $stats['departments'];
+        $deptRoster = $projectDeptRoster[$projectCode] ?? [];
+        $deptKeys = array_unique(array_merge(array_keys($deptRoster), array_keys($deptCounts)));
+        $deptItems = [];
+        $deptTotalActive = 0;
+        $deptTotalLogged = 0;
+        $deptTotalAbsent = 0;
+        foreach ($deptKeys as $deptName) {
+            $activeCount = (int) ($deptRoster[$deptName] ?? 0);
+            $loggedDeptCount = (int) ($deptCounts[$deptName] ?? 0);
+            $absentDeptCount = max(0, $activeCount - $loggedDeptCount);
+            $deptTotalActive += $activeCount;
+            $deptTotalLogged += $loggedDeptCount;
+            $deptTotalAbsent += $absentDeptCount;
+            $deptItems[] = [
+                'name' => $deptName,
+                'label' => $deptName,
+                'activeCount' => $activeCount,
+                'loggedCount' => $loggedDeptCount,
+                'absentCount' => $absentDeptCount,
+            ];
+        }
+
+        usort($deptItems, function (array $a, array $b): int {
+            $absentCompare = ($b['absentCount'] ?? 0) <=> ($a['absentCount'] ?? 0);
+            if ($absentCompare !== 0) {
+                return $absentCompare;
+            }
+            return ($b['loggedCount'] ?? 0) <=> ($a['loggedCount'] ?? 0);
+        });
+
+        $deptLimit = 4;
+        $deptItemsLimited = array_slice($deptItems, 0, $deptLimit);
+        $deptItemsRemainder = array_slice($deptItems, $deptLimit);
+        if (!empty($deptItemsRemainder)) {
+            $otherActive = 0;
+            $otherLogged = 0;
+            $otherAbsent = 0;
+            foreach ($deptItemsRemainder as $item) {
+                $otherActive += (int) ($item['activeCount'] ?? 0);
+                $otherLogged += (int) ($item['loggedCount'] ?? 0);
+                $otherAbsent += (int) ($item['absentCount'] ?? 0);
+            }
+            $deptItemsLimited[] = [
+                'name' => 'Other',
+                'label' => 'Other',
+                'activeCount' => $otherActive,
+                'loggedCount' => $otherLogged,
+                'absentCount' => $otherAbsent,
+            ];
+        }
+
+        $projectLabel = $projectCode;
+        if ($projectCode !== 'Unassigned' && isset($projectNameMap[$projectCode])) {
+            $projectLabel = $projectCode . ' - ' . $projectNameMap[$projectCode];
+        } elseif (isset($projectNameMap[$projectCode]) && $projectNameMap[$projectCode] !== '') {
+            $projectLabel = $projectNameMap[$projectCode];
+        }
+
+        $projects[] = [
+            'code' => $projectCode,
+            'name' => $projectLabel,
+            'kpis' => [
+                'activeCount' => $stats['activeCount'],
+                'loggedCount' => $loggedCount,
+                'coveragePercent' => $coveragePercent,
+                'absentCount' => $absentCount,
+            ],
+            'timeMetrics' => [
+                'lateCount' => $stats['lateCount'],
+                'earlyLeaveCount' => $stats['earlyLeaveCount'],
+                'overtimeCount' => $stats['overtimeCount'],
+                'avgFirst' => format_time_minutes($avgFirst),
+                'avgLast' => format_time_minutes($avgLast),
+                'completionRate' => $completionRate,
+            ],
+            'departments' => [
+                'items' => $deptItemsLimited,
+                'totalActive' => $deptTotalActive,
+                'totalLogged' => $deptTotalLogged,
+                'totalAbsent' => $deptTotalAbsent,
+            ],
+            'meta' => [
+                'sampleCount' => $stats['sampleCount'],
+            ],
+        ];
+    }
+
+    usort($projects, function (array $a, array $b): int {
+        return ($b['kpis']['loggedCount'] ?? 0) <=> ($a['kpis']['loggedCount'] ?? 0);
+    });
+
+    $payload = [
+        'ok' => true,
+        'errors' => array_values(array_unique($errors)),
+        'meta' => [
+            'pulseDate' => $endDate,
+            'projectCount' => count($projects),
+        ],
+        'projects' => $projects,
+    ];
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
 ?>
 <?php include __DIR__ . '/include/layout_top.php'; ?>
 
@@ -1030,15 +1352,21 @@ if ($isAjax && $ajaxSection === 'departments') {
     position: relative;
     z-index: 1;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 0.75rem;
+  }
+  .hr-dept-title {
+    flex: 1 1 auto;
+    min-width: 0;
   }
   .hr-dept-title h5 {
     margin: 0;
     font-size: 1.1rem;
     font-weight: 700;
     color: var(--hr-ink);
+    white-space: normal;
+    word-break: break-word;
   }
   .hr-dept-sub {
     font-size: 0.85rem;
@@ -1046,10 +1374,10 @@ if ($isAjax && $ajaxSection === 'departments') {
   }
   .hr-ring {
     --value: 0;
-    width: 68px;
-    height: 68px;
+    width: 82px;
+    height: 82px;
     border-radius: 50%;
-    background: conic-gradient(var(--accent, #38bdf8) calc(var(--value) * 1%), rgba(148, 163, 184, 0.2) 0);
+    background: conic-gradient(var(--ring-color, var(--accent, #38bdf8)) calc(var(--value) * 1%), rgba(148, 163, 184, 0.2) 0);
     display: grid;
     place-items: center;
     position: relative;
@@ -1057,7 +1385,7 @@ if ($isAjax && $ajaxSection === 'departments') {
   .hr-ring::after {
     content: "";
     position: absolute;
-    inset: 8px;
+    inset: 10px;
     border-radius: 50%;
     background: #ffffff;
   }
@@ -1070,11 +1398,11 @@ if ($isAjax && $ajaxSection === 'departments') {
   }
   .hr-ring span {
     font-weight: 700;
-    font-size: 0.85rem;
+    font-size: 0.95rem;
     color: var(--hr-ink);
   }
   .hr-ring small {
-    font-size: 0.65rem;
+    font-size: 0.75rem;
     color: var(--att-muted);
     margin-top: -2px;
   }
@@ -1092,7 +1420,7 @@ if ($isAjax && $ajaxSection === 'departments') {
   .hr-coverage-bar {
     height: 8px;
     border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent, #38bdf8) calc(var(--coverage) * 1%), rgba(148, 163, 184, 0.25) 0);
+    background: linear-gradient(90deg, var(--coverage-color, var(--accent, #38bdf8)) calc(var(--coverage) * 1%), rgba(148, 163, 184, 0.25) 0);
   }
   .hr-chip-row {
     position: relative;
@@ -1131,6 +1459,64 @@ if ($isAjax && $ajaxSection === 'departments') {
   .hr-dept-card .hr-insight {
     padding: 0.45rem 0.6rem;
     font-size: 0.78rem;
+  }
+  .hr-focus-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.8rem;
+  }
+  .hr-focus-search {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1 1 240px;
+  }
+  .hr-focus-search .form-control,
+  .hr-focus-search .btn {
+    height: 36px;
+  }
+  .hr-focus-search .btn {
+    line-height: 1;
+  }
+  .hr-focus-carousel {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    gap: 1rem;
+  }
+  .hr-focus-stage {
+    flex: 1 1 auto;
+    min-height: 240px;
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  }
+  .hr-focus-nav {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: none;
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.82), rgba(59, 130, 246, 0.75));
+    color: #ffffff;
+    display: grid;
+    place-items: center;
+    font-size: 1.2rem;
+    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.2);
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .hr-focus-nav:hover {
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 16px 30px rgba(15, 23, 42, 0.25);
+  }
+  .hr-focus-nav:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
   }
   .hr-dept-projects {
     position: relative;
@@ -1369,6 +1755,39 @@ if ($isAjax && $ajaxSection === 'departments') {
           <div class="hr-dept-card">
             <div class="hr-skeleton" style="height: 200px;"></div>
           </div>
+        </div>
+      </div>
+
+      <div class="card hr-card">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <div>
+            <h4>Project focus</h4>
+            <p class="text-muted mb-2">All core insights by project with department mix.</p>
+          </div>
+          <div class="hr-pill-row">
+            <span class="hr-pill" id="projectCountPill">Projects: -</span>
+            <span class="hr-pill" id="projectPulsePill">Pulse: <?= h($endDate) ?></span>
+          </div>
+        </div>
+        <div class="hr-focus-toolbar">
+          <div class="hr-focus-search">
+            <input id="projectFocusSearch" class="form-control form-control-sm" type="search" placeholder="Search project">
+            <button id="projectFocusSearchBtn" class="btn btn-sm btn-outline-primary" type="button">Search</button>
+          </div>
+          <div class="text-muted small" id="projectFocusMeta">Loading project focus...</div>
+        </div>
+        <div class="hr-focus-carousel">
+          <button class="hr-focus-nav hr-focus-prev" id="projectFocusPrev" type="button" aria-label="Previous project">
+            <i class="fas fa-chevron-left"></i>
+          </button>
+          <div class="hr-focus-stage" id="projectInsights">
+            <div class="hr-dept-card">
+              <div class="hr-skeleton" style="height: 220px;"></div>
+            </div>
+          </div>
+          <button class="hr-focus-nav hr-focus-next" id="projectFocusNext" type="button" aria-label="Next project">
+            <i class="fas fa-chevron-right"></i>
+          </button>
         </div>
       </div>
     </div>
@@ -1612,6 +2031,19 @@ if ($isAjax && $ajaxSection === 'departments') {
       return chip;
     };
 
+    const getCoverageTone = (coverage) => {
+      if (coverage === null || coverage === undefined) {
+        return null;
+      }
+      if (coverage < 30) {
+        return '#ef4444';
+      }
+      if (coverage < 70) {
+        return '#f97316';
+      }
+      return null;
+    };
+
     const renderDepartments = (data) => {
       const container = document.getElementById('deptInsights');
       if (!container) return;
@@ -1646,6 +2078,11 @@ if ($isAjax && $ajaxSection === 'departments') {
         if (coverage !== null && coverage !== undefined && coverage < 70) {
           card.classList.add('is-low');
         }
+        const coverageTone = getCoverageTone(coverage);
+        if (coverageTone) {
+          card.style.setProperty('--ring-color', coverageTone);
+          card.style.setProperty('--coverage-color', coverageTone);
+        }
 
         const header = document.createElement('div');
         header.className = 'hr-dept-header';
@@ -1667,7 +2104,7 @@ if ($isAjax && $ajaxSection === 'departments') {
         const ringValue = document.createElement('span');
         ringValue.textContent = completionValue !== null ? `${completionValue}%` : '--';
         const ringLabel = document.createElement('small');
-        ringLabel.textContent = 'Complete';
+        ringLabel.textContent = 'In/Out';
         ring.appendChild(ringValue);
         ring.appendChild(ringLabel);
 
@@ -1724,7 +2161,7 @@ if ($isAjax && $ajaxSection === 'departments') {
             const name = document.createElement('span');
             name.textContent = label;
             const value = document.createElement('span');
-            value.textContent = count;
+            value.textContent = `${count} (${pct}%)`;
             head.appendChild(name);
             head.appendChild(value);
             const bar = document.createElement('div');
@@ -1750,6 +2187,265 @@ if ($isAjax && $ajaxSection === 'departments') {
       });
     };
 
+    const projectFocusState = {
+      rows: [],
+      filtered: [],
+      index: 0,
+      query: ''
+    };
+
+    const normalizeProjectQuery = (value) => String(value || '').trim().toLowerCase();
+
+    const buildProjectCard = (project, index) => {
+      const accent = accentPalette[index % accentPalette.length];
+      const card = document.createElement('div');
+      card.className = 'hr-dept-card';
+      card.style.setProperty('--accent', accent);
+      card.style.setProperty('--accent-soft', hexToRgba(accent, 0.25));
+
+      const kpis = project.kpis || {};
+      const timeMetrics = project.timeMetrics || {};
+      const logged = kpis.loggedCount ?? 0;
+      const active = (kpis.activeCount !== null && kpis.activeCount !== undefined) ? kpis.activeCount : '-';
+      const coverage = kpis.coveragePercent;
+      const coverageValue = (coverage !== null && coverage !== undefined) ? coverage : 0;
+
+        if (coverage !== null && coverage !== undefined && coverage < 70) {
+          card.classList.add('is-low');
+        }
+        const coverageTone = getCoverageTone(coverage);
+        if (coverageTone) {
+          card.style.setProperty('--ring-color', coverageTone);
+          card.style.setProperty('--coverage-color', coverageTone);
+        }
+
+      const header = document.createElement('div');
+      header.className = 'hr-dept-header';
+      const titleWrap = document.createElement('div');
+      titleWrap.className = 'hr-dept-title';
+      const title = document.createElement('h5');
+      title.textContent = project.name || project.code || 'Unassigned';
+      const subtitle = document.createElement('div');
+      subtitle.className = 'hr-dept-sub';
+      subtitle.textContent = `Logged ${logged} / ${active}`;
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(subtitle);
+
+      const ring = document.createElement('div');
+      ring.className = 'hr-ring';
+      const completion = timeMetrics.completionRate;
+      const completionValue = Number.isFinite(completion) ? completion : null;
+      ring.style.setProperty('--value', completionValue ?? 0);
+      const ringValue = document.createElement('span');
+      ringValue.textContent = completionValue !== null ? `${completionValue}%` : '--';
+      const ringLabel = document.createElement('small');
+        ringLabel.textContent = 'In/Out';
+      ring.appendChild(ringValue);
+      ring.appendChild(ringLabel);
+
+      header.appendChild(titleWrap);
+      header.appendChild(ring);
+
+      const coverageWrap = document.createElement('div');
+      coverageWrap.className = 'hr-coverage';
+      const coverageLabel = document.createElement('div');
+      coverageLabel.className = 'hr-coverage-label';
+      coverageLabel.textContent = `Coverage ${coverage !== null && coverage !== undefined ? coverage + '%' : 'n/a'}`;
+      const coverageBar = document.createElement('div');
+      coverageBar.className = 'hr-coverage-bar';
+      coverageBar.style.setProperty('--coverage', coverageValue);
+      coverageWrap.appendChild(coverageLabel);
+      coverageWrap.appendChild(coverageBar);
+
+      const chipRow = document.createElement('div');
+      chipRow.className = 'hr-chip-row';
+      chipRow.appendChild(createChip('Late', timeMetrics.lateCount, 10));
+      chipRow.appendChild(createChip('Early', timeMetrics.earlyLeaveCount, 8));
+      chipRow.appendChild(createChip('Overtime', timeMetrics.overtimeCount, 6));
+
+        const deptWrap = document.createElement('div');
+      deptWrap.className = 'hr-dept-projects';
+      const deptTitle = document.createElement('div');
+      deptTitle.className = 'hr-project-title';
+      deptTitle.textContent = 'Department mix';
+      deptWrap.appendChild(deptTitle);
+
+      const deptItems = (project.departments && Array.isArray(project.departments.items))
+        ? project.departments.items
+        : [];
+      const deptTotal = (project.departments && Number.isFinite(project.departments.totalLogged))
+        ? project.departments.totalLogged
+        : deptItems.reduce((sum, item) => sum + (Number(item.loggedCount) || 0), 0);
+
+      if (deptItems.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'text-muted';
+        empty.textContent = 'No department breakdown available.';
+        deptWrap.appendChild(empty);
+      } else {
+        deptItems.forEach((item) => {
+          const label = item.label || item.name || 'Unassigned';
+          const count = Number(item.loggedCount) || 0;
+          const pct = deptTotal > 0 ? Math.round((count / deptTotal) * 100) : 0;
+          const dept = document.createElement('div');
+          dept.className = 'hr-project';
+          const head = document.createElement('div');
+          head.className = 'hr-project-head';
+          const name = document.createElement('span');
+          name.textContent = label;
+          const value = document.createElement('span');
+            value.textContent = `${count} (${pct}%)`;
+          head.appendChild(name);
+          head.appendChild(value);
+          const bar = document.createElement('div');
+          bar.className = 'hr-project-bar';
+          bar.style.setProperty('--pct', pct);
+          dept.appendChild(head);
+          dept.appendChild(bar);
+          deptWrap.appendChild(dept);
+        });
+      }
+
+      const sampleNote = document.createElement('div');
+      sampleNote.className = 'hr-dept-sample';
+      sampleNote.textContent = `Pulse sample: ${project.meta && project.meta.sampleCount ? project.meta.sampleCount : 0}`;
+
+      card.appendChild(header);
+      card.appendChild(coverageWrap);
+      card.appendChild(chipRow);
+      card.appendChild(deptWrap);
+      card.appendChild(sampleNote);
+      return card;
+    };
+
+    const getProjectPageSize = () => {
+      const stage = document.getElementById('projectInsights');
+      const width = stage ? stage.offsetWidth : window.innerWidth;
+      if (width >= 1400) {
+        return 3;
+      }
+      if (width >= 980) {
+        return 2;
+      }
+      return 1;
+    };
+
+    const renderProjectFocus = () => {
+      const container = document.getElementById('projectInsights');
+      const metaEl = document.getElementById('projectFocusMeta');
+      const prevBtn = document.getElementById('projectFocusPrev');
+      const nextBtn = document.getElementById('projectFocusNext');
+      if (!container) return;
+      container.innerHTML = '';
+
+      const total = projectFocusState.filtered.length;
+      const pageSize = getProjectPageSize();
+      const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+      const pageIndex = totalPages > 0
+        ? Math.min(projectFocusState.index, totalPages - 1)
+        : 0;
+      projectFocusState.index = pageIndex;
+
+      if (metaEl) {
+        if (total > 0) {
+          const start = pageIndex * pageSize + 1;
+          const end = Math.min(total, start + pageSize - 1);
+          metaEl.textContent = `${start}-${end} of ${total} projects`;
+        } else {
+          metaEl.textContent = 'No matching projects.';
+        }
+      }
+
+      if (total === 0) {
+        container.innerHTML = '<div class="text-muted">No project insights available.</div>';
+        if (prevBtn) prevBtn.disabled = true;
+        if (nextBtn) nextBtn.disabled = true;
+        return;
+      }
+
+      if (prevBtn) prevBtn.disabled = totalPages <= 1;
+      if (nextBtn) nextBtn.disabled = totalPages <= 1;
+
+      const startIndex = pageIndex * pageSize;
+      const pageItems = projectFocusState.filtered.slice(startIndex, startIndex + pageSize);
+      pageItems.forEach((project, offset) => {
+        container.appendChild(buildProjectCard(project, startIndex + offset));
+      });
+    };
+
+    const applyProjectFilter = (query) => {
+      projectFocusState.query = normalizeProjectQuery(query);
+      if (!projectFocusState.query) {
+        projectFocusState.filtered = projectFocusState.rows.slice();
+      } else {
+        projectFocusState.filtered = projectFocusState.rows.filter((project) => {
+          const name = String(project.name || project.code || '').toLowerCase();
+          return name.includes(projectFocusState.query);
+        });
+      }
+      projectFocusState.index = 0;
+      renderProjectFocus();
+    };
+
+    const renderProjects = (data) => {
+      const projects = (data && data.projects) ? data.projects : [];
+      projectFocusState.rows = projects.slice();
+      applyProjectFilter(projectFocusState.query);
+
+      setPill('projectCountPill', `Projects: ${projects.length}`);
+      if (data && data.meta && data.meta.pulseDate) {
+        setPill('projectPulsePill', `Pulse: ${data.meta.pulseDate}`);
+      }
+    };
+
+    const bindProjectFocusControls = () => {
+      const searchInput = document.getElementById('projectFocusSearch');
+      const searchBtn = document.getElementById('projectFocusSearchBtn');
+      const prevBtn = document.getElementById('projectFocusPrev');
+      const nextBtn = document.getElementById('projectFocusNext');
+
+      if (searchBtn) {
+        searchBtn.addEventListener('click', () => {
+          applyProjectFilter(searchInput ? searchInput.value : '');
+        });
+      }
+      if (searchInput) {
+        searchInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            applyProjectFilter(searchInput.value);
+          }
+        });
+      }
+
+      if (prevBtn) {
+        prevBtn.addEventListener('click', () => {
+          const total = projectFocusState.filtered.length;
+          const pageSize = getProjectPageSize();
+          const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+          if (totalPages <= 1) return;
+          projectFocusState.index = (projectFocusState.index - 1 + totalPages) % totalPages;
+          renderProjectFocus();
+        });
+      }
+      if (nextBtn) {
+        nextBtn.addEventListener('click', () => {
+          const total = projectFocusState.filtered.length;
+          const pageSize = getProjectPageSize();
+          const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+          if (totalPages <= 1) return;
+          projectFocusState.index = (projectFocusState.index + 1) % totalPages;
+          renderProjectFocus();
+        });
+      }
+      let resizeTimer;
+      window.addEventListener('resize', () => {
+        window.clearTimeout(resizeTimer);
+        resizeTimer = window.setTimeout(() => {
+          renderProjectFocus();
+        }, 120);
+      });
+    };
     const fetchSection = (section) => {
       const params = new URLSearchParams(baseParams);
       params.set('ajax', '1');
@@ -1866,6 +2562,20 @@ if ($isAjax && $ajaxSection === 'departments') {
         });
     };
 
+    const loadProjects = () => {
+      fetchSection('projects-focus')
+        .then((data) => {
+          if (!data) return;
+          renderProjects(data);
+        })
+        .catch(() => {
+          const container = document.getElementById('projectInsights');
+          if (container) {
+            container.innerHTML = '<div class="text-muted">Project insights unavailable.</div>';
+          }
+        });
+    };
+
     const bindQuickRanges = () => {
       const buttons = document.querySelectorAll('[data-range]');
       buttons.forEach((button) => {
@@ -1925,10 +2635,13 @@ if ($isAjax && $ajaxSection === 'departments') {
 
     bindQuickRanges();
     bindToggles();
+    bindProjectFocusControls();
     loadSummary();
     loadTrend();
     loadDepartments();
+    loadProjects();
   });
 </script>
 
 <?php include __DIR__ . '/include/layout_bottom.php'; ?>
+
