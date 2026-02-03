@@ -125,6 +125,12 @@ if ($deviceSnInput !== '') {
     }
 }
 $deviceSnParam = !empty($deviceSnList) ? implode(',', $deviceSnList) : '';
+$completionMinMinutes = (int) ($_GET['completionMin'] ?? 60);
+if ($completionMinMinutes < 0) {
+    $completionMinMinutes = 0;
+} elseif ($completionMinMinutes > 24 * 60) {
+    $completionMinMinutes = 24 * 60;
+}
 
 $isAjax = ($_GET['ajax'] ?? '') === '1';
 $ajaxSection = strtolower(trim((string) ($_GET['ajax_section'] ?? '')));
@@ -281,7 +287,10 @@ if ($isAjax && $ajaxSection === 'summary') {
             }
         }
         if ($firstMinutesValue !== null && $lastMinutesValue !== null) {
-            $completionCount++;
+            $durationMinutes = $lastMinutesValue - $firstMinutesValue;
+            if ($durationMinutes >= $completionMinMinutes) {
+                $completionCount++;
+            }
         }
 
         $project = trim((string) ($row['project_code'] ?? ''));
@@ -661,7 +670,10 @@ if ($isAjax && $ajaxSection === 'departments') {
             }
         }
         if ($firstMinutesValue !== null && $lastMinutesValue !== null) {
-            $deptStats[$deptName]['completionCount']++;
+            $durationMinutes = $lastMinutesValue - $firstMinutesValue;
+            if ($durationMinutes >= $completionMinMinutes) {
+                $deptStats[$deptName]['completionCount']++;
+            }
         }
 
         $project = trim((string) ($row['project_code'] ?? ''));
@@ -981,7 +993,10 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
             }
         }
         if ($firstMinutesValue !== null && $lastMinutesValue !== null) {
-            $projectStats[$projectCode]['completionCount']++;
+            $durationMinutes = $lastMinutesValue - $firstMinutesValue;
+            if ($durationMinutes >= $completionMinMinutes) {
+                $projectStats[$projectCode]['completionCount']++;
+            }
         }
 
         $deptName = trim((string) ($row['dept_name'] ?? ''));
@@ -1133,8 +1148,10 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
 
 <style>
   :root {
-    --hr-ink: #0b1120;
-    --hr-ink-soft: #2a3553;
+    --hr-ink: #0f173a;
+    --hr-ink-soft: #2b3a6f;
+    --hr-ink-muted: #4c5b8f;
+    --att-muted: #56679d;
     --hr-cream: #fff8e1;
     --hr-mint: #d1fae5;
     --hr-coral: #fecdd3;
@@ -1143,17 +1160,32 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     --hr-glow: rgba(251, 191, 36, 0.35);
     --hr-card: #ffffff;
     --hr-shadow: 0 22px 45px rgba(15, 23, 42, 0.16);
+    --hr-accent-1: #0ea5e9;
+    --hr-accent-2: #22c55e;
+    --hr-accent-3: #f97316;
+    --hr-accent-4: #a855f7;
+    --hr-accent-5: #f43f5e;
+    --hr-accent-6: #facc15;
+    --hr-gradient-ink: linear-gradient(120deg, #0ea5e9, #a855f7, #f97316);
+  }
+  .content-header h1 {
+    background: var(--hr-gradient-ink);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    letter-spacing: 0.04em;
   }
   .hr-dashboard {
     display: flex;
     flex-direction: column;
     gap: 1.4rem;
+    color: var(--hr-ink);
   }
   .hr-hero {
     padding: 1.6rem 1.8rem;
     border-radius: 22px;
     background: linear-gradient(120deg, #0ea5e9 0%, #38bdf8 25%, #fbbf24 60%, #f97316 100%);
-    color: #0b1120;
+    color: #f8fafc;
     position: relative;
     overflow: hidden;
   }
@@ -1177,23 +1209,34 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     font-size: 2.8rem;
     margin: 0;
     letter-spacing: 0.08em;
+    color: #f8fafc;
+    text-shadow: 0 10px 24px rgba(15, 23, 42, 0.35);
   }
   .hr-hero p {
     margin: 0.2rem 0 0;
     font-weight: 500;
-    color: rgba(15, 23, 42, 0.8);
+    color: rgba(248, 250, 252, 0.88);
+    text-shadow: 0 6px 18px rgba(15, 23, 42, 0.3);
   }
   .hr-hero-meta {
     display: flex;
     flex-wrap: wrap;
     gap: 0.6rem;
   }
+  .hr-hero .hr-pill {
+    background: rgba(255, 255, 255, 0.88);
+    color: #0f172a;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    box-shadow: 0 10px 18px rgba(15, 23, 42, 0.18);
+  }
   .hr-pill {
     padding: 0.35rem 0.75rem;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.8);
+    background: linear-gradient(120deg, rgba(14, 165, 233, 0.18), rgba(251, 191, 36, 0.22));
+    border: 1px solid rgba(14, 165, 233, 0.2);
     font-weight: 600;
     font-size: 0.85rem;
+    color: var(--hr-ink);
   }
   .hr-toolbar {
     display: grid;
@@ -1214,6 +1257,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     background: rgba(255, 255, 255, 0.8);
     font-weight: 600;
     cursor: pointer;
+    color: var(--hr-ink-soft);
   }
   .gap-2 {
     gap: 0.5rem;
@@ -1227,12 +1271,34 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     gap: 1rem;
   }
   .hr-kpi {
+    --kpi-accent: var(--hr-accent-1);
+    --kpi-glow: rgba(14, 165, 233, 0.28);
     padding: 1rem 1.1rem;
     border-radius: 18px;
     background: var(--hr-card);
     box-shadow: var(--hr-shadow);
     position: relative;
     overflow: hidden;
+  }
+  .hr-kpi:nth-child(2) {
+    --kpi-accent: var(--hr-accent-2);
+    --kpi-glow: rgba(34, 197, 94, 0.24);
+  }
+  .hr-kpi:nth-child(3) {
+    --kpi-accent: var(--hr-accent-3);
+    --kpi-glow: rgba(249, 115, 22, 0.24);
+  }
+  .hr-kpi:nth-child(4) {
+    --kpi-accent: var(--hr-accent-4);
+    --kpi-glow: rgba(168, 85, 247, 0.22);
+  }
+  .hr-kpi:nth-child(5) {
+    --kpi-accent: var(--hr-accent-5);
+    --kpi-glow: rgba(244, 63, 94, 0.22);
+  }
+  .hr-kpi:nth-child(6) {
+    --kpi-accent: var(--hr-accent-6);
+    --kpi-glow: rgba(250, 204, 21, 0.22);
   }
   .hr-kpi::after {
     content: "";
@@ -1242,13 +1308,15 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     width: 120px;
     height: 120px;
     border-radius: 999px;
-    background: rgba(251, 191, 36, 0.3);
+    background: var(--kpi-glow);
   }
   .hr-kpi h3 {
     margin: 0;
     font-size: 0.95rem;
     font-weight: 600;
-    color: var(--hr-ink-soft);
+    color: var(--kpi-accent);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .hr-kpi .hr-kpi-value {
     font-size: 2rem;
@@ -1258,7 +1326,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   }
   .hr-kpi .hr-kpi-sub {
     font-size: 0.85rem;
-    color: var(--att-muted);
+    color: var(--hr-ink-muted);
   }
   .hr-bento {
     position: relative;
@@ -1285,9 +1353,14 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   .hr-card h4 {
     font-weight: 700;
     margin-bottom: 0.5rem;
+    background: var(--hr-gradient-ink);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
   }
   .hr-card p {
     margin-bottom: 0.6rem;
+    color: var(--hr-ink-muted);
   }
   .hr-chart {
     height: 260px;
@@ -1315,7 +1388,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   .hr-chart-center small {
     display: block;
     font-size: 0.8rem;
-    color: var(--att-muted);
+    color: var(--hr-ink-muted);
   }
   .hr-list {
     display: grid;
@@ -1343,7 +1416,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   }
   .hr-list-project {
     font-size: 0.75rem;
-    color: var(--att-muted);
+    color: var(--hr-ink-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1354,12 +1427,12 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   }
   .hr-list-time {
     font-weight: 600;
-    color: var(--hr-ink);
+    color: var(--hr-accent-4);
     font-size: 0.8rem;
   }
   .hr-list-badge {
     font-size: 0.75rem;
-    color: var(--att-muted);
+    color: var(--hr-ink-muted);
   }
   .hr-insights {
     display: grid;
@@ -1371,6 +1444,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     background: linear-gradient(135deg, rgba(14, 165, 233, 0.15), rgba(251, 191, 36, 0.12));
     border: 1px solid rgba(15, 23, 42, 0.08);
     font-weight: 600;
+    color: var(--hr-ink-soft);
   }
   .hr-legend-list {
     display: grid;
@@ -1439,23 +1513,33 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     position: relative;
     border-radius: 20px;
     padding: 1rem 1.1rem;
-    background: linear-gradient(160deg, rgba(255, 255, 255, 0.98), #ffffff);
-    box-shadow: var(--hr-shadow);
-    border: 1px solid rgba(15, 23, 42, 0.08);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(245, 247, 252, 0.96));
+    box-shadow: 0 18px 36px rgba(15, 23, 42, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    border: 1px solid rgba(148, 163, 184, 0.32);
     overflow: hidden;
+    color: var(--hr-ink);
   }
   .hr-dept-card::before {
     content: "";
     position: absolute;
-    inset: -40% -20% auto auto;
-    width: 240px;
-    height: 240px;
-    background: radial-gradient(circle, var(--accent-soft, rgba(56, 189, 248, 0.25)), transparent 65%);
+    inset: 0 0 auto 0;
+    height: 5px;
+    background: linear-gradient(90deg, var(--accent, #1d4ed8), rgba(255, 255, 255, 0));
     opacity: 0.9;
   }
+  .hr-dept-card::after {
+    content: "";
+    position: absolute;
+    inset: -45% -30% auto auto;
+    width: 260px;
+    height: 260px;
+    background: radial-gradient(circle, var(--accent-soft, rgba(37, 99, 235, 0.18)), transparent 65%);
+    opacity: 0.75;
+  }
   .hr-dept-card.is-low {
-    border-color: rgba(248, 113, 113, 0.4);
-    box-shadow: 0 20px 40px rgba(248, 113, 113, 0.2);
+    border-color: rgba(248, 113, 113, 0.45);
+    box-shadow: 0 20px 40px rgba(248, 113, 113, 0.22);
   }
   .hr-dept-header {
     position: relative;
@@ -1464,29 +1548,53 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     align-items: flex-start;
     justify-content: space-between;
     gap: 0.75rem;
+    flex-wrap: nowrap;
   }
   .hr-dept-title {
     flex: 1 1 auto;
     min-width: 0;
+    max-width: calc(100% - 96px);
   }
   .hr-dept-title h5 {
     margin: 0;
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     font-weight: 700;
-    color: var(--hr-ink);
+    background: linear-gradient(120deg, var(--accent, #1d4ed8), #0f172a 65%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+    letter-spacing: 0.02em;
     white-space: normal;
     word-break: break-word;
   }
+  .hr-dept-title h5::after {
+    content: "";
+    display: block;
+    margin-top: 0.35rem;
+    width: 52px;
+    height: 3px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent, #0ea5e9), rgba(255, 255, 255, 0));
+  }
   .hr-dept-sub {
     font-size: 0.85rem;
-    color: var(--att-muted);
+    color: #5b6b8f;
+    font-weight: 600;
   }
   .hr-ring {
     --value: 0;
-    width: 82px;
-    height: 82px;
+    width: 84px;
+    height: 84px;
+    flex: 0 0 84px;
+    aspect-ratio: 1 / 1;
     border-radius: 50%;
-    background: conic-gradient(var(--ring-color, var(--accent, #38bdf8)) calc(var(--value) * 1%), rgba(148, 163, 184, 0.2) 0);
+    background: conic-gradient(
+      from -90deg,
+      var(--ring-start, #f472b6) 0%,
+      var(--ring-mid, #f59e0b) calc(var(--value) * 0.55%),
+      var(--ring-end, #22c55e) calc(var(--value) * 1%),
+      rgba(148, 163, 184, 0.2) 0
+    );
     display: grid;
     place-items: center;
     position: relative;
@@ -1509,11 +1617,13 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     font-weight: 700;
     font-size: 0.95rem;
     color: var(--hr-ink);
+    line-height: 1.1;
   }
   .hr-ring small {
     font-size: 0.75rem;
-    color: var(--att-muted);
+    color: var(--hr-ink-muted);
     margin-top: -2px;
+    line-height: 1;
   }
   .hr-coverage {
     position: relative;
@@ -1524,12 +1634,29 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   .hr-coverage-label {
     font-size: 0.8rem;
     font-weight: 600;
-    color: var(--hr-ink-soft);
+    color: var(--accent, #1d4ed8);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .hr-coverage-bar {
+    position: relative;
     height: 8px;
     border-radius: 999px;
-    background: linear-gradient(90deg, var(--coverage-color, var(--accent, #38bdf8)) calc(var(--coverage) * 1%), rgba(148, 163, 184, 0.25) 0);
+    background: rgba(148, 163, 184, 0.25);
+    box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.2);
+    overflow: hidden;
+  }
+  .hr-coverage-bar::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: calc(var(--coverage) * 1%);
+    background: linear-gradient(90deg,
+      var(--coverage-start, #f472b6) 0%,
+      var(--coverage-mid, #f59e0b) 55%,
+      var(--coverage-end, #22c55e) 100%
+    );
+    box-shadow: 0 0 12px var(--coverage-glow, rgba(244, 114, 182, 0.35));
   }
   .hr-chip-row {
     position: relative;
@@ -1543,20 +1670,25 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     border-radius: 999px;
     font-size: 0.72rem;
     font-weight: 700;
-    background: rgba(15, 23, 42, 0.08);
-    color: var(--hr-ink);
+    background: rgba(255, 255, 255, 0.92);
+    color: #0f172a;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
   }
   .hr-chip.is-warn {
-    background: rgba(248, 113, 113, 0.2);
-    color: #b91c1c;
+    background: rgba(245, 158, 11, 0.16);
+    color: #b45309;
+    border-color: rgba(245, 158, 11, 0.4);
   }
   .hr-chip.is-ok {
-    background: rgba(16, 185, 129, 0.2);
+    background: rgba(16, 185, 129, 0.16);
     color: #047857;
+    border-color: rgba(16, 185, 129, 0.4);
   }
   .hr-chip.is-neutral {
-    background: rgba(59, 130, 246, 0.18);
+    background: rgba(59, 130, 246, 0.14);
     color: #1d4ed8;
+    border-color: rgba(59, 130, 246, 0.35);
   }
   .hr-dept-insights {
     position: relative;
@@ -1593,7 +1725,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   .hr-focus-carousel {
     position: relative;
     display: flex;
-    align-items: stretch;
+    align-items: center;
     gap: 1rem;
   }
   .hr-focus-stage {
@@ -1636,7 +1768,9 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
   .hr-project-title {
     font-weight: 700;
     font-size: 0.85rem;
-    color: var(--hr-ink-soft);
+    color: var(--accent, #1d4ed8);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .hr-project {
     display: grid;
@@ -1650,16 +1784,53 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     font-weight: 600;
     color: var(--hr-ink);
   }
+  .hr-project-head span:last-child {
+    color: var(--accent, #0ea5e9);
+    font-weight: 700;
+  }
   .hr-project-bar {
     height: 6px;
     border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent, #38bdf8) calc(var(--pct) * 1%), rgba(148, 163, 184, 0.25) 0);
+    background: linear-gradient(90deg,
+      var(--mix-start, #f472b6) 0%,
+      var(--mix-mid, #f59e0b) 55%,
+      var(--mix-end, #22c55e) 100%
+    ) 0 0 / calc(var(--pct) * 1%) 100% no-repeat,
+    rgba(148, 163, 184, 0.25);
   }
   .hr-dept-sample {
     position: relative;
     z-index: 1;
     font-size: 0.72rem;
-    color: var(--att-muted);
+    color: var(--hr-ink-muted);
+    font-weight: 600;
+  }
+  .hr-dashboard label {
+    color: var(--hr-ink-soft);
+    font-weight: 600;
+  }
+  .hr-dashboard .text-muted {
+    color: var(--hr-ink-muted) !important;
+  }
+  .hr-dashboard .form-control::placeholder {
+    color: rgba(86, 103, 157, 0.7);
+  }
+  .hr-dashboard .nav-pills .nav-link {
+    font-weight: 700;
+    color: #122046;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .hr-dashboard .nav-pills .nav-link i {
+    color: #0f172a;
+  }
+  .hr-dashboard .nav-pills .nav-link.active {
+    color: #ffffff;
+    background: linear-gradient(135deg, #0f172a, #1d4ed8, #7c3aed);
+    box-shadow: 0 14px 28px rgba(30, 41, 59, 0.25);
+  }
+  .hr-dashboard .nav-pills .nav-link.active i {
+    color: #facc15;
   }
   @keyframes hr-pop {
     from { transform: scale(0.96); color: #0ea5e9; }
@@ -1669,20 +1840,8 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     from { transform: translateX(-100%); }
     to { transform: translateX(100%); }
   }
-  .hr-focus .content-wrapper {
-    background: #f8fafc;
-  }
-  .hr-focus .hr-hero {
-    background: linear-gradient(120deg, #e2e8f0, #f8fafc);
-  }
-  .hr-focus .hr-kpi::after {
-    display: none;
-  }
-  .hr-reduce-motion * {
-    animation: none !important;
-    transition: none !important;
-  }
   @media (min-width: 992px) {
+    .hr-card.hr-span-3 { grid-column: span 3; }
     .hr-card.hr-span-7 { grid-column: span 7; }
     .hr-card.hr-span-5 { grid-column: span 5; }
     .hr-card.hr-span-4 { grid-column: span 4; }
@@ -1747,10 +1906,6 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
           <button type="button" class="hr-toggle" data-range="7">Last 7</button>
           <button type="button" class="hr-toggle" data-range="30">Last 30</button>
         </div>
-        <div class="form-group d-flex gap-2">
-          <button type="button" class="hr-toggle" id="toggleFocus"><i class="fas fa-adjust"></i> Focus mode</button>
-          <button type="button" class="hr-toggle" id="toggleMotion"><i class="fas fa-running"></i> Reduce motion</button>
-        </div>
       </form>
     </div>
 
@@ -1812,7 +1967,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         </div>
       </div>
 
-      <div class="card hr-card hr-span-4 hr-card--spotlight">
+      <div class="card hr-card hr-span-3 hr-card--spotlight">
         <h4>Project spotlight</h4>
         <p class="text-muted mb-2">Where attendance energy is concentrated.</p>
         <div class="hr-chart hr-chart--spotlight">
@@ -1821,25 +1976,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         <div id="projectLegend" class="hr-legend-list"></div>
       </div>
 
-      <div class="card hr-card hr-span-4 hr-card--activity">
-        <h4>Recent activity</h4>
-        <div class="hr-list" id="recentList">
-          <div class="hr-skeleton" style="height: 48px;"></div>
-          <div class="hr-skeleton" style="height: 48px;"></div>
-          <div class="hr-skeleton" style="height: 48px;"></div>
-        </div>
-      </div>
-
-      <div class="card hr-card hr-span-6">
-        <h4>Focus actions</h4>
-        <div class="hr-insights" id="insightList">
-          <div class="hr-skeleton" style="height: 44px;"></div>
-          <div class="hr-skeleton" style="height: 44px;"></div>
-          <div class="hr-skeleton" style="height: 44px;"></div>
-        </div>
-      </div>
-
-      <div class="card hr-card hr-span-6">
+      <div class="card hr-card hr-span-3">
         <h4>Attendance completeness</h4>
         <p class="text-muted mb-2">Percent of badges with both first and last login.</p>
         <div class="hr-chart hr-chart--completion">
@@ -1848,6 +1985,24 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
             <span id="completionValue">-</span>
             <small>Complete</small>
           </div>
+        </div>
+      </div>
+
+      <div class="card hr-card hr-span-3">
+        <h4>Focus actions</h4>
+        <div class="hr-insights" id="insightList">
+          <div class="hr-skeleton" style="height: 44px;"></div>
+          <div class="hr-skeleton" style="height: 44px;"></div>
+          <div class="hr-skeleton" style="height: 44px;"></div>
+        </div>
+      </div>
+
+      <div class="card hr-card hr-span-3 hr-card--activity">
+        <h4>Recent activity</h4>
+        <div class="hr-list" id="recentList">
+          <div class="hr-skeleton" style="height: 48px;"></div>
+          <div class="hr-skeleton" style="height: 48px;"></div>
+          <div class="hr-skeleton" style="height: 48px;"></div>
         </div>
       </div>
 
@@ -1862,13 +2017,21 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
             <span class="hr-pill" id="deptPulsePill">Pulse: <?= h($endDate) ?></span>
           </div>
         </div>
-        <div class="hr-dept-grid" id="deptInsights">
-          <div class="hr-dept-card">
-            <div class="hr-skeleton" style="height: 200px;"></div>
+        <div class="hr-focus-toolbar">
+          <div class="text-muted small" id="deptFocusMeta">Loading department focus...</div>
+        </div>
+        <div class="hr-focus-carousel">
+          <button class="hr-focus-nav hr-focus-prev" id="deptFocusPrev" type="button" aria-label="Previous department">
+            <i class="fas fa-chevron-left"></i>
+          </button>
+          <div class="hr-focus-stage" id="deptInsights">
+            <div class="hr-dept-card">
+              <div class="hr-skeleton" style="height: 200px;"></div>
+            </div>
           </div>
-          <div class="hr-dept-card">
-            <div class="hr-skeleton" style="height: 200px;"></div>
-          </div>
+          <button class="hr-focus-nav hr-focus-next" id="deptFocusNext" type="button" aria-label="Next department">
+            <i class="fas fa-chevron-right"></i>
+          </button>
         </div>
       </div>
 
@@ -1914,7 +2077,8 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
     const baseParams = new URLSearchParams({
       startDate: <?= json_encode($startDate) ?>,
       endDate: <?= json_encode($endDate) ?>,
-      deviceSn: <?= json_encode($deviceSnInput) ?>
+      deviceSn: <?= json_encode($deviceSnInput) ?>,
+      completionMin: <?= json_encode($completionMinMinutes) ?>
     });
 
     const charts = {};
@@ -1928,14 +2092,14 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       rose: '#f43f5e'
     };
     const accentPalette = [
-      palette.blue,
-      palette.orange,
-      palette.gold,
-      palette.violet,
-      palette.teal,
-      palette.rose,
-      '#22c55e',
-      '#0ea5e9'
+      '#3b82f6', // vivid blue
+      '#06b6d4', // cyan
+      '#22c55e', // emerald
+      '#f59e0b', // amber
+      '#a855f7', // violet
+      '#ec4899', // pink
+      '#14b8a6', // teal
+      '#0ea5e9'  // sky
     ];
 
     const setText = (id, value) => {
@@ -1963,6 +2127,19 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       const g = parseInt(full.slice(2, 4), 16);
       const b = parseInt(full.slice(4, 6), 16);
       return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    };
+    const applySpectral = (card, colors) => {
+      const palette = colors || ['#f472b6', '#f59e0b', '#22c55e'];
+      card.style.setProperty('--ring-start', palette[0]);
+      card.style.setProperty('--ring-mid', palette[1]);
+      card.style.setProperty('--ring-end', palette[2]);
+      card.style.setProperty('--coverage-start', palette[0]);
+      card.style.setProperty('--coverage-mid', palette[1]);
+      card.style.setProperty('--coverage-end', palette[2]);
+      card.style.setProperty('--mix-start', palette[0]);
+      card.style.setProperty('--mix-mid', palette[1]);
+      card.style.setProperty('--mix-end', palette[2]);
+      card.style.setProperty('--coverage-glow', hexToRgba(palette[0], 0.35));
     };
 
     const createLineChart = (ctx, labels, values) => {
@@ -2184,24 +2361,201 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       return chip;
     };
 
-    const getCoverageTone = (coverage) => {
+    const getSpectralGradient = (coverage) => {
       if (coverage === null || coverage === undefined) {
-        return null;
+        return ['#f472b6', '#f59e0b', '#22c55e'];
       }
       if (coverage < 30) {
-        return '#ef4444';
+        return ['#fb7185', '#f59e0b', '#facc15'];
       }
       if (coverage < 70) {
-        return '#f97316';
+        return ['#f59e0b', '#facc15', '#22c55e'];
       }
-      return null;
+      return ['#f472b6', '#f59e0b', '#22c55e'];
     };
 
-    const renderDepartments = (data) => {
+    const departmentFocusState = {
+      rows: [],
+      index: 0
+    };
+
+    const buildDepartmentCard = (dept, index) => {
+      const accent = accentPalette[index % accentPalette.length];
+      const card = document.createElement('div');
+      card.className = 'hr-dept-card';
+      card.style.setProperty('--accent', accent);
+      card.style.setProperty('--accent-soft', hexToRgba(accent, 0.25));
+
+      const kpis = dept.kpis || {};
+      const timeMetrics = dept.timeMetrics || {};
+      const logged = kpis.loggedCount ?? 0;
+      const active = (kpis.activeCount !== null && kpis.activeCount !== undefined) ? kpis.activeCount : '-';
+      const coverage = kpis.coveragePercent;
+      const coverageValue = (coverage !== null && coverage !== undefined) ? coverage : 0;
+
+      if (coverage !== null && coverage !== undefined && coverage < 70) {
+        card.classList.add('is-low');
+      }
+      applySpectral(card, getSpectralGradient(coverage));
+
+      const header = document.createElement('div');
+      header.className = 'hr-dept-header';
+      const titleWrap = document.createElement('div');
+      titleWrap.className = 'hr-dept-title';
+      const title = document.createElement('h5');
+      title.textContent = dept.name || 'Unassigned';
+      const subtitle = document.createElement('div');
+      subtitle.className = 'hr-dept-sub';
+      subtitle.textContent = `Logged ${logged} / ${active}`;
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(subtitle);
+
+      const ring = document.createElement('div');
+      ring.className = 'hr-ring';
+      const completion = timeMetrics.completionRate;
+      const completionValue = Number.isFinite(completion) ? completion : null;
+      ring.style.setProperty('--value', completionValue ?? 0);
+      const ringValue = document.createElement('span');
+      ringValue.textContent = completionValue !== null ? `${completionValue}%` : '--';
+      const ringLabel = document.createElement('small');
+      ringLabel.textContent = 'In/Out';
+      ring.appendChild(ringValue);
+      ring.appendChild(ringLabel);
+
+      header.appendChild(titleWrap);
+      header.appendChild(ring);
+
+      const coverageWrap = document.createElement('div');
+      coverageWrap.className = 'hr-coverage';
+      const coverageLabel = document.createElement('div');
+      coverageLabel.className = 'hr-coverage-label';
+      coverageLabel.textContent = `Coverage ${coverage !== null && coverage !== undefined ? coverage + '%' : 'n/a'}`;
+      const coverageBar = document.createElement('div');
+      coverageBar.className = 'hr-coverage-bar';
+      coverageBar.style.setProperty('--coverage', coverageValue);
+      coverageWrap.appendChild(coverageLabel);
+      coverageWrap.appendChild(coverageBar);
+
+      const chipRow = document.createElement('div');
+      chipRow.className = 'hr-chip-row';
+      chipRow.appendChild(createChip('Late', timeMetrics.lateCount, 10));
+      chipRow.appendChild(createChip('Early', timeMetrics.earlyLeaveCount, 8));
+      chipRow.appendChild(createChip('Overtime', timeMetrics.overtimeCount, 6));
+
+      const insightWrap = document.createElement('div');
+      insightWrap.className = 'hr-dept-insights';
+      renderInsights({ kpis, timeMetrics }, insightWrap);
+
+      const projectWrap = document.createElement('div');
+      projectWrap.className = 'hr-dept-projects';
+      const projectTitle = document.createElement('div');
+      projectTitle.className = 'hr-project-title';
+      projectTitle.textContent = 'Project mix';
+      projectWrap.appendChild(projectTitle);
+
+      const projectItems = (dept.projects && Array.isArray(dept.projects.items)) ? dept.projects.items : [];
+      const projectTotal = (dept.projects && Number.isFinite(dept.projects.totalLogged))
+        ? dept.projects.totalLogged
+        : projectItems.reduce((sum, item) => sum + (Number(item.loggedCount) || 0), 0);
+
+      if (projectItems.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'text-muted';
+        empty.textContent = 'No project breakdown available.';
+        projectWrap.appendChild(empty);
+      } else {
+        projectItems.forEach((item) => {
+          const label = item.label || item.code || 'Unassigned';
+          const count = Number(item.loggedCount) || 0;
+          const pct = projectTotal > 0 ? Math.round((count / projectTotal) * 100) : 0;
+          const project = document.createElement('div');
+          project.className = 'hr-project';
+          const head = document.createElement('div');
+          head.className = 'hr-project-head';
+          const name = document.createElement('span');
+          name.textContent = label;
+          const value = document.createElement('span');
+          value.textContent = `${count} (${pct}%)`;
+          head.appendChild(name);
+          head.appendChild(value);
+          const bar = document.createElement('div');
+          bar.className = 'hr-project-bar';
+          bar.style.setProperty('--pct', pct);
+          project.appendChild(head);
+          project.appendChild(bar);
+          projectWrap.appendChild(project);
+        });
+      }
+
+      const sampleNote = document.createElement('div');
+      sampleNote.className = 'hr-dept-sample';
+      sampleNote.textContent = `Pulse sample: ${dept.meta && dept.meta.sampleCount ? dept.meta.sampleCount : 0}`;
+
+      card.appendChild(header);
+      card.appendChild(coverageWrap);
+      card.appendChild(chipRow);
+      card.appendChild(insightWrap);
+      card.appendChild(projectWrap);
+      card.appendChild(sampleNote);
+      return card;
+    };
+
+    const getFocusPageSize = (containerId) => {
+      const stage = document.getElementById(containerId);
+      const width = stage ? stage.offsetWidth : window.innerWidth;
+      if (width >= 1400) {
+        return 3;
+      }
+      if (width >= 980) {
+        return 2;
+      }
+      return 1;
+    };
+
+    const renderDepartmentFocus = () => {
       const container = document.getElementById('deptInsights');
+      const metaEl = document.getElementById('deptFocusMeta');
+      const prevBtn = document.getElementById('deptFocusPrev');
+      const nextBtn = document.getElementById('deptFocusNext');
       if (!container) return;
       container.innerHTML = '';
 
+      const total = departmentFocusState.rows.length;
+      const pageSize = getFocusPageSize('deptInsights');
+      const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+      const pageIndex = totalPages > 0
+        ? Math.min(departmentFocusState.index, totalPages - 1)
+        : 0;
+      departmentFocusState.index = pageIndex;
+
+      if (metaEl) {
+        if (total > 0) {
+          const start = pageIndex * pageSize + 1;
+          const end = Math.min(total, start + pageSize - 1);
+          metaEl.textContent = `${start}-${end} of ${total} departments`;
+        } else {
+          metaEl.textContent = 'No departments available.';
+        }
+      }
+
+      if (total === 0) {
+        container.innerHTML = '<div class="text-muted">No department insights available.</div>';
+        if (prevBtn) prevBtn.disabled = true;
+        if (nextBtn) nextBtn.disabled = true;
+        return;
+      }
+
+      if (prevBtn) prevBtn.disabled = totalPages <= 1;
+      if (nextBtn) nextBtn.disabled = totalPages <= 1;
+
+      const startIndex = pageIndex * pageSize;
+      const pageItems = departmentFocusState.rows.slice(startIndex, startIndex + pageSize);
+      pageItems.forEach((dept, offset) => {
+        container.appendChild(buildDepartmentCard(dept, startIndex + offset));
+      });
+    };
+
+    const renderDepartments = (data) => {
       const departments = (data && data.departments) ? data.departments : [];
 
       setPill('deptCountPill', `Departments: ${departments.length}`);
@@ -2209,137 +2563,10 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         setPill('deptPulsePill', `Pulse: ${data.meta.pulseDate}`);
       }
 
-      if (departments.length === 0) {
-        container.innerHTML = '<div class="text-muted">No department insights available.</div>';
-        return;
-      }
-
-      departments.forEach((dept, index) => {
-        const accent = accentPalette[index % accentPalette.length];
-        const card = document.createElement('div');
-        card.className = 'hr-dept-card';
-        card.style.setProperty('--accent', accent);
-        card.style.setProperty('--accent-soft', hexToRgba(accent, 0.25));
-
-        const kpis = dept.kpis || {};
-        const timeMetrics = dept.timeMetrics || {};
-        const logged = kpis.loggedCount ?? 0;
-        const active = (kpis.activeCount !== null && kpis.activeCount !== undefined) ? kpis.activeCount : '-';
-        const coverage = kpis.coveragePercent;
-        const coverageValue = (coverage !== null && coverage !== undefined) ? coverage : 0;
-
-        if (coverage !== null && coverage !== undefined && coverage < 70) {
-          card.classList.add('is-low');
-        }
-        const coverageTone = getCoverageTone(coverage);
-        if (coverageTone) {
-          card.style.setProperty('--ring-color', coverageTone);
-          card.style.setProperty('--coverage-color', coverageTone);
-        }
-
-        const header = document.createElement('div');
-        header.className = 'hr-dept-header';
-        const titleWrap = document.createElement('div');
-        titleWrap.className = 'hr-dept-title';
-        const title = document.createElement('h5');
-        title.textContent = dept.name || 'Unassigned';
-        const subtitle = document.createElement('div');
-        subtitle.className = 'hr-dept-sub';
-        subtitle.textContent = `Logged ${logged} / ${active}`;
-        titleWrap.appendChild(title);
-        titleWrap.appendChild(subtitle);
-
-        const ring = document.createElement('div');
-        ring.className = 'hr-ring';
-        const completion = timeMetrics.completionRate;
-        const completionValue = Number.isFinite(completion) ? completion : null;
-        ring.style.setProperty('--value', completionValue ?? 0);
-        const ringValue = document.createElement('span');
-        ringValue.textContent = completionValue !== null ? `${completionValue}%` : '--';
-        const ringLabel = document.createElement('small');
-        ringLabel.textContent = 'In/Out';
-        ring.appendChild(ringValue);
-        ring.appendChild(ringLabel);
-
-        header.appendChild(titleWrap);
-        header.appendChild(ring);
-
-        const coverageWrap = document.createElement('div');
-        coverageWrap.className = 'hr-coverage';
-        const coverageLabel = document.createElement('div');
-        coverageLabel.className = 'hr-coverage-label';
-        coverageLabel.textContent = `Coverage ${coverage !== null && coverage !== undefined ? coverage + '%' : 'n/a'}`;
-        const coverageBar = document.createElement('div');
-        coverageBar.className = 'hr-coverage-bar';
-        coverageBar.style.setProperty('--coverage', coverageValue);
-        coverageWrap.appendChild(coverageLabel);
-        coverageWrap.appendChild(coverageBar);
-
-        const chipRow = document.createElement('div');
-        chipRow.className = 'hr-chip-row';
-        chipRow.appendChild(createChip('Late', timeMetrics.lateCount, 10));
-        chipRow.appendChild(createChip('Early', timeMetrics.earlyLeaveCount, 8));
-        chipRow.appendChild(createChip('Overtime', timeMetrics.overtimeCount, 6));
-
-        const insightWrap = document.createElement('div');
-        insightWrap.className = 'hr-dept-insights';
-        renderInsights({ kpis, timeMetrics }, insightWrap);
-
-        const projectWrap = document.createElement('div');
-        projectWrap.className = 'hr-dept-projects';
-        const projectTitle = document.createElement('div');
-        projectTitle.className = 'hr-project-title';
-        projectTitle.textContent = 'Project mix';
-        projectWrap.appendChild(projectTitle);
-
-        const projectItems = (dept.projects && Array.isArray(dept.projects.items)) ? dept.projects.items : [];
-        const projectTotal = (dept.projects && Number.isFinite(dept.projects.totalLogged))
-          ? dept.projects.totalLogged
-          : projectItems.reduce((sum, item) => sum + (Number(item.loggedCount) || 0), 0);
-
-        if (projectItems.length === 0) {
-          const empty = document.createElement('div');
-          empty.className = 'text-muted';
-          empty.textContent = 'No project breakdown available.';
-          projectWrap.appendChild(empty);
-        } else {
-          projectItems.forEach((item) => {
-            const label = item.label || item.code || 'Unassigned';
-            const count = Number(item.loggedCount) || 0;
-            const pct = projectTotal > 0 ? Math.round((count / projectTotal) * 100) : 0;
-            const project = document.createElement('div');
-            project.className = 'hr-project';
-            const head = document.createElement('div');
-            head.className = 'hr-project-head';
-            const name = document.createElement('span');
-            name.textContent = label;
-            const value = document.createElement('span');
-            value.textContent = `${count} (${pct}%)`;
-            head.appendChild(name);
-            head.appendChild(value);
-            const bar = document.createElement('div');
-            bar.className = 'hr-project-bar';
-            bar.style.setProperty('--pct', pct);
-            project.appendChild(head);
-            project.appendChild(bar);
-            projectWrap.appendChild(project);
-          });
-        }
-
-        const sampleNote = document.createElement('div');
-        sampleNote.className = 'hr-dept-sample';
-        sampleNote.textContent = `Pulse sample: ${dept.meta && dept.meta.sampleCount ? dept.meta.sampleCount : 0}`;
-
-        card.appendChild(header);
-        card.appendChild(coverageWrap);
-        card.appendChild(chipRow);
-        card.appendChild(insightWrap);
-        card.appendChild(projectWrap);
-        card.appendChild(sampleNote);
-        container.appendChild(card);
-      });
+      departmentFocusState.rows = departments.slice();
+      departmentFocusState.index = 0;
+      renderDepartmentFocus();
     };
-
     const projectFocusState = {
       rows: [],
       filtered: [],
@@ -2363,14 +2590,10 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       const coverage = kpis.coveragePercent;
       const coverageValue = (coverage !== null && coverage !== undefined) ? coverage : 0;
 
-        if (coverage !== null && coverage !== undefined && coverage < 70) {
-          card.classList.add('is-low');
-        }
-        const coverageTone = getCoverageTone(coverage);
-        if (coverageTone) {
-          card.style.setProperty('--ring-color', coverageTone);
-          card.style.setProperty('--coverage-color', coverageTone);
-        }
+      if (coverage !== null && coverage !== undefined && coverage < 70) {
+        card.classList.add('is-low');
+      }
+      applySpectral(card, getSpectralGradient(coverage));
 
       const header = document.createElement('div');
       header.className = 'hr-dept-header';
@@ -2471,18 +2694,6 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       return card;
     };
 
-    const getProjectPageSize = () => {
-      const stage = document.getElementById('projectInsights');
-      const width = stage ? stage.offsetWidth : window.innerWidth;
-      if (width >= 1400) {
-        return 3;
-      }
-      if (width >= 980) {
-        return 2;
-      }
-      return 1;
-    };
-
     const renderProjectFocus = () => {
       const container = document.getElementById('projectInsights');
       const metaEl = document.getElementById('projectFocusMeta');
@@ -2492,7 +2703,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       container.innerHTML = '';
 
       const total = projectFocusState.filtered.length;
-      const pageSize = getProjectPageSize();
+      const pageSize = getFocusPageSize('projectInsights');
       const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
       const pageIndex = totalPages > 0
         ? Math.min(projectFocusState.index, totalPages - 1)
@@ -2574,7 +2785,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       if (prevBtn) {
         prevBtn.addEventListener('click', () => {
           const total = projectFocusState.filtered.length;
-          const pageSize = getProjectPageSize();
+          const pageSize = getFocusPageSize('projectInsights');
           const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
           if (totalPages <= 1) return;
           projectFocusState.index = (projectFocusState.index - 1 + totalPages) % totalPages;
@@ -2584,7 +2795,7 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       if (nextBtn) {
         nextBtn.addEventListener('click', () => {
           const total = projectFocusState.filtered.length;
-          const pageSize = getProjectPageSize();
+          const pageSize = getFocusPageSize('projectInsights');
           const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
           if (totalPages <= 1) return;
           projectFocusState.index = (projectFocusState.index + 1) % totalPages;
@@ -2596,8 +2807,34 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         window.clearTimeout(resizeTimer);
         resizeTimer = window.setTimeout(() => {
           renderProjectFocus();
+          renderDepartmentFocus();
         }, 120);
       });
+    };
+    const bindDepartmentFocusControls = () => {
+      const prevBtn = document.getElementById('deptFocusPrev');
+      const nextBtn = document.getElementById('deptFocusNext');
+
+      if (prevBtn) {
+        prevBtn.addEventListener('click', () => {
+          const total = departmentFocusState.rows.length;
+          const pageSize = getFocusPageSize('deptInsights');
+          const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+          if (totalPages <= 1) return;
+          departmentFocusState.index = (departmentFocusState.index - 1 + totalPages) % totalPages;
+          renderDepartmentFocus();
+        });
+      }
+      if (nextBtn) {
+        nextBtn.addEventListener('click', () => {
+          const total = departmentFocusState.rows.length;
+          const pageSize = getFocusPageSize('deptInsights');
+          const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+          if (totalPages <= 1) return;
+          departmentFocusState.index = (departmentFocusState.index + 1) % totalPages;
+          renderDepartmentFocus();
+        });
+      }
     };
     const fetchSection = (section) => {
       const params = new URLSearchParams(baseParams);
@@ -2717,9 +2954,17 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
         })
         .catch(() => {
           const container = document.getElementById('deptInsights');
+          const meta = document.getElementById('deptFocusMeta');
+          const prevBtn = document.getElementById('deptFocusPrev');
+          const nextBtn = document.getElementById('deptFocusNext');
           if (container) {
             container.innerHTML = '<div class="text-muted">Department insights unavailable.</div>';
           }
+          if (meta) {
+            meta.textContent = 'Department insights unavailable.';
+          }
+          if (prevBtn) prevBtn.disabled = true;
+          if (nextBtn) nextBtn.disabled = true;
         });
     };
 
@@ -2765,38 +3010,9 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
       });
     };
 
-    const bindToggles = () => {
-      const root = document.documentElement;
-      const focusToggle = document.getElementById('toggleFocus');
-      const motionToggle = document.getElementById('toggleMotion');
-
-      const applyStored = () => {
-        if (localStorage.getItem('hrFocus') === '1') {
-          root.classList.add('hr-focus');
-        }
-        if (localStorage.getItem('hrMotion') === '1') {
-          root.classList.add('hr-reduce-motion');
-        }
-      };
-      applyStored();
-
-      if (focusToggle) {
-        focusToggle.addEventListener('click', () => {
-          root.classList.toggle('hr-focus');
-          localStorage.setItem('hrFocus', root.classList.contains('hr-focus') ? '1' : '0');
-        });
-      }
-      if (motionToggle) {
-        motionToggle.addEventListener('click', () => {
-          root.classList.toggle('hr-reduce-motion');
-          localStorage.setItem('hrMotion', root.classList.contains('hr-reduce-motion') ? '1' : '0');
-        });
-      }
-    };
-
     bindQuickRanges();
-    bindToggles();
     bindProjectFocusControls();
+    bindDepartmentFocusControls();
     loadSummary();
     loadTrend();
     loadDepartments();
@@ -2805,4 +3021,5 @@ if ($isAjax && $ajaxSection === 'projects-focus') {
 </script>
 
 <?php include __DIR__ . '/include/layout_bottom.php'; ?>
+
 

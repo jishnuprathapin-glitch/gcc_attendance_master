@@ -17,16 +17,24 @@ $currentPage = strtolower(basename($_SERVER['SCRIPT_NAME'] ?? ''));
     margin-bottom: 1rem;
     padding: 1rem 1.25rem;
     border-radius: 16px;
-    background: radial-gradient(circle at top left, #fef9c3 0%, #fde68a 28%, #fca5a5 65%, #f97316 100%);
-    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.15);
+    background: linear-gradient(135deg, #0ea5e9 0%, #22c55e 25%, #f97316 55%, #f43f5e 100%);
+    box-shadow: 0 16px 34px rgba(15, 23, 42, 0.2);
     overflow: hidden;
+  }
+  .att-nav-wrap::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.45), transparent 55%);
+    opacity: 0.8;
+    pointer-events: none;
   }
   .att-nav-wrap::after {
     content: "";
     position: absolute;
     inset: 0;
-    background-image: linear-gradient(120deg, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0));
-    opacity: 0.6;
+    background-image: linear-gradient(120deg, rgba(15, 23, 42, 0.15), rgba(255, 255, 255, 0));
+    opacity: 0.5;
     pointer-events: none;
   }
   .att-nav-head {
@@ -65,32 +73,56 @@ $currentPage = strtolower(basename($_SERVER['SCRIPT_NAME'] ?? ''));
     gap: 0.65rem;
     padding: 0.65rem 0.85rem;
     border-radius: 12px;
-    background: rgba(15, 23, 42, 0.06);
-    border: 1px solid rgba(15, 23, 42, 0.12);
+    background: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.65);
     color: #0f172a;
     font-family: "Space Grotesk", "Segoe UI", sans-serif;
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
     text-decoration: none;
-    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.14);
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, color 0.2s ease;
+  }
+  .att-nav-link span {
+    background: linear-gradient(120deg, #0ea5e9, #22c55e, #f97316);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
   }
   .att-nav-link i {
     font-size: 1.05rem;
+    color: #1d4ed8;
   }
   .att-nav-link:hover {
     transform: translateY(-2px);
-    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.15);
-    background: rgba(255, 255, 255, 0.7);
+    box-shadow: 0 14px 26px rgba(15, 23, 42, 0.18);
+    background: rgba(255, 255, 255, 0.92);
     text-decoration: none;
     color: #0f172a;
   }
+  .att-nav-link:hover i {
+    color: #0ea5e9;
+  }
+  .att-nav-link:hover span {
+    background: linear-gradient(120deg, #2563eb, #7c3aed, #f97316);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
   .att-nav-link.is-active {
-    background: #0f172a;
+    background: linear-gradient(135deg, #0f172a, #1d4ed8, #7c3aed);
     color: #f8fafc;
     border-color: transparent;
-    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.35);
+    box-shadow: 0 16px 28px rgba(15, 23, 42, 0.35);
+  }
+  .att-nav-link.is-active span {
+    background: none;
+    -webkit-text-fill-color: #ffffff;
+    color: #ffffff;
   }
   .att-nav-link.is-active i {
-    color: #fbbf24;
+    color: #facc15;
   }
   @media (max-width: 576px) {
     .att-nav-wrap {
