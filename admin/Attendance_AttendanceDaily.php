@@ -1647,6 +1647,11 @@ include __DIR__ . '/include/layout_top.php';
   }
   .attendance-scroll {
     scroll-behavior: smooth;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .attendance-scroll::-webkit-scrollbar {
+    height: 0;
   }
   .attendance-daily-table .day-header {
     border-right: 3px solid #b6c2cf;
