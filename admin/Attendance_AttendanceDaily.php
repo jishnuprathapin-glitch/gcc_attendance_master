@@ -263,15 +263,35 @@ function render_attendance_results(array $context): string {
     extract($context, EXTR_SKIP);
     ob_start();
     ?>
-    <div class="card">
+    <div class="card attendance-weekly-card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
-        <h3 class="card-title">Weekly attendance</h3>
-        <div class="attendance-quick-ranges">
-          <span class="text-muted small"><?= h($showingStart) ?>-<?= h($showingEnd) ?> of <?= h($totalEmployees) ?> employees | <?= h(count($dateRange)) ?> day(s)</span>
-          <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
-            <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last30DaysUrl) ?>">Last 30 days</a>
-            <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last60DaysUrl) ?>">Last 60 days</a>
+        <div class="attendance-header-title">
+          <button type="button"
+                  class="attendance-collapse-toggle"
+                  aria-expanded="true"
+                  aria-label="Collapse weekly attendance table"
+                  data-expanded-label="Collapse weekly attendance table"
+                  data-collapsed-label="Expand weekly attendance table">
+            <span class="accordion-icon" aria-hidden="true"></span>
+          </button>
+          <h3 class="card-title mb-0">Weekly attendance</h3>
+        </div>
+        <div class="attendance-header-actions">
+          <div class="attendance-quick-ranges">
+            <span class="text-muted small"><?= h($showingStart) ?>-<?= h($showingEnd) ?> of <?= h($totalEmployees) ?> employees | <?= h(count($dateRange)) ?> day(s)</span>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
+              <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last30DaysUrl) ?>">Last 30 days</a>
+              <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= h($last60DaysUrl) ?>">Last 60 days</a>
+            </div>
           </div>
+          <button type="button"
+                  class="attendance-collapse-toggle"
+                  aria-expanded="true"
+                  aria-label="Collapse weekly attendance table"
+                  data-expanded-label="Collapse weekly attendance table"
+                  data-collapsed-label="Expand weekly attendance table">
+            <span class="accordion-icon" aria-hidden="true"></span>
+          </button>
         </div>
       </div>
       <?php if ($totalPages > 1): ?>
@@ -330,14 +350,14 @@ function render_attendance_results(array $context): string {
           <thead>
             <tr>
               <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
-              <th rowspan="2" class="col-fixed col-fixed-2">
+              <th rowspan="2" class="col-fixed col-fixed-2 col-left">
                 Emp Name
                 <button type="button" class="meta-toggle" id="toggleMetaColumns" aria-expanded="false" title="Show details">+</button>
               </th>
-              <th rowspan="2" class="col-adv">Designation</th>
-              <th rowspan="2" class="col-adv">Department</th>
-              <th rowspan="2" class="col-adv">Cost center company</th>
-              <th rowspan="2" class="col-adv">Employee Type</th>
+              <th rowspan="2" class="col-adv col-left">Designation</th>
+              <th rowspan="2" class="col-adv col-left">Department</th>
+              <th rowspan="2" class="col-adv col-left">Cost center company</th>
+              <th rowspan="2" class="col-adv col-left">Employee Type</th>
               <th rowspan="2" class="col-adv">Project Code</th>
               <?php foreach ($dateRange as $dayIndex => $date): ?>
                 <th colspan="<?= h($collapsedDayColumns) ?>" class="text-center date-header day-header" data-day-index="<?= h($dayIndex) ?>" data-collapsed-colspan="<?= h($collapsedDayColumns) ?>" data-expanded-colspan="<?= h($expandedDayColumns) ?>">
@@ -383,11 +403,11 @@ function render_attendance_results(array $context): string {
                 ?>
                 <tr>
                   <td class="col-fixed col-fixed-1"><?= h($empCode) ?></td>
-                  <td class="col-fixed col-fixed-2"><?= h($empName) ?></td>
-                  <td class="col-adv"><?= h($designation) ?></td>
-                  <td class="col-adv"><?= h($department) ?></td>
-                  <td class="col-adv"><?= h($costCenter) ?></td>
-                  <td class="col-adv"><?= h($employeeType) ?></td>
+                  <td class="col-fixed col-fixed-2 col-left"><?= h($empName) ?></td>
+                  <td class="col-adv col-left"><?= h($designation) ?></td>
+                  <td class="col-adv col-left"><?= h($department) ?></td>
+                  <td class="col-adv col-left"><?= h($costCenter) ?></td>
+                  <td class="col-adv col-left"><?= h($employeeType) ?></td>
                   <td class="col-adv"><?= h($projectCode) ?></td>
                   <?php foreach ($dateRange as $dayIndex => $date): ?>
                     <?php $dayClass = 'day-' . $dayIndex; ?>
@@ -433,8 +453,64 @@ function render_attendance_results(array $context): string {
               </tr>
             <?php endif; ?>
           </tbody>
+          <tfoot>
+            <tr>
+              <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
+              <th rowspan="2" class="col-fixed col-fixed-2 col-left">Emp Name</th>
+              <th rowspan="2" class="col-adv col-left">Designation</th>
+              <th rowspan="2" class="col-adv col-left">Department</th>
+              <th rowspan="2" class="col-adv col-left">Cost center company</th>
+              <th rowspan="2" class="col-adv col-left">Employee Type</th>
+              <th rowspan="2" class="col-adv">Project Code</th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <th colspan="<?= h($collapsedDayColumns) ?>" class="text-center date-header day-footer-header" data-day-index="<?= h($dayIndex) ?>" data-collapsed-colspan="<?= h($collapsedDayColumns) ?>" data-expanded-colspan="<?= h($expandedDayColumns) ?>">
+                  <span class="day-label"><?= h(format_date_label($date)) ?></span>
+                </th>
+              <?php endforeach; ?>
+            </tr>
+            <tr>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php $dayClass = 'day-' . $dayIndex; ?>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-project-login">Project login (U)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-leave">Leave code (H)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-work-code">Work code (W)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-login">Login</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-logout">Logout</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-work-hrs">Work hrs</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-override-hrs">Override hrs</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-override-code">Override code</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-final-work-code">Final work code</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-final-work-hrs">Final work hrs</th>
+              <?php endforeach; ?>
+            </tr>
+          </tfoot>
           </table>
         </div>
+        <?php if (!empty($dateRange)): ?>
+          <div class="attendance-day-scroller is-bottom">
+            <button type="button" class="day-nav day-nav-prev" aria-label="Previous day">&#8249;</button>
+            <div class="day-strip" role="tablist" aria-label="Days">
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php
+                  $chipDay = $date;
+                  $chipDate = '';
+                  try {
+                      $chipDt = new DateTimeImmutable($date);
+                      $chipDay = $chipDt->format('D');
+                      $chipDate = $chipDt->format('d M');
+                  } catch (Exception $e) {
+                      $chipDay = $date;
+                  }
+                ?>
+                <button type="button" class="day-chip" data-day-index="<?= h($dayIndex) ?>" data-date="<?= h($date) ?>">
+                  <span class="chip-day"><?= h($chipDay) ?></span>
+                  <span class="chip-date"><?= h($chipDate !== '' ? $chipDate : $date) ?></span>
+                </button>
+              <?php endforeach; ?>
+            </div>
+            <button type="button" class="day-nav day-nav-next" aria-label="Next day">&#8250;</button>
+          </div>
+        <?php endif; ?>
       </div>
       <?php if ($totalPages > 1): ?>
         <div class="attendance-pager" data-total-pages="<?= h($totalPages) ?>">
@@ -1470,6 +1546,9 @@ include __DIR__ . '/include/layout_top.php';
   .attendance-daily-table thead th {
     background: #f8f9fa;
   }
+  .attendance-daily-table tfoot th {
+    background: #f8f9fa;
+  }
   .attendance-daily-table .date-header {
     font-size: 0.85rem;
   }
@@ -1484,6 +1563,10 @@ include __DIR__ . '/include/layout_top.php';
     padding: 0.6rem 0.75rem;
     border-bottom: 1px solid rgba(15, 23, 42, 0.08);
     background: linear-gradient(90deg, #f8fafc, #eef2f7);
+  }
+  .attendance-day-scroller.is-bottom {
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    border-bottom: none;
   }
   .attendance-day-scroller .day-strip {
     display: flex;
@@ -1569,6 +1652,10 @@ include __DIR__ . '/include/layout_top.php';
     border-right: 3px solid #b6c2cf;
     border-left: 3px solid #b6c2cf;
   }
+  .attendance-daily-table .day-footer-header {
+    border-right: 3px solid #b6c2cf;
+    border-left: 3px solid #b6c2cf;
+  }
   .attendance-daily-table th,
   .attendance-daily-table td {
     text-align: center;
@@ -1613,6 +1700,9 @@ include __DIR__ . '/include/layout_top.php';
   .attendance-daily-table .day-col.col-extra.day-expanded {
     display: table-cell;
   }
+  .attendance-daily-table .col-left {
+    text-align: left;
+  }
   .attendance-daily-table .col-adv {
     display: none;
   }
@@ -1621,12 +1711,20 @@ include __DIR__ . '/include/layout_top.php';
   }
   .attendance-daily-table .meta-toggle {
     margin-left: 0.4rem;
-    padding: 0 0.4rem;
-    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 6px;
     border: 1px solid #adb5bd;
     background: #f8f9fa;
+    color: #0f172a;
     font-weight: 700;
-    line-height: 1.2;
+    font-size: 0.9rem;
+    line-height: 1;
+    vertical-align: middle;
   }
   .attendance-pager {
     display: flex;
@@ -1658,9 +1756,53 @@ include __DIR__ . '/include/layout_top.php';
     gap: 0.35rem;
     margin-left: auto;
   }
+  .attendance-header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-left: auto;
+    justify-content: flex-end;
+  }
+  .attendance-header-title {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .attendance-header-actions .attendance-quick-ranges {
+    margin-left: 0;
+  }
   .attendance-quick-ranges .btn-group {
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+  .attendance-collapse-toggle,
+  .filters-collapse-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 34px;
+    border-radius: 10px;
+    border: 1px solid rgba(15, 23, 42, 0.16);
+    background: #f8fafc;
+    color: #0f172a;
+    padding: 0;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, color 0.2s ease;
+  }
+  .attendance-collapse-toggle:hover,
+  .filters-collapse-toggle:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 16px rgba(15, 23, 42, 0.12);
+  }
+  .attendance-collapse-toggle .accordion-icon,
+  .filters-collapse-toggle .accordion-icon {
+    width: 10px;
+    height: 10px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(-135deg);
+    transition: transform 0.2s ease;
   }
   .attendance-pager .pager-btn {
     border: none;
@@ -1718,6 +1860,29 @@ include __DIR__ . '/include/layout_top.php';
     background: #fff;
     z-index: 4;
     box-shadow: 4px 0 10px rgba(15, 23, 42, 0.08);
+  }
+  .attendance-weekly-card.is-collapsed .attendance-pager,
+  .attendance-weekly-card.is-collapsed .card-body {
+    display: none;
+  }
+  .attendance-filters-card.is-collapsed .card-body {
+    display: none;
+  }
+  .attendance-weekly-card.is-collapsed .attendance-collapse-toggle {
+    background: #0f172a;
+    color: #f8fafc;
+    border-color: #0f172a;
+  }
+  .attendance-filters-card.is-collapsed .filters-collapse-toggle {
+    background: #0f172a;
+    color: #f8fafc;
+    border-color: #0f172a;
+  }
+  .attendance-weekly-card.is-collapsed .attendance-collapse-toggle .accordion-icon {
+    transform: rotate(45deg);
+  }
+  .attendance-filters-card.is-collapsed .filters-collapse-toggle .accordion-icon {
+    transform: rotate(45deg);
   }
   .attendance-daily-table .col-fixed-1 {
     min-width: 90px;
@@ -1865,9 +2030,29 @@ include __DIR__ . '/include/layout_top.php';
       <div class="alert alert-warning mb-3"><?= h($loadError) ?></div>
     <?php endif; ?>
 
-    <div class="card">
-      <div class="card-header">
-        <h3 class="card-title">Filters</h3>
+    <div class="card attendance-filters-card">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
+        <div class="attendance-header-title">
+          <button type="button"
+                  class="filters-collapse-toggle"
+                  aria-expanded="true"
+                  aria-label="Collapse filters"
+                  data-expanded-label="Collapse filters"
+                  data-collapsed-label="Expand filters">
+            <span class="accordion-icon" aria-hidden="true"></span>
+          </button>
+          <h3 class="card-title mb-0">Filters</h3>
+        </div>
+        <div class="attendance-header-actions">
+          <button type="button"
+                  class="filters-collapse-toggle"
+                  aria-expanded="true"
+                  aria-label="Collapse filters"
+                  data-expanded-label="Collapse filters"
+                  data-collapsed-label="Expand filters">
+            <span class="accordion-icon" aria-hidden="true"></span>
+          </button>
+        </div>
       </div>
       <div class="card-body">
         <form method="get" class="form-row">
@@ -1955,15 +2140,35 @@ include __DIR__ . '/include/layout_top.php';
       </div>
     </div>
 
-    <div class="card">
+    <div class="card attendance-weekly-card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
-        <h3 class="card-title">Weekly attendance</h3>
-        <div class="attendance-quick-ranges">
-          <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
-          <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
-            <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last30DaysUrl ?>">Last 30 days</a>
-            <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last60DaysUrl ?>">Last 60 days</a>
+        <div class="attendance-header-title">
+          <button type="button"
+                  class="attendance-collapse-toggle"
+                  aria-expanded="true"
+                  aria-label="Collapse weekly attendance table"
+                  data-expanded-label="Collapse weekly attendance table"
+                  data-collapsed-label="Expand weekly attendance table">
+            <span class="accordion-icon" aria-hidden="true"></span>
+          </button>
+          <h3 class="card-title mb-0">Weekly attendance</h3>
+        </div>
+        <div class="attendance-header-actions">
+          <div class="attendance-quick-ranges">
+            <span class="text-muted small"><?= $showingStart ?>-<?= $showingEnd ?> of <?= $totalEmployees ?> employees | <?= count($dateRange) ?> day(s)</span>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Quick ranges">
+              <a class="btn <?= $isLast30Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last30DaysUrl ?>">Last 30 days</a>
+              <a class="btn <?= $isLast60Days ? 'btn-primary' : 'btn-outline-secondary' ?>" href="<?= $last60DaysUrl ?>">Last 60 days</a>
+            </div>
           </div>
+          <button type="button"
+                  class="attendance-collapse-toggle"
+                  aria-expanded="true"
+                  aria-label="Collapse weekly attendance table"
+                  data-expanded-label="Collapse weekly attendance table"
+                  data-collapsed-label="Expand weekly attendance table">
+            <span class="accordion-icon" aria-hidden="true"></span>
+          </button>
         </div>
       </div>
       <?php if ($totalPages > 1): ?>
@@ -2022,14 +2227,14 @@ include __DIR__ . '/include/layout_top.php';
           <thead>
             <tr>
               <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
-              <th rowspan="2" class="col-fixed col-fixed-2">
+              <th rowspan="2" class="col-fixed col-fixed-2 col-left">
                 Emp Name
                 <button type="button" class="meta-toggle" id="toggleMetaColumns" aria-expanded="false" title="Show details">+</button>
               </th>
-              <th rowspan="2" class="col-adv">Designation</th>
-              <th rowspan="2" class="col-adv">Department</th>
-              <th rowspan="2" class="col-adv">Cost center company</th>
-              <th rowspan="2" class="col-adv">Employee Type</th>
+              <th rowspan="2" class="col-adv col-left">Designation</th>
+              <th rowspan="2" class="col-adv col-left">Department</th>
+              <th rowspan="2" class="col-adv col-left">Cost center company</th>
+              <th rowspan="2" class="col-adv col-left">Employee Type</th>
               <th rowspan="2" class="col-adv">Project Code</th>
               <?php foreach ($dateRange as $dayIndex => $date): ?>
                 <th colspan="<?= $collapsedDayColumns ?>" class="text-center date-header day-header" data-day-index="<?= $dayIndex ?>" data-collapsed-colspan="<?= $collapsedDayColumns ?>" data-expanded-colspan="<?= $expandedDayColumns ?>">
@@ -2075,11 +2280,11 @@ include __DIR__ . '/include/layout_top.php';
                 ?>
                 <tr>
                   <td class="col-fixed col-fixed-1"><?= h($empCode) ?></td>
-                  <td class="col-fixed col-fixed-2"><?= h($empName) ?></td>
-                  <td class="col-adv"><?= h($designation) ?></td>
-                  <td class="col-adv"><?= h($department) ?></td>
-                  <td class="col-adv"><?= h($costCenter) ?></td>
-                  <td class="col-adv"><?= h($employeeType) ?></td>
+                  <td class="col-fixed col-fixed-2 col-left"><?= h($empName) ?></td>
+                  <td class="col-adv col-left"><?= h($designation) ?></td>
+                  <td class="col-adv col-left"><?= h($department) ?></td>
+                  <td class="col-adv col-left"><?= h($costCenter) ?></td>
+                  <td class="col-adv col-left"><?= h($employeeType) ?></td>
                   <td class="col-adv"><?= h($projectCode) ?></td>
                   <?php foreach ($dateRange as $dayIndex => $date): ?>
                     <?php $dayClass = 'day-' . $dayIndex; ?>
@@ -2125,8 +2330,64 @@ include __DIR__ . '/include/layout_top.php';
               </tr>
             <?php endif; ?>
           </tbody>
+          <tfoot>
+            <tr>
+              <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
+              <th rowspan="2" class="col-fixed col-fixed-2 col-left">Emp Name</th>
+              <th rowspan="2" class="col-adv col-left">Designation</th>
+              <th rowspan="2" class="col-adv col-left">Department</th>
+              <th rowspan="2" class="col-adv col-left">Cost center company</th>
+              <th rowspan="2" class="col-adv col-left">Employee Type</th>
+              <th rowspan="2" class="col-adv">Project Code</th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <th colspan="<?= $collapsedDayColumns ?>" class="text-center date-header day-footer-header" data-day-index="<?= $dayIndex ?>" data-collapsed-colspan="<?= $collapsedDayColumns ?>" data-expanded-colspan="<?= $expandedDayColumns ?>">
+                  <span class="day-label"><?= h(format_date_label($date)) ?></span>
+                </th>
+              <?php endforeach; ?>
+            </tr>
+            <tr>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php $dayClass = 'day-' . $dayIndex; ?>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-project-login">Project login (U)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-leave">Leave code (H)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-work-code">Work code (W)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-login">Login</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-logout">Logout</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-work-hrs">Work hrs</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-override-hrs">Override hrs</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-override-code">Override code</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-final-work-code">Final work code</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-final-work-hrs">Final work hrs</th>
+              <?php endforeach; ?>
+            </tr>
+          </tfoot>
           </table>
         </div>
+        <?php if (!empty($dateRange)): ?>
+          <div class="attendance-day-scroller is-bottom">
+            <button type="button" class="day-nav day-nav-prev" aria-label="Previous day">&#8249;</button>
+            <div class="day-strip" role="tablist" aria-label="Days">
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php
+                  $chipDay = $date;
+                  $chipDate = '';
+                  try {
+                      $chipDt = new DateTimeImmutable($date);
+                      $chipDay = $chipDt->format('D');
+                      $chipDate = $chipDt->format('d M');
+                  } catch (Exception $e) {
+                      $chipDay = $date;
+                  }
+                ?>
+                <button type="button" class="day-chip" data-day-index="<?= h($dayIndex) ?>" data-date="<?= h($date) ?>">
+                  <span class="chip-day"><?= h($chipDay) ?></span>
+                  <span class="chip-date"><?= h($chipDate !== '' ? $chipDate : $date) ?></span>
+                </button>
+              <?php endforeach; ?>
+            </div>
+            <button type="button" class="day-nav day-nav-next" aria-label="Next day">&#8250;</button>
+          </div>
+        <?php endif; ?>
       </div>
       <?php if ($totalPages > 1): ?>
         <div class="attendance-pager" data-total-pages="<?= $totalPages ?>">
@@ -2196,6 +2457,42 @@ include __DIR__ . '/include/layout_top.php';
 </script>
 <script>
   document.addEventListener('DOMContentLoaded', function () {
+    const getToggleLabel = (toggle, collapsed) => {
+      const expandedLabel = toggle.getAttribute('data-expanded-label') || 'Collapse weekly attendance table';
+      const collapsedLabel = toggle.getAttribute('data-collapsed-label') || 'Expand weekly attendance table';
+      return collapsed ? collapsedLabel : expandedLabel;
+    };
+    const syncToggles = (card) => {
+      const collapsed = card.classList.contains('is-collapsed');
+      card.querySelectorAll('.attendance-collapse-toggle, .filters-collapse-toggle').forEach((toggle) => {
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        const label = getToggleLabel(toggle, collapsed);
+        toggle.setAttribute('aria-label', label);
+        toggle.setAttribute('title', label);
+      });
+    };
+    document.querySelectorAll('.attendance-weekly-card, .attendance-filters-card').forEach((card) => {
+      if (!card.querySelector('.attendance-collapse-toggle, .filters-collapse-toggle')) {
+        return;
+      }
+      syncToggles(card);
+    });
+    document.addEventListener('click', function (event) {
+      const toggle = event.target.closest('.attendance-collapse-toggle, .filters-collapse-toggle');
+      if (!toggle) {
+        return;
+      }
+      const card = toggle.closest('.attendance-weekly-card, .attendance-filters-card');
+      if (!card) {
+        return;
+      }
+      card.classList.toggle('is-collapsed');
+      syncToggles(card);
+    });
+  });
+</script>
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
     const table = document.querySelector('.attendance-daily-table');
     if (!table) {
       return;
@@ -2227,20 +2524,20 @@ include __DIR__ . '/include/layout_top.php';
       dayCols.forEach((el) => {
         el.classList.toggle('day-expanded', expanded);
       });
-      const header = table.querySelector(`.day-header[data-day-index="${dayIndex}"]`);
-      if (header) {
+      const headers = table.querySelectorAll(`.day-header[data-day-index="${dayIndex}"], .day-footer-header[data-day-index="${dayIndex}"]`);
+      headers.forEach((header) => {
         const expandedColspan = header.getAttribute('data-expanded-colspan') || '7';
         const collapsedColspan = header.getAttribute('data-collapsed-colspan') || '2';
         header.setAttribute('colspan', expanded ? expandedColspan : collapsedColspan);
-      }
-      const toggle = table.querySelector(`.day-toggle[data-day-index="${dayIndex}"]`);
-      if (toggle) {
+      });
+      const toggles = table.querySelectorAll(`.day-toggle[data-day-index="${dayIndex}"]`);
+      toggles.forEach((toggle) => {
         toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
         const icon = toggle.querySelector('.toggle-icon');
         if (icon) {
           icon.textContent = expanded ? '-' : '+';
         }
-      }
+      });
       refreshDayScroller();
     };
     table.querySelectorAll('.day-toggle').forEach((toggle) => {
@@ -2255,52 +2552,60 @@ include __DIR__ . '/include/layout_top.php';
     updateEmptyColspan();
 
     const scrollWrap = document.querySelector('.attendance-scroll');
-    const dayStrip = document.querySelector('.day-strip');
-    const dayChips = Array.from(document.querySelectorAll('.day-chip'));
-    const dayHeaders = Array.from(table.querySelectorAll('.day-header'));
-    const prevBtn = document.querySelector('.day-nav-prev');
-    const nextBtn = document.querySelector('.day-nav-next');
+    const dayHeaders = Array.from(table.querySelectorAll('thead .day-header'));
+    const dayScrollerGroups = Array.from(document.querySelectorAll('.attendance-day-scroller'))
+      .map((scroller) => ({
+        scroller,
+        strip: scroller.querySelector('.day-strip'),
+        chips: Array.from(scroller.querySelectorAll('.day-chip')),
+        prevBtn: scroller.querySelector('.day-nav-prev'),
+        nextBtn: scroller.querySelector('.day-nav-next'),
+      }))
+      .filter((group) => group.strip && group.chips.length);
+    const dayCount = dayScrollerGroups.length ? dayScrollerGroups[0].chips.length : 0;
     let activeDayIndex = 0;
     let scrollRaf = null;
 
     const updateDayStripAlignment = () => {
-      if (!dayStrip) {
-        return;
-      }
-      const shouldCenter = dayStrip.scrollWidth <= dayStrip.clientWidth + 2;
-      dayStrip.classList.toggle('is-centered', shouldCenter);
+      dayScrollerGroups.forEach((group) => {
+        if (!group.strip) {
+          return;
+        }
+        const shouldCenter = group.strip.scrollWidth <= group.strip.clientWidth + 2;
+        group.strip.classList.toggle('is-centered', shouldCenter);
+      });
     };
 
-    const enableDayStripScroll = () => {
-      if (!dayStrip) {
+    const enableDayStripScroll = (strip) => {
+      if (!strip) {
         return;
       }
       let isDragging = false;
       let dragStartX = 0;
       let dragStartScroll = 0;
       let dragMoved = false;
-      dayStrip.addEventListener(
+      strip.addEventListener(
         'wheel',
         (event) => {
           if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
             return;
           }
-          dayStrip.scrollLeft += event.deltaY;
+          strip.scrollLeft += event.deltaY;
           event.preventDefault();
         },
         { passive: false }
       );
-      dayStrip.addEventListener('mousedown', (event) => {
+      strip.addEventListener('mousedown', (event) => {
         if (event.button !== 0) {
           return;
         }
         isDragging = true;
         dragMoved = false;
         dragStartX = event.clientX;
-        dragStartScroll = dayStrip.scrollLeft;
-        dayStrip.classList.add('is-dragging');
+        dragStartScroll = strip.scrollLeft;
+        strip.classList.add('is-dragging');
       });
-      dayStrip.addEventListener('mousemove', (event) => {
+      strip.addEventListener('mousemove', (event) => {
         if (!isDragging) {
           return;
         }
@@ -2308,7 +2613,7 @@ include __DIR__ . '/include/layout_top.php';
         if (Math.abs(delta) > 3) {
           dragMoved = true;
         }
-        dayStrip.scrollLeft = dragStartScroll - delta;
+        strip.scrollLeft = dragStartScroll - delta;
         if (dragMoved) {
           event.preventDefault();
         }
@@ -2318,11 +2623,11 @@ include __DIR__ . '/include/layout_top.php';
           return;
         }
         isDragging = false;
-        dayStrip.classList.remove('is-dragging');
+        strip.classList.remove('is-dragging');
       };
-      dayStrip.addEventListener('mouseup', stopDrag);
-      dayStrip.addEventListener('mouseleave', stopDrag);
-      dayStrip.addEventListener('click', (event) => {
+      strip.addEventListener('mouseup', stopDrag);
+      strip.addEventListener('mouseleave', stopDrag);
+      strip.addEventListener('click', (event) => {
         if (dragMoved) {
           event.preventDefault();
           event.stopPropagation();
@@ -2338,28 +2643,46 @@ include __DIR__ . '/include/layout_top.php';
       return width;
     };
 
-    const setActiveDay = (index, ensureChip = true) => {
-      if (!dayChips.length) {
+    const scrollChipIntoView = (strip, chip) => {
+      if (!strip || !chip) {
         return;
       }
-      const bounded = Math.max(0, Math.min(index, dayChips.length - 1));
+      const chipLeft = chip.offsetLeft;
+      const chipRight = chipLeft + chip.offsetWidth;
+      const visibleLeft = strip.scrollLeft;
+      const visibleRight = visibleLeft + strip.clientWidth;
+      const padding = 16;
+      if (chipLeft < visibleLeft + padding) {
+        strip.scrollTo({ left: Math.max(0, chipLeft - padding), behavior: 'smooth' });
+      } else if (chipRight > visibleRight - padding) {
+        strip.scrollTo({ left: Math.max(0, chipRight - strip.clientWidth + padding), behavior: 'smooth' });
+      }
+    };
+
+    const setActiveDay = (index, ensureChip = true) => {
+      if (!dayCount) {
+        return;
+      }
+      const bounded = Math.max(0, Math.min(index, dayCount - 1));
       activeDayIndex = bounded;
-      dayChips.forEach((chip, idx) => {
-        chip.classList.toggle('is-active', idx === bounded);
+      dayScrollerGroups.forEach((group) => {
+        group.chips.forEach((chip, idx) => {
+          chip.classList.toggle('is-active', idx === bounded);
+        });
+        if (group.prevBtn) {
+          group.prevBtn.disabled = bounded <= 0;
+        }
+        if (group.nextBtn) {
+          group.nextBtn.disabled = bounded >= dayCount - 1;
+        }
+        if (ensureChip && group.strip && group.chips[bounded]) {
+          scrollChipIntoView(group.strip, group.chips[bounded]);
+        }
       });
       if (dayHeaders.length) {
         dayHeaders.forEach((header, idx) => {
           header.classList.toggle('is-active', idx === bounded);
         });
-      }
-      if (prevBtn) {
-        prevBtn.disabled = bounded <= 0;
-      }
-      if (nextBtn) {
-        nextBtn.disabled = bounded >= dayChips.length - 1;
-      }
-      if (ensureChip && dayStrip && dayChips[bounded]) {
-        dayChips[bounded].scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
       }
       updateDayStripAlignment();
     };
@@ -2396,16 +2719,18 @@ include __DIR__ . '/include/layout_top.php';
       updateDayStripAlignment();
     };
 
-    if (scrollWrap && dayChips.length && dayHeaders.length) {
-      dayChips.forEach((chip, idx) => {
-        chip.addEventListener('click', () => scrollToDay(idx));
+    if (scrollWrap && dayCount && dayHeaders.length) {
+      dayScrollerGroups.forEach((group) => {
+        group.chips.forEach((chip, idx) => {
+          chip.addEventListener('click', () => scrollToDay(idx));
+        });
+        if (group.prevBtn) {
+          group.prevBtn.addEventListener('click', () => scrollToDay(activeDayIndex - 1));
+        }
+        if (group.nextBtn) {
+          group.nextBtn.addEventListener('click', () => scrollToDay(activeDayIndex + 1));
+        }
       });
-      if (prevBtn) {
-        prevBtn.addEventListener('click', () => scrollToDay(activeDayIndex - 1));
-      }
-      if (nextBtn) {
-        nextBtn.addEventListener('click', () => scrollToDay(activeDayIndex + 1));
-      }
       scrollWrap.addEventListener('scroll', () => {
         if (scrollRaf) {
           return;
@@ -2423,7 +2748,7 @@ include __DIR__ . '/include/layout_top.php';
       updateActiveFromScroll();
     }
 
-    enableDayStripScroll();
+    dayScrollerGroups.forEach((group) => enableDayStripScroll(group.strip));
     updateDayStripAlignment();
 
     const metaToggle = document.getElementById('toggleMetaColumns');
@@ -2433,9 +2758,11 @@ include __DIR__ . '/include/layout_top.php';
         cell.classList.toggle('is-visible', visible);
       });
       if (metaToggle) {
-        metaToggle.textContent = visible ? '−' : '+';
+        metaToggle.textContent = visible ? '-' : '+';
         metaToggle.setAttribute('aria-expanded', visible ? 'true' : 'false');
-        metaToggle.setAttribute('title', visible ? 'Hide details' : 'Show details');
+        const label = visible ? 'Hide details' : 'Show details';
+        metaToggle.setAttribute('title', label);
+        metaToggle.setAttribute('aria-label', label);
       }
       updateEmptyColspan();
     };
