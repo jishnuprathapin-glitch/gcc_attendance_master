@@ -1676,6 +1676,13 @@ include __DIR__ . '/include/layout_top.php';
   .attendance-daily-table .day-col.col-final-work-hrs {
     border-right: 3px solid #b6c2cf;
   }
+  .attendance-daily-table thead th.col-final-work-code,
+  .attendance-daily-table thead th.col-final-work-hrs,
+  .attendance-daily-table tfoot th.col-final-work-code,
+  .attendance-daily-table tfoot th.col-final-work-hrs {
+    background: #e9e9e9;
+    color: #000;
+  }
   .attendance-daily-table .day-col.day-expanded.col-project-login {
     border-left: 3px solid #b6c2cf;
   }

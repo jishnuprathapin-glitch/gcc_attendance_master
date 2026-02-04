@@ -500,6 +500,31 @@ function render_attendance_results(array $context): string {
           </tbody>
           </table>
         </div>
+        <?php if (!empty($dateRange)): ?>
+          <div class="attendance-day-scroller is-bottom">
+            <button type="button" class="day-nav day-nav-prev" aria-label="Previous day">&#8249;</button>
+            <div class="day-strip" role="tablist" aria-label="Days">
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php
+                  $chipDay = $date;
+                  $chipDate = '';
+                  try {
+                      $chipDt = new DateTimeImmutable($date);
+                      $chipDay = $chipDt->format('D');
+                      $chipDate = $chipDt->format('d M');
+                  } catch (Exception $e) {
+                      $chipDay = $date;
+                  }
+                ?>
+                <button type="button" class="day-chip" data-day-index="<?= h($dayIndex) ?>" data-date="<?= h($date) ?>">
+                  <span class="chip-day"><?= h($chipDay) ?></span>
+                  <span class="chip-date"><?= h($chipDate !== '' ? $chipDate : $date) ?></span>
+                </button>
+              <?php endforeach; ?>
+            </div>
+            <button type="button" class="day-nav day-nav-next" aria-label="Next day">&#8250;</button>
+          </div>
+        <?php endif; ?>
       </div>
       <?php if ($totalPages > 1): ?>
         <div class="attendance-pager" data-total-pages="<?= h($totalPages) ?>">
@@ -1787,6 +1812,10 @@ include __DIR__ . '/include/layout_top.php';
     border-bottom: 1px solid rgba(15, 23, 42, 0.08);
     background: linear-gradient(90deg, #f8fafc, #eef2f7);
   }
+  .attendance-day-scroller.is-bottom {
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    border-bottom: 0;
+  }
   .attendance-day-scroller .day-strip {
     display: flex;
     gap: 0.5rem;
@@ -1885,6 +1914,11 @@ include __DIR__ . '/include/layout_top.php';
   }
   .attendance-daily-table .day-col.col-final-work-hrs {
     border-right: 3px solid #b6c2cf;
+  }
+  .attendance-daily-table thead th.col-final-work-code,
+  .attendance-daily-table thead th.col-final-work-hrs {
+    background: #e9e9e9;
+    color: #000;
   }
   .attendance-daily-table .day-col.day-expanded.col-project-login {
     border-left: 3px solid #b6c2cf;
@@ -2642,52 +2676,60 @@ include __DIR__ . '/include/layout_top.php';
     updateEmptyColspan();
 
     const scrollWrap = document.querySelector('.attendance-scroll');
-    const dayStrip = document.querySelector('.day-strip');
-    const dayChips = Array.from(document.querySelectorAll('.day-chip'));
     const dayHeaders = Array.from(table.querySelectorAll('.day-header'));
-    const prevBtn = document.querySelector('.day-nav-prev');
-    const nextBtn = document.querySelector('.day-nav-next');
+    const dayScrollerGroups = Array.from(document.querySelectorAll('.attendance-day-scroller'))
+      .map((scroller) => ({
+        scroller,
+        strip: scroller.querySelector('.day-strip'),
+        chips: Array.from(scroller.querySelectorAll('.day-chip')),
+        prevBtn: scroller.querySelector('.day-nav-prev'),
+        nextBtn: scroller.querySelector('.day-nav-next'),
+      }))
+      .filter((group) => group.strip && group.chips.length);
+    const dayCount = dayScrollerGroups.length ? dayScrollerGroups[0].chips.length : 0;
     let activeDayIndex = 0;
     let scrollRaf = null;
 
     const updateDayStripAlignment = () => {
-      if (!dayStrip) {
-        return;
-      }
-      const shouldCenter = dayStrip.scrollWidth <= dayStrip.clientWidth + 2;
-      dayStrip.classList.toggle('is-centered', shouldCenter);
+      dayScrollerGroups.forEach((group) => {
+        if (!group.strip) {
+          return;
+        }
+        const shouldCenter = group.strip.scrollWidth <= group.strip.clientWidth + 2;
+        group.strip.classList.toggle('is-centered', shouldCenter);
+      });
     };
 
-    const enableDayStripScroll = () => {
-      if (!dayStrip) {
+    const enableDayStripScroll = (strip) => {
+      if (!strip) {
         return;
       }
       let isDragging = false;
       let dragStartX = 0;
       let dragStartScroll = 0;
       let dragMoved = false;
-      dayStrip.addEventListener(
+      strip.addEventListener(
         'wheel',
         (event) => {
           if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
             return;
           }
-          dayStrip.scrollLeft += event.deltaY;
+          strip.scrollLeft += event.deltaY;
           event.preventDefault();
         },
         { passive: false }
       );
-      dayStrip.addEventListener('mousedown', (event) => {
+      strip.addEventListener('mousedown', (event) => {
         if (event.button !== 0) {
           return;
         }
         isDragging = true;
         dragMoved = false;
         dragStartX = event.clientX;
-        dragStartScroll = dayStrip.scrollLeft;
-        dayStrip.classList.add('is-dragging');
+        dragStartScroll = strip.scrollLeft;
+        strip.classList.add('is-dragging');
       });
-      dayStrip.addEventListener('mousemove', (event) => {
+      strip.addEventListener('mousemove', (event) => {
         if (!isDragging) {
           return;
         }
@@ -2695,7 +2737,7 @@ include __DIR__ . '/include/layout_top.php';
         if (Math.abs(delta) > 3) {
           dragMoved = true;
         }
-        dayStrip.scrollLeft = dragStartScroll - delta;
+        strip.scrollLeft = dragStartScroll - delta;
         if (dragMoved) {
           event.preventDefault();
         }
@@ -2705,11 +2747,11 @@ include __DIR__ . '/include/layout_top.php';
           return;
         }
         isDragging = false;
-        dayStrip.classList.remove('is-dragging');
+        strip.classList.remove('is-dragging');
       };
-      dayStrip.addEventListener('mouseup', stopDrag);
-      dayStrip.addEventListener('mouseleave', stopDrag);
-      dayStrip.addEventListener('click', (event) => {
+      strip.addEventListener('mouseup', stopDrag);
+      strip.addEventListener('mouseleave', stopDrag);
+      strip.addEventListener('click', (event) => {
         if (dragMoved) {
           event.preventDefault();
           event.stopPropagation();
@@ -2725,28 +2767,46 @@ include __DIR__ . '/include/layout_top.php';
       return width;
     };
 
-    const setActiveDay = (index, ensureChip = true) => {
-      if (!dayChips.length) {
+    const scrollChipIntoView = (strip, chip) => {
+      if (!strip || !chip) {
         return;
       }
-      const bounded = Math.max(0, Math.min(index, dayChips.length - 1));
+      const chipLeft = chip.offsetLeft;
+      const chipRight = chipLeft + chip.offsetWidth;
+      const visibleLeft = strip.scrollLeft;
+      const visibleRight = visibleLeft + strip.clientWidth;
+      const padding = 16;
+      if (chipLeft < visibleLeft + padding) {
+        strip.scrollTo({ left: Math.max(0, chipLeft - padding), behavior: 'smooth' });
+      } else if (chipRight > visibleRight - padding) {
+        strip.scrollTo({ left: Math.max(0, chipRight - strip.clientWidth + padding), behavior: 'smooth' });
+      }
+    };
+
+    const setActiveDay = (index, ensureChip = true) => {
+      if (!dayCount) {
+        return;
+      }
+      const bounded = Math.max(0, Math.min(index, dayCount - 1));
       activeDayIndex = bounded;
-      dayChips.forEach((chip, idx) => {
-        chip.classList.toggle('is-active', idx === bounded);
+      dayScrollerGroups.forEach((group) => {
+        group.chips.forEach((chip, idx) => {
+          chip.classList.toggle('is-active', idx === bounded);
+        });
+        if (group.prevBtn) {
+          group.prevBtn.disabled = bounded <= 0;
+        }
+        if (group.nextBtn) {
+          group.nextBtn.disabled = bounded >= dayCount - 1;
+        }
+        if (ensureChip && group.strip && group.chips[bounded]) {
+          scrollChipIntoView(group.strip, group.chips[bounded]);
+        }
       });
       if (dayHeaders.length) {
         dayHeaders.forEach((header, idx) => {
           header.classList.toggle('is-active', idx === bounded);
         });
-      }
-      if (prevBtn) {
-        prevBtn.disabled = bounded <= 0;
-      }
-      if (nextBtn) {
-        nextBtn.disabled = bounded >= dayChips.length - 1;
-      }
-      if (ensureChip && dayStrip && dayChips[bounded]) {
-        dayChips[bounded].scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
       }
       updateDayStripAlignment();
     };
@@ -2783,16 +2843,18 @@ include __DIR__ . '/include/layout_top.php';
       updateDayStripAlignment();
     };
 
-    if (scrollWrap && dayChips.length && dayHeaders.length) {
-      dayChips.forEach((chip, idx) => {
-        chip.addEventListener('click', () => scrollToDay(idx));
+    if (scrollWrap && dayCount && dayHeaders.length) {
+      dayScrollerGroups.forEach((group) => {
+        group.chips.forEach((chip, idx) => {
+          chip.addEventListener('click', () => scrollToDay(idx));
+        });
+        if (group.prevBtn) {
+          group.prevBtn.addEventListener('click', () => scrollToDay(activeDayIndex - 1));
+        }
+        if (group.nextBtn) {
+          group.nextBtn.addEventListener('click', () => scrollToDay(activeDayIndex + 1));
+        }
       });
-      if (prevBtn) {
-        prevBtn.addEventListener('click', () => scrollToDay(activeDayIndex - 1));
-      }
-      if (nextBtn) {
-        nextBtn.addEventListener('click', () => scrollToDay(activeDayIndex + 1));
-      }
       scrollWrap.addEventListener('scroll', () => {
         if (scrollRaf) {
           return;
@@ -2810,7 +2872,7 @@ include __DIR__ . '/include/layout_top.php';
       updateActiveFromScroll();
     }
 
-    enableDayStripScroll();
+    dayScrollerGroups.forEach((group) => enableDayStripScroll(group.strip));
     updateDayStripAlignment();
 
     const metaToggle = document.getElementById('toggleMetaColumns');
