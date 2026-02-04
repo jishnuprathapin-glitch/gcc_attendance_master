@@ -76,17 +76,20 @@ $today = new DateTimeImmutable('today');
 $startDate = $today->modify('-' . ($daysBack - 1) . ' days')->format('Y-m-d');
 $endDate = $today->format('Y-m-d');
 
-$sql = 'SELECT dp.emp_code, dp.punch_date, dp.first_log, dp.last_log ' .
+$sql = 'SELECT dp.emp_code, dp.punch_date, dp.first_log, dp.last_log, d.work_code ' .
     'FROM gcc_attendance_master.employee_daily_punch dp ' .
     'INNER JOIN gcc_attendance_master.hrmsvw_sync hr ' .
     'ON hr.emp_code COLLATE utf8mb4_general_ci = dp.emp_code COLLATE utf8mb4_general_ci ' .
     'LEFT JOIN gcc_attendance_master.employee_att_daily_overrides o ' .
     'ON o.emp_code COLLATE utf8mb4_general_ci = dp.emp_code COLLATE utf8mb4_general_ci ' .
     'AND o.att_date = dp.punch_date ' .
+    'LEFT JOIN gcc_attendance_master.employee_att_daily d ' .
+    'ON d.emp_code COLLATE utf8mb4_general_ci = dp.emp_code COLLATE utf8mb4_general_ci ' .
+    'AND d.att_date = dp.punch_date ' .
     'WHERE dp.punch_date BETWEEN ? AND ? ' .
     'AND hr.ty_cd IN ("01", "03") ' .
-    'AND dp.first_log IS NOT NULL AND dp.first_log <> "" ' .
-    'AND o.emp_code IS NULL';
+    'AND o.emp_code IS NULL ' .
+    'AND (d.work_code IS NULL OR d.work_code = "")';
 
 $stmt = $bd->prepare($sql);
 if (!$stmt) {
@@ -148,16 +151,25 @@ while ($row = $result->fetch_assoc()) {
     $attDate = trim((string) ($row['punch_date'] ?? ''));
     $firstLog = trim((string) ($row['first_log'] ?? ''));
     $lastLog = trim((string) ($row['last_log'] ?? ''));
+    $workCode = trim((string) ($row['work_code'] ?? ''));
 
-    if ($empCode === '' || $attDate === '' || is_missing_log($firstLog)) {
+    if ($empCode === '' || $attDate === '') {
+        $skippedInvalid++;
+        continue;
+    }
+    if ($workCode !== '') {
         $skippedInvalid++;
         continue;
     }
 
     $qualifies = false;
-    if (is_missing_log($lastLog)) {
-        $qualifies = true;
-    } else {
+    $hasFirst = !is_missing_log($firstLog);
+    $hasLast = !is_missing_log($lastLog);
+    if (!$hasFirst && !$hasLast) {
+        $skippedInvalid++;
+        continue;
+    }
+    if ($hasFirst && $hasLast) {
         $startTime = parse_log_time($firstLog);
         $endTime = parse_log_time($lastLog);
         if (!$startTime || !$endTime) {
@@ -165,9 +177,11 @@ while ($row = $result->fetch_assoc()) {
             continue;
         }
         $diff = $endTime->getTimestamp() - $startTime->getTimestamp();
-        if ($diff >= 0 && $diff < 3600) {
+        if ($diff >= 0 && $diff < 28800) {
             $qualifies = true;
         }
+    } else {
+        $qualifies = true;
     }
 
     if (!$qualifies) {
