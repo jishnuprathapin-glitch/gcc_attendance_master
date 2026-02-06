@@ -1,13 +1,26 @@
 <?php
-$links = [
-    ['label' => 'Dashboard', 'path' => 'Attendance_Dashboard.php', 'icon' => 'fas fa-home'],
-    ['label' => 'HR Insights', 'path' => 'Attendance_HRDashboard.php', 'icon' => 'fas fa-heartbeat'],
-    ['label' => 'Employees', 'path' => 'Attendance_Employees.php', 'icon' => 'fas fa-users'],
-    ['label' => 'Attendance Daily', 'path' => 'Attendance_AttendanceDaily.php', 'icon' => 'fas fa-calendar-alt'],
-    ['label' => 'Adjust Time', 'path' => 'Attendance_AttendanceAdjustTime.php', 'icon' => 'fas fa-clock'],
-    ['label' => 'Approvals', 'path' => 'Attendance_AttendanceApproval.php', 'icon' => 'fas fa-check-circle'],
-    ['label' => 'Device Mapping', 'path' => 'Attendance_DeviceMapping.php', 'icon' => 'fas fa-project-diagram'],
-];
+$nav_mode = $nav_mode ?? 'admin';
+$script = $_SERVER['SCRIPT_NAME'] ?? '';
+if ($script === '') {
+    $base = ($nav_mode === 'timekeeper') ? '/gcc_attendance_master/timekeeper' : '/gcc_attendance_master/admin';
+} else {
+    $base = rtrim(str_replace('\\', '/', dirname($script)), '/');
+}
+$links = ($nav_mode === 'timekeeper')
+    ? [
+        ['label' => 'Attendance Daily', 'path' => 'timekeeper_attendance_view.php', 'icon' => 'fas fa-calendar-alt'],
+        ['label' => 'Access Requests', 'path' => 'timekeeper_project_request.php', 'icon' => 'fas fa-key'],
+      ]
+    : [
+        ['label' => 'Dashboard', 'path' => 'Attendance_Dashboard.php', 'icon' => 'fas fa-home'],
+        ['label' => 'HR Insights', 'path' => 'Attendance_HRDashboard.php', 'icon' => 'fas fa-heartbeat'],
+        ['label' => 'Employees', 'path' => 'Attendance_Employees.php', 'icon' => 'fas fa-users'],
+        ['label' => 'Attendance Daily', 'path' => 'Attendance_AttendanceDaily.php', 'icon' => 'fas fa-calendar-alt'],
+        ['label' => 'Adjust Time', 'path' => 'Attendance_AttendanceAdjustTime.php', 'icon' => 'fas fa-clock'],
+        ['label' => 'Approvals', 'path' => 'Attendance_AttendanceApproval.php', 'icon' => 'fas fa-check-circle'],
+        ['label' => 'Device Mapping', 'path' => 'Attendance_DeviceMapping.php', 'icon' => 'fas fa-project-diagram'],
+        ['label' => 'Timekeeper Requests', 'path' => 'Attendance_TimekeeperAccess.php', 'icon' => 'fas fa-user-check'],
+      ];
 $currentPage = strtolower(basename($_SERVER['SCRIPT_NAME'] ?? ''));
 ?>
 <style>
@@ -140,7 +153,7 @@ $currentPage = strtolower(basename($_SERVER['SCRIPT_NAME'] ?? ''));
   <div class="att-nav-links">
     <?php foreach ($links as $link): ?>
       <?php $isActive = strtolower($link['path']) === $currentPage; ?>
-      <a class="att-nav-link <?= $isActive ? 'is-active' : '' ?>" href="<?= h(admin_url($link['path'])) ?>">
+      <a class="att-nav-link <?= $isActive ? 'is-active' : '' ?>" href="<?= h($base . '/' . ltrim($link['path'], '/')) ?>">
         <i class="<?= h($link['icon']) ?>"></i>
         <span><?= h($link['label']) ?></span>
       </a>

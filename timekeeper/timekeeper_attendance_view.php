@@ -1,6 +1,6 @@
 <?php
 
-require __DIR__ . '/include/bootstrap.php';
+require dirname(__DIR__) . '/admin/include/bootstrap.php';
 
 $page_title = 'Attendance Daily';
 
@@ -199,7 +199,7 @@ function load_timekeeper_projects(mysqli $bd, string $userId): array {
 }
 
 function build_query_url(array $params): string {
-    $base = admin_url('Attendance_AttendanceDaily.php');
+    $base = admin_url('timekeeper_attendance_view.php');
     $query = http_build_query($params);
     if ($query === '') {
         return $base;
@@ -498,6 +498,37 @@ function render_attendance_results(array $context): string {
               </tr>
             <?php endif; ?>
           </tbody>
+          <tfoot>
+            <tr>
+              <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
+              <th rowspan="2" class="col-fixed col-fixed-2">Emp Name</th>
+              <th rowspan="2" class="col-adv">Designation</th>
+              <th rowspan="2" class="col-adv">Department</th>
+              <th rowspan="2" class="col-adv">Cost center company</th>
+              <th rowspan="2" class="col-adv">Employee Type</th>
+              <th rowspan="2" class="col-adv">Project Code</th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <th colspan="<?= h($collapsedDayColumns) ?>" class="text-center date-header day-footer-header" data-day-index="<?= h($dayIndex) ?>" data-collapsed-colspan="<?= h($collapsedDayColumns) ?>" data-expanded-colspan="<?= h($expandedDayColumns) ?>">
+                  <span class="day-label"><?= h(format_date_label($date)) ?></span>
+                </th>
+              <?php endforeach; ?>
+            </tr>
+            <tr>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php $dayClass = 'day-' . $dayIndex; ?>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-project-login">Project login (U)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-leave">Leave code (H)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-work-code">Work code (W)</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-login">Login</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-logout">Logout</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-work-hrs">Work hrs</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-override-hrs">Override hrs</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-extra col-override-code">Override code</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-final-work-code">Final work code</th>
+                <th class="sub-header day-col <?= h($dayClass) ?> col-final-work-hrs">Final work hrs</th>
+              <?php endforeach; ?>
+            </tr>
+          </tfoot>
           </table>
         </div>
         <?php if (!empty($dateRange)): ?>
@@ -564,24 +595,44 @@ function export_attendance_csv(
     array $dateRange,
     string $startDate,
     string $endDate,
+    string $reportType,
     $output,
     ?callable $progress = null,
     int $batchSize = 200
 ): ?string {
-    $header = ['Emp Code', 'Emp Name', 'Designation', 'Department', 'Cost center company', 'Employee Type', 'Project Code'];
-    foreach ($dateRange as $date) {
-        $header[] = $date . ' Project login (U)';
-        $header[] = $date . ' Leave code (H)';
-        $header[] = $date . ' Work code (W)';
-        $header[] = $date . ' Login';
-        $header[] = $date . ' Logout';
-        $header[] = $date . ' Work hrs';
-        $header[] = $date . ' Override hrs';
-        $header[] = $date . ' Override code';
-        $header[] = $date . ' Final work code';
-        $header[] = $date . ' Final work hrs';
+    $reportType = strtolower(trim($reportType));
+    if (!in_array($reportType, ['detailed', 'final'], true)) {
+        $reportType = 'detailed';
     }
-    fputcsv($output, $header);
+
+    $baseHeader = ['Emp Code', 'Emp Name', 'Designation', 'Department', 'Cost center company', 'Employee Type', 'Project Code'];
+    if ($reportType === 'final') {
+        $headerRow1 = $baseHeader;
+        $headerRow2 = array_fill(0, count($baseHeader), '');
+        foreach ($dateRange as $date) {
+            $headerRow1[] = $date;
+            $headerRow1[] = '';
+            $headerRow2[] = 'Final work code';
+            $headerRow2[] = 'Final work hrs';
+        }
+        fputcsv($output, $headerRow1);
+        fputcsv($output, $headerRow2);
+    } else {
+        $header = $baseHeader;
+        foreach ($dateRange as $date) {
+            $header[] = $date . ' Project login (U)';
+            $header[] = $date . ' Leave code (H)';
+            $header[] = $date . ' Work code (W)';
+            $header[] = $date . ' Login';
+            $header[] = $date . ' Logout';
+            $header[] = $date . ' Work hrs';
+            $header[] = $date . ' Override hrs';
+            $header[] = $date . ' Override code';
+            $header[] = $date . ' Final work code';
+            $header[] = $date . ' Final work hrs';
+        }
+        fputcsv($output, $header);
+    }
 
     $exportSql = 'SELECT hr.emp_code, ' .
         'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
@@ -830,16 +881,20 @@ function export_attendance_csv(
                 $finalWorkCode = ($overrideStatus === 1) ? $overrideCode : $workCode;
                 $finalWorkHours = ($overrideStatus === 1) ? $overrideHours : ($workHours !== null ? $workHours : '');
 
-                $row[] = $loginProject;
-                $row[] = $leaveCode;
-                $row[] = $workCode;
-                $row[] = format_time_value($firstLog);
-                $row[] = format_time_value($lastLog);
-                $row[] = $workHours !== null ? $workHours : '';
-                $row[] = $overrideHours;
-                $row[] = $overrideCode;
                 $row[] = $finalWorkCode;
                 $row[] = $finalWorkHours;
+                if ($reportType !== 'final') {
+                    array_splice($row, -2, 0, [
+                        $loginProject,
+                        $leaveCode,
+                        $workCode,
+                        format_time_value($firstLog),
+                        format_time_value($lastLog),
+                        $workHours !== null ? $workHours : '',
+                        $overrideHours,
+                        $overrideCode,
+                    ]);
+                }
             }
 
             fputcsv($output, $row);
@@ -862,6 +917,10 @@ function export_attendance_csv(
 $context = null;
 
 $exportType = strtolower(trim((string) ($_GET['export'] ?? '')));
+$reportType = strtolower(trim((string) ($_GET['report'] ?? 'detailed')));
+if (!in_array($reportType, ['detailed', 'final'], true)) {
+    $reportType = 'detailed';
+}
 if ($exportType === 'status') {
     $jobId = sanitize_export_job_id($_GET['job'] ?? null);
     $job = $jobId ? read_export_job($jobId) : null;
@@ -1262,7 +1321,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                 }
             }
             if ($mappingError === null) {
-                header('Location: ' . admin_url('timekeeper_attendance.php'));
+                header('Location: ' . admin_url('timekeeper_attendance_view.php'));
                 exit;
             }
         }
@@ -1586,11 +1645,21 @@ $baseQuery = [
     'start_date' => $startDate,
     'end_date' => $endDate,
 ];
-$exportUrl = build_query_url(array_merge($baseQuery, [
+$exportDetailedUrl = build_query_url(array_merge($baseQuery, [
     'export' => 'csv',
+    'report' => 'detailed',
 ]));
-$exportStartUrl = build_query_url(array_merge($baseQuery, [
+$exportFinalUrl = build_query_url(array_merge($baseQuery, [
+    'export' => 'csv',
+    'report' => 'final',
+]));
+$exportStartDetailedUrl = build_query_url(array_merge($baseQuery, [
     'export' => 'start',
+    'report' => 'detailed',
+]));
+$exportStartFinalUrl = build_query_url(array_merge($baseQuery, [
+    'export' => 'start',
+    'report' => 'final',
 ]));
 $last30DaysUrl = build_query_url(array_merge($baseQuery, [
     'start_date' => $last30Start,
@@ -1636,6 +1705,10 @@ $context = [
     'last60DaysUrl' => $last60DaysUrl,
     'isLast30Days' => $isLast30Days,
     'isLast60Days' => $isLast60Days,
+    'exportDetailedUrl' => $exportDetailedUrl,
+    'exportFinalUrl' => $exportFinalUrl,
+    'exportStartDetailedUrl' => $exportStartDetailedUrl,
+    'exportStartFinalUrl' => $exportStartFinalUrl,
 ];
 
 if ($exportStart) {
@@ -1660,7 +1733,8 @@ if ($exportStart) {
         echo json_encode(['ok' => false, 'message' => 'Export folder is not writable.'], JSON_UNESCAPED_SLASHES);
         exit;
     }
-    $filename = 'attendance-daily-' . $startDate . '-to-' . $endDate . '.csv';
+    $reportLabel = ($reportType === 'final') ? 'final' : 'detailed';
+    $filename = 'attendance-daily-' . $reportLabel . '-' . $startDate . '-to-' . $endDate . '.csv';
     $csvPath = export_job_csv_path($jobId);
     $createdAt = gmdate('c');
     $userId = (string) ($_SESSION['user_id'] ?? '');
@@ -1673,6 +1747,7 @@ if ($exportStart) {
         'user_id' => $userId,
         'file' => $csvPath,
         'filename' => $filename,
+        'report' => $reportType,
         'created_at' => $createdAt,
         'message' => null,
     ];
@@ -1719,7 +1794,7 @@ if ($exportStart) {
         $job['status'] = 'running';
         write_export_job($jobId, $job);
     };
-    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $output, $progress);
+    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $reportType, $output, $progress);
     fclose($output);
 
     if ($exportError !== null) {
@@ -1749,7 +1824,8 @@ if ($exportRequested) {
         exit;
     }
 
-    $filename = 'attendance-daily-' . $startDate . '-to-' . $endDate . '.csv';
+    $reportLabel = ($reportType === 'final') ? 'final' : 'detailed';
+    $filename = 'attendance-daily-' . $reportLabel . '-' . $startDate . '-to-' . $endDate . '.csv';
 
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
@@ -1760,7 +1836,7 @@ if ($exportRequested) {
         exit;
     }
 
-    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $output);
+    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $reportType, $output);
     if ($exportError !== null) {
         fputcsv($output, ['ERROR', $exportError]);
     }
@@ -1781,7 +1857,7 @@ if (($_GET['ajax'] ?? '') === '1') {
     exit;
 }
 
-include __DIR__ . '/include/layout_top.php';
+include dirname(__DIR__) . '/admin/include/layout_top.php';
 
 ?>
 
@@ -1795,6 +1871,9 @@ include __DIR__ . '/include/layout_top.php';
     vertical-align: top;
   }
   .attendance-daily-table thead th {
+    background: #f8f9fa;
+  }
+  .attendance-daily-table tfoot th {
     background: #f8f9fa;
   }
   .attendance-daily-table .date-header {
@@ -1900,6 +1979,10 @@ include __DIR__ . '/include/layout_top.php';
     border-right: 3px solid #b6c2cf;
     border-left: 3px solid #b6c2cf;
   }
+  .attendance-daily-table .day-footer-header {
+    border-right: 3px solid #b6c2cf;
+    border-left: 3px solid #b6c2cf;
+  }
   .attendance-daily-table th,
   .attendance-daily-table td {
     text-align: center;
@@ -1916,7 +1999,9 @@ include __DIR__ . '/include/layout_top.php';
     border-right: 3px solid #b6c2cf;
   }
   .attendance-daily-table thead th.col-final-work-code,
-  .attendance-daily-table thead th.col-final-work-hrs {
+  .attendance-daily-table thead th.col-final-work-hrs,
+  .attendance-daily-table tfoot th.col-final-work-code,
+  .attendance-daily-table tfoot th.col-final-work-hrs {
     background: #e9e9e9;
     color: #000;
   }
@@ -2216,7 +2301,7 @@ include __DIR__ . '/include/layout_top.php';
       </div>
       <div class="col-sm-6 text-sm-right"></div>
     </div>
-    <?php include __DIR__ . '/include/admin_nav.php'; ?>
+    <?php $nav_mode = 'timekeeper'; include dirname(__DIR__) . '/admin/include/admin_nav.php'; ?>
   </div>
 </section>
 
@@ -2333,10 +2418,13 @@ include __DIR__ . '/include/layout_top.php';
             <button type="submit" class="btn btn-primary btn-block">Apply</button>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
-            <a class="btn btn-outline-secondary btn-block" href="<?= h(admin_url('timekeeper_attendance.php')) ?>">Reset</a>
+            <a class="btn btn-outline-secondary btn-block" href="<?= h(admin_url('timekeeper_attendance_view.php')) ?>">Reset</a>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
-            <a id="exportBtn" class="btn btn-outline-success btn-block" href="<?= h($exportUrl) ?>" data-export-start="<?= h($exportStartUrl) ?>">Export</a>
+            <a class="btn btn-outline-success btn-block export-btn" href="<?= h($exportDetailedUrl) ?>" data-export-start="<?= h($exportStartDetailedUrl) ?>">Export Detailed</a>
+          </div>
+          <div class="form-group col-md-2 d-flex align-items-end">
+            <a class="btn btn-outline-primary btn-block export-btn" href="<?= h($exportFinalUrl) ?>" data-export-start="<?= h($exportStartFinalUrl) ?>">Export Final</a>
           </div>
         </form>
         <div class="small text-muted">
@@ -2545,8 +2633,64 @@ include __DIR__ . '/include/layout_top.php';
               </tr>
             <?php endif; ?>
           </tbody>
+          <tfoot>
+            <tr>
+              <th rowspan="2" class="col-fixed col-fixed-1">Emp Code</th>
+              <th rowspan="2" class="col-fixed col-fixed-2">Emp Name</th>
+              <th rowspan="2" class="col-adv">Designation</th>
+              <th rowspan="2" class="col-adv">Department</th>
+              <th rowspan="2" class="col-adv">Cost center company</th>
+              <th rowspan="2" class="col-adv">Employee Type</th>
+              <th rowspan="2" class="col-adv">Project Code</th>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <th colspan="<?= $collapsedDayColumns ?>" class="text-center date-header day-footer-header" data-day-index="<?= $dayIndex ?>" data-collapsed-colspan="<?= $collapsedDayColumns ?>" data-expanded-colspan="<?= $expandedDayColumns ?>">
+                  <span class="day-label"><?= h(format_date_label($date)) ?></span>
+                </th>
+              <?php endforeach; ?>
+            </tr>
+            <tr>
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php $dayClass = 'day-' . $dayIndex; ?>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-project-login">Project login (U)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-leave">Leave code (H)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-work-code">Work code (W)</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-login">Login</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-logout">Logout</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-work-hrs">Work hrs</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-override-hrs">Override hrs</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-extra col-override-code">Override code</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-final-work-code">Final work code</th>
+                <th class="sub-header day-col <?= $dayClass ?> col-final-work-hrs">Final work hrs</th>
+              <?php endforeach; ?>
+            </tr>
+          </tfoot>
           </table>
         </div>
+        <?php if (!empty($dateRange)): ?>
+          <div class="attendance-day-scroller is-bottom">
+            <button type="button" class="day-nav day-nav-prev" aria-label="Previous day">&#8249;</button>
+            <div class="day-strip" role="tablist" aria-label="Days">
+              <?php foreach ($dateRange as $dayIndex => $date): ?>
+                <?php
+                  $chipDay = $date;
+                  $chipDate = '';
+                  try {
+                      $chipDt = new DateTimeImmutable($date);
+                      $chipDay = $chipDt->format('D');
+                      $chipDate = $chipDt->format('d M');
+                  } catch (Exception $e) {
+                      $chipDay = $date;
+                  }
+                ?>
+                <button type="button" class="day-chip" data-day-index="<?= h($dayIndex) ?>" data-date="<?= h($date) ?>">
+                  <span class="chip-day"><?= h($chipDay) ?></span>
+                  <span class="chip-date"><?= h($chipDate !== '' ? $chipDate : $date) ?></span>
+                </button>
+              <?php endforeach; ?>
+            </div>
+            <button type="button" class="day-nav day-nav-next" aria-label="Next day">&#8250;</button>
+          </div>
+        <?php endif; ?>
       </div>
       <?php if ($totalPages > 1): ?>
         <div class="attendance-pager" data-total-pages="<?= $totalPages ?>">
@@ -2648,12 +2792,12 @@ include __DIR__ . '/include/layout_top.php';
       dayCols.forEach((el) => {
         el.classList.toggle('day-expanded', expanded);
       });
-      const header = table.querySelector(`.day-header[data-day-index="${dayIndex}"]`);
-      if (header) {
+      const headers = table.querySelectorAll(`.day-header[data-day-index="${dayIndex}"], .day-footer-header[data-day-index="${dayIndex}"]`);
+      headers.forEach((header) => {
         const expandedColspan = header.getAttribute('data-expanded-colspan') || '7';
         const collapsedColspan = header.getAttribute('data-collapsed-colspan') || '2';
         header.setAttribute('colspan', expanded ? expandedColspan : collapsedColspan);
-      }
+      });
       const toggle = table.querySelector(`.day-toggle[data-day-index="${dayIndex}"]`);
       if (toggle) {
         toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
@@ -2811,6 +2955,7 @@ include __DIR__ . '/include/layout_top.php';
       updateDayStripAlignment();
     };
 
+    const edgePadding = 12;
     const scrollToDay = (index) => {
       if (!scrollWrap || !dayHeaders.length) {
         return;
@@ -2821,7 +2966,7 @@ include __DIR__ . '/include/layout_top.php';
         return;
       }
       const stickyWidth = getStickyWidth();
-      const target = header.offsetLeft - stickyWidth - 4;
+      const target = header.offsetLeft - stickyWidth - edgePadding;
       scrollWrap.scrollTo({ left: Math.max(0, target), behavior: 'smooth' });
       setActiveDay(bounded);
       updateDayStripAlignment();
@@ -2832,7 +2977,7 @@ include __DIR__ . '/include/layout_top.php';
         return;
       }
       const stickyWidth = getStickyWidth();
-      const marker = scrollWrap.scrollLeft + stickyWidth + 8;
+      const marker = scrollWrap.scrollLeft + stickyWidth + edgePadding;
       let index = 0;
       dayHeaders.forEach((header, idx) => {
         if (header.offsetLeft <= marker) {
@@ -2896,7 +3041,7 @@ include __DIR__ . '/include/layout_top.php';
     }
 
     const pagerBase = <?= json_encode($baseQuery) ?>;
-    const pagerUrl = <?= json_encode(admin_url('Attendance_AttendanceDaily.php')) ?>;
+    const pagerUrl = <?= json_encode(admin_url('timekeeper_attendance_view.php')) ?>;
     const buildPagerUrl = (pageValue, perPageValue) => {
       const params = new URLSearchParams();
       Object.keys(pagerBase).forEach((key) => {
@@ -3070,13 +3215,9 @@ include __DIR__ . '/include/layout_top.php';
 </script>
 <script>
   document.addEventListener('DOMContentLoaded', function () {
-    const exportBtn = document.getElementById('exportBtn');
+    const exportButtons = Array.from(document.querySelectorAll('.export-btn'));
     const overlay = document.getElementById('exportOverlay');
-    if (!exportBtn || !overlay) {
-      return;
-    }
-    const startUrl = exportBtn.getAttribute('data-export-start');
-    if (!startUrl) {
+    if (!exportButtons.length || !overlay) {
       return;
     }
     const ring = overlay.querySelector('.export-ring');
@@ -3087,6 +3228,7 @@ include __DIR__ . '/include/layout_top.php';
 
     let pollTimer = null;
     let activeJob = null;
+    let activeBtn = null;
 
     const showOverlay = () => {
       overlay.classList.add('is-active');
@@ -3132,7 +3274,11 @@ include __DIR__ . '/include/layout_top.php';
           setProgress(Number(data.processed), Number(data.total), Number(data.percent));
           if (data.status === 'done') {
             stopPolling();
-            exportBtn.classList.remove('is-loading');
+            if (activeBtn) {
+              activeBtn.classList.remove('is-loading');
+            }
+            activeBtn = null;
+            activeJob = null;
             if (ring) {
               ring.classList.add('is-complete');
             }
@@ -3149,7 +3295,11 @@ include __DIR__ . '/include/layout_top.php';
           }
           if (data.status === 'error') {
             stopPolling();
-            exportBtn.classList.remove('is-loading');
+            if (activeBtn) {
+              activeBtn.classList.remove('is-loading');
+            }
+            activeBtn = null;
+            activeJob = null;
             if (statusEl) {
               statusEl.textContent = data.message || 'Export failed.';
             }
@@ -3161,53 +3311,69 @@ include __DIR__ . '/include/layout_top.php';
         })
         .catch((error) => {
           stopPolling();
-          exportBtn.classList.remove('is-loading');
+          if (activeBtn) {
+            activeBtn.classList.remove('is-loading');
+          }
+          activeBtn = null;
+          activeJob = null;
           if (statusEl) {
             statusEl.textContent = error && error.message ? error.message : 'Export failed.';
           }
         });
     };
 
-    exportBtn.addEventListener('click', function (event) {
-      event.preventDefault();
-      if (exportBtn.classList.contains('is-loading')) {
-        return;
-      }
-      exportBtn.classList.add('is-loading');
-      showOverlay();
-      if (ring) {
-        ring.classList.remove('is-complete');
-      }
-      setProgress(0, 0, 0);
-      if (statusEl) {
-        statusEl.textContent = 'Starting export...';
-      }
+    exportButtons.forEach((btn) => {
+      btn.addEventListener('click', function (event) {
+        event.preventDefault();
+        if (activeBtn) {
+          return;
+        }
+        const startUrl = btn.getAttribute('data-export-start');
+        if (!startUrl) {
+          window.location.href = btn.getAttribute('href');
+          return;
+        }
+        activeBtn = btn;
+        activeBtn.classList.add('is-loading');
+        showOverlay();
+        if (ring) {
+          ring.classList.remove('is-complete');
+        }
+        setProgress(0, 0, 0);
+        if (statusEl) {
+          statusEl.textContent = 'Starting export...';
+        }
 
-      fetch(startUrl, { credentials: 'same-origin' })
-        .then((response) => response.json())
-        .then((data) => {
-          if (!data || !data.ok) {
-            throw new Error(data && data.message ? data.message : 'Unable to start export.');
-          }
-          activeJob = {
-            job: data.job,
-            statusUrl: data.statusUrl,
-            downloadUrl: data.downloadUrl,
-          };
-          setProgress(0, Number(data.total), 0);
-          pollStatus();
-          pollTimer = setInterval(pollStatus, 900);
-        })
-        .catch((error) => {
-          exportBtn.classList.remove('is-loading');
-          if (statusEl) {
-            statusEl.textContent = error && error.message ? error.message : 'Unable to start export.';
-          }
-          setTimeout(() => {
-            window.location.href = exportBtn.getAttribute('href');
-            hideOverlay();
-          }, 1200);
-        });
+        fetch(startUrl, { credentials: 'same-origin' })
+          .then((response) => response.json())
+          .then((data) => {
+            if (!data || !data.ok) {
+              throw new Error(data && data.message ? data.message : 'Unable to start export.');
+            }
+            activeJob = {
+              job: data.job,
+              statusUrl: data.statusUrl,
+              downloadUrl: data.downloadUrl,
+            };
+            setProgress(0, Number(data.total), 0);
+            pollStatus();
+            pollTimer = setInterval(pollStatus, 900);
+          })
+          .catch((error) => {
+            if (activeBtn) {
+              activeBtn.classList.remove('is-loading');
+            }
+            if (statusEl) {
+              statusEl.textContent = error && error.message ? error.message : 'Unable to start export.';
+            }
+            setTimeout(() => {
+              window.location.href = btn.getAttribute('href');
+              hideOverlay();
+            }, 1200);
+            activeBtn = null;
+            activeJob = null;
+          });
+      });
     });
 
     if (closeBtn) {
@@ -3236,4 +3402,4 @@ include __DIR__ . '/include/layout_top.php';
   });
 </script>
 
-<?php include __DIR__ . '/include/layout_bottom.php'; ?>
+<?php include dirname(__DIR__) . '/admin/include/layout_bottom.php'; ?>
