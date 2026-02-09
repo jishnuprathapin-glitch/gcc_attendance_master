@@ -249,6 +249,37 @@ function export_job_dir(): string {
     return $dir;
 }
 
+// Enable/disable export debug logging (set false after troubleshooting)
+$EXPORT_DEBUG = true;
+
+function export_log_dir(): string {
+    return 'E:\\XAAMP_29_Nov\\htdocs\\gcc_attendance_master\\logs';
+}
+
+function export_log_path(): string {
+    $dir = export_log_dir();
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+    }
+    return rtrim($dir, '\\/') . DIRECTORY_SEPARATOR . 'export_debug.log';
+}
+
+function export_log(string $label, array $data = []): void {
+    global $EXPORT_DEBUG;
+    if (!$EXPORT_DEBUG) {
+        return;
+    }
+    $entry = [
+        'ts' => date('c'),
+        'label' => $label,
+        'user_id' => $_SESSION['user_id'] ?? null,
+        'uri' => $_SERVER['REQUEST_URI'] ?? null,
+        'ip' => $_SERVER['REMOTE_ADDR'] ?? null,
+        'data' => $data,
+    ];
+    @file_put_contents(export_log_path(), json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . PHP_EOL, FILE_APPEND | LOCK_EX);
+}
+
 function export_job_path(string $jobId): string {
     return export_job_dir() . DIRECTORY_SEPARATOR . $jobId . '.json';
 }
@@ -271,14 +302,22 @@ function sanitize_export_job_id(?string $jobId): ?string {
 function read_export_job(string $jobId): ?array {
     $path = export_job_path($jobId);
     if (!is_file($path)) {
+        export_log('job_missing', ['job' => $jobId, 'path' => $path]);
         return null;
     }
     $raw = file_get_contents($path);
     if ($raw === false) {
+        export_log('job_read_failed', ['job' => $jobId, 'path' => $path]);
         return null;
     }
     $data = json_decode($raw, true);
     if (!is_array($data)) {
+        export_log('job_json_invalid', [
+            'job' => $jobId,
+            'path' => $path,
+            'len' => strlen($raw),
+            'json_error' => json_last_error_msg(),
+        ]);
         return null;
     }
     return $data;
@@ -289,11 +328,18 @@ function write_export_job(string $jobId, array $data): void {
     $data['updated_at'] = gmdate('c');
     $payload = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($payload === false) {
+        export_log('job_json_encode_failed', ['job' => $jobId, 'path' => $path]);
         return;
     }
     $tmp = $path . '.tmp';
-    @file_put_contents($tmp, $payload);
-    @rename($tmp, $path);
+    $written = @file_put_contents($tmp, $payload);
+    if ($written === false) {
+        export_log('job_write_failed', ['job' => $jobId, 'tmp' => $tmp]);
+        return;
+    }
+    if (!@rename($tmp, $path)) {
+        export_log('job_rename_failed', ['job' => $jobId, 'tmp' => $tmp, 'path' => $path]);
+    }
 }
 
 function render_attendance_results(array $context): string {
@@ -922,11 +968,13 @@ if (!in_array($reportType, ['detailed', 'final'], true)) {
     $reportType = 'detailed';
 }
 if ($exportType === 'status') {
+    export_log('status_request', ['job' => $_GET['job'] ?? null]);
     $jobId = sanitize_export_job_id($_GET['job'] ?? null);
     $job = $jobId ? read_export_job($jobId) : null;
     if (!$jobId || !$job) {
         http_response_code(404);
         header('Content-Type: application/json; charset=utf-8');
+        export_log('status_not_found', ['job' => $jobId]);
         echo json_encode(['ok' => false, 'message' => 'Export not found.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
@@ -934,6 +982,7 @@ if ($exportType === 'status') {
     if (($job['user_id'] ?? '') !== $userId) {
         http_response_code(403);
         header('Content-Type: application/json; charset=utf-8');
+        export_log('status_forbidden', ['job' => $jobId, 'job_user' => $job['user_id'] ?? null, 'user' => $userId]);
         echo json_encode(['ok' => false, 'message' => 'Export not available.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
@@ -945,6 +994,7 @@ if ($exportType === 'status') {
         $percent = 100;
     }
     header('Content-Type: application/json; charset=utf-8');
+    export_log('status_response', ['job' => $jobId, 'status' => $status, 'processed' => $processed, 'total' => $total]);
     echo json_encode([
         'ok' => true,
         'status' => $status,
@@ -957,11 +1007,13 @@ if ($exportType === 'status') {
     exit;
 }
 if ($exportType === 'download') {
+    export_log('download_request', ['job' => $_GET['job'] ?? null]);
     $jobId = sanitize_export_job_id($_GET['job'] ?? null);
     $job = $jobId ? read_export_job($jobId) : null;
     if (!$jobId || !$job) {
         http_response_code(404);
         header('Content-Type: text/plain; charset=utf-8');
+        export_log('download_not_found', ['job' => $jobId]);
         echo 'Export not found.';
         exit;
     }
@@ -969,12 +1021,14 @@ if ($exportType === 'download') {
     if (($job['user_id'] ?? '') !== $userId) {
         http_response_code(403);
         header('Content-Type: text/plain; charset=utf-8');
+        export_log('download_forbidden', ['job' => $jobId, 'job_user' => $job['user_id'] ?? null, 'user' => $userId]);
         echo 'Export not available.';
         exit;
     }
     if (($job['status'] ?? '') !== 'done') {
         http_response_code(409);
         header('Content-Type: text/plain; charset=utf-8');
+        export_log('download_not_ready', ['job' => $jobId, 'status' => $job['status'] ?? null]);
         echo 'Export not ready.';
         exit;
     }
@@ -982,6 +1036,7 @@ if ($exportType === 'download') {
     if ($file === '' || !is_file($file)) {
         http_response_code(404);
         header('Content-Type: text/plain; charset=utf-8');
+        export_log('download_file_missing', ['job' => $jobId, 'file' => $file]);
         echo 'Export file missing.';
         exit;
     }
@@ -992,9 +1047,11 @@ if ($exportType === 'download') {
     if ($size !== false) {
         header('Content-Length: ' . $size);
     }
+    export_log('download_send', ['job' => $jobId, 'file' => $file, 'size' => $size, 'filename' => $filename]);
     readfile($file);
     @unlink($file);
     @unlink(export_job_path($jobId));
+    export_log('download_cleanup', ['job' => $jobId, 'file' => $file]);
     exit;
 }
 
@@ -1718,16 +1775,23 @@ if ($exportStart) {
     }
     @ini_set('display_errors', '0');
     @ini_set('html_errors', '0');
+    export_log('export_start_request', [
+        'report' => $reportType,
+        'date_start' => $startDate,
+        'date_end' => $endDate,
+    ]);
 
     if ($mappingRequired) {
         http_response_code(400);
         header('Content-Type: application/json; charset=utf-8');
+        export_log('export_start_blocked', ['reason' => 'mapping_required']);
         echo json_encode(['ok' => false, 'message' => 'Project access is not configured.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
     if ($loadError !== null) {
         http_response_code(500);
         header('Content-Type: application/json; charset=utf-8');
+        export_log('export_start_blocked', ['reason' => 'load_error', 'message' => $loadError]);
         echo json_encode(['ok' => false, 'message' => $loadError], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
@@ -1737,7 +1801,8 @@ if ($exportStart) {
     if (!is_dir($exportDir) || !is_writable($exportDir)) {
         http_response_code(500);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['ok' => false, 'message' => 'Export folder is not writable.'], JSON_UNESCAPED_SLASHES);
+        export_log('export_start_blocked', ['reason' => 'dir_not_writable', 'dir' => $exportDir]);
+        echo json_encode(['ok' => false, 'message' => 'Export folder is not writable.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
     $reportLabel = ($reportType === 'final') ? 'final' : 'detailed';
@@ -1759,6 +1824,12 @@ if ($exportStart) {
         'message' => null,
     ];
     write_export_job($jobId, $job);
+    export_log('export_start', [
+        'job' => $jobId,
+        'report' => $reportType,
+        'file' => $csvPath,
+        'total' => $totalEmployees,
+    ]);
 
     $payload = json_encode([
         'ok' => true,
@@ -1792,6 +1863,7 @@ if ($exportStart) {
         $job['status'] = 'error';
         $job['message'] = 'Unable to create export file.';
         write_export_job($jobId, $job);
+        export_log('export_error', ['job' => $jobId, 'message' => $job['message']]);
         exit;
     }
 
@@ -1807,12 +1879,14 @@ if ($exportStart) {
         $job['status'] = 'error';
         $job['message'] = $exportError;
         write_export_job($jobId, $job);
+        export_log('export_error', ['job' => $jobId, 'message' => $exportError]);
         exit;
     }
 
     $job['status'] = 'done';
     $job['processed'] = $totalEmployees;
     write_export_job($jobId, $job);
+    export_log('export_done', ['job' => $jobId, 'total' => $totalEmployees]);
     exit;
 }
 
