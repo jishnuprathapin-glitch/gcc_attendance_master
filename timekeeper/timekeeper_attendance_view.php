@@ -287,7 +287,7 @@ function read_export_job(string $jobId): ?array {
 function write_export_job(string $jobId, array $data): void {
     $path = export_job_path($jobId);
     $data['updated_at'] = gmdate('c');
-    $payload = json_encode($data, JSON_UNESCAPED_SLASHES);
+    $payload = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($payload === false) {
         return;
     }
@@ -927,14 +927,14 @@ if ($exportType === 'status') {
     if (!$jobId || !$job) {
         http_response_code(404);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['ok' => false, 'message' => 'Export not found.'], JSON_UNESCAPED_SLASHES);
+        echo json_encode(['ok' => false, 'message' => 'Export not found.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
     $userId = (string) ($_SESSION['user_id'] ?? '');
     if (($job['user_id'] ?? '') !== $userId) {
         http_response_code(403);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['ok' => false, 'message' => 'Export not available.'], JSON_UNESCAPED_SLASHES);
+        echo json_encode(['ok' => false, 'message' => 'Export not available.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
     $total = (int) ($job['total'] ?? 0);
@@ -953,7 +953,7 @@ if ($exportType === 'status') {
         'percent' => $percent,
         'message' => $job['message'] ?? null,
         'filename' => $job['filename'] ?? null,
-    ], JSON_UNESCAPED_SLASHES);
+    ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
 if ($exportType === 'download') {
@@ -1712,16 +1712,23 @@ $context = [
 ];
 
 if ($exportStart) {
+    // Ensure clean JSON output (avoid warnings/notices corrupting the response)
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+    @ini_set('display_errors', '0');
+    @ini_set('html_errors', '0');
+
     if ($mappingRequired) {
         http_response_code(400);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['ok' => false, 'message' => 'Project access is not configured.'], JSON_UNESCAPED_SLASHES);
+        echo json_encode(['ok' => false, 'message' => 'Project access is not configured.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
     if ($loadError !== null) {
         http_response_code(500);
         header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(['ok' => false, 'message' => $loadError], JSON_UNESCAPED_SLASHES);
+        echo json_encode(['ok' => false, 'message' => $loadError], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
 
@@ -1760,13 +1767,12 @@ if ($exportStart) {
         'statusUrl' => build_query_url(['export' => 'status', 'job' => $jobId]),
         'downloadUrl' => build_query_url(['export' => 'download', 'job' => $jobId]),
         'filename' => $filename,
-    ], JSON_UNESCAPED_SLASHES);
+    ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($payload === false) {
         $payload = '{"ok":false,"message":"Unable to start export."}';
     }
     header('Content-Type: application/json; charset=utf-8');
     header('Connection: close');
-    header('Content-Length: ' . strlen($payload));
     echo $payload;
     if (function_exists('fastcgi_finish_request')) {
         fastcgi_finish_request();
@@ -3261,12 +3267,25 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
         pollTimer = null;
       }
     };
+    const parseJsonResponse = (response) => {
+      return response.text().then((text) => {
+        if (!text) {
+          throw new Error('Empty response from server.');
+        }
+        try {
+          return JSON.parse(text);
+        } catch (err) {
+          const snippet = text.length > 200 ? `${text.slice(0, 200)}...` : text;
+          throw new Error(`Invalid JSON response: ${snippet}`);
+        }
+      });
+    };
     const pollStatus = () => {
       if (!activeJob || !activeJob.statusUrl) {
         return;
       }
       fetch(activeJob.statusUrl, { credentials: 'same-origin' })
-        .then((response) => response.json())
+        .then(parseJsonResponse)
         .then((data) => {
           if (!data || !data.ok) {
             throw new Error(data && data.message ? data.message : 'Unable to read export status.');
@@ -3274,6 +3293,7 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           setProgress(Number(data.processed), Number(data.total), Number(data.percent));
           if (data.status === 'done') {
             stopPolling();
+            const downloadUrl = activeJob && activeJob.downloadUrl;
             if (activeBtn) {
               activeBtn.classList.remove('is-loading');
             }
@@ -3285,9 +3305,9 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
             if (statusEl) {
               statusEl.textContent = 'Download starting...';
             }
-            if (activeJob.downloadUrl) {
+            if (downloadUrl) {
               setTimeout(() => {
-                window.location.href = activeJob.downloadUrl;
+                window.location.href = downloadUrl;
               }, 400);
             }
             setTimeout(hideOverlay, 1800);
@@ -3345,7 +3365,7 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
         }
 
         fetch(startUrl, { credentials: 'same-origin' })
-          .then((response) => response.json())
+          .then(parseJsonResponse)
           .then((data) => {
             if (!data || !data.ok) {
               throw new Error(data && data.message ? data.message : 'Unable to start export.');
