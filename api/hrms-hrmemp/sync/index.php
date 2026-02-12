@@ -138,7 +138,7 @@ try {
     $stmtInboxInsert = prepare_statement($bd, 'INSERT INTO hrms_hrmemp_inbox (change_id, status, error_message) VALUES (?, ?, ?)', 'hrmemp_inbox_insert');
     $stmtUpsert = prepare_statement(
         $bd,
-        'INSERT INTO hrms_hrmemp_sync ' .
+        'INSERT INTO hrms_hrmemp_camp_mapping ' .
         '(emp_compcd, emp_code, emp_camp_loc, is_deleted, change_type, changed_at, last_change_id) ' .
         'VALUES (?, ?, ?, ?, ?, ?, ?) ' .
         'ON DUPLICATE KEY UPDATE ' .
@@ -382,7 +382,7 @@ function open_db(): mysqli
 function ensure_tables(mysqli $bd): void
 {
     if (!$bd->query(
-        'CREATE TABLE IF NOT EXISTS hrms_hrmemp_sync (' .
+        'CREATE TABLE IF NOT EXISTS hrms_hrmemp_camp_mapping (' .
         'emp_compcd varchar(3) NOT NULL,' .
         'emp_code varchar(10) NOT NULL,' .
         'emp_camp_loc varchar(10) NULL,' .
@@ -397,7 +397,7 @@ function ensure_tables(mysqli $bd): void
         'KEY idx_hrmemp_last_change_id (last_change_id)' .
         ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
     )) {
-        throw new RuntimeException('Failed to create hrms_hrmemp_sync table: ' . $bd->error);
+        throw new RuntimeException('Failed to create hrms_hrmemp_camp_mapping table: ' . $bd->error);
     }
 
     if (!$bd->query(

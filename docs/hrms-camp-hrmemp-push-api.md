@@ -21,7 +21,7 @@ The endpoint checks, in order:
 1. Local endpoint `config.php` key (`api_key`) if non-empty.
 2. `gcc_attendance_master.api_config` by key:
   - `hrms_camp_sync_api_key` for `hrms-relocn`
-  - `hrms_hrmemp_sync_api_key` for `hrms-hrmemp`
+- `hrms_hrmemp_sync_api_key` for `hrms-hrmemp`
 3. Endpoint environment variable fallback.
 
 If resolved key is empty, request is accepted without API key validation.
@@ -42,7 +42,7 @@ Payload fields map to `hrms_camp_sync`:
 Upsert key: `(camp_comp_cd, camp_code)`.
 
 ## HRMEMP Mapping
-Payload fields map to `hrms_hrmemp_sync`:
+Payload fields map to `hrms_hrmemp_camp_mapping`:
 - `EMP_COMPCD` -> `emp_compcd`
 - `EMP_CODE` -> `emp_code`
 - `EMP_CAMP_LOC` -> `emp_camp_loc`
@@ -69,4 +69,3 @@ Upsert key: `(emp_compcd, emp_code)`.
   "received": 1
 }
 ```
-
