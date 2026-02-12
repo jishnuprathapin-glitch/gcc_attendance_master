@@ -1048,10 +1048,22 @@ if ($exportType === 'download') {
         header('Content-Length: ' . $size);
     }
     export_log('download_send', ['job' => $jobId, 'file' => $file, 'size' => $size, 'filename' => $filename]);
-    readfile($file);
-    @unlink($file);
-    @unlink(export_job_path($jobId));
-    export_log('download_cleanup', ['job' => $jobId, 'file' => $file]);
+    session_write_close();
+    ignore_user_abort(true);
+    @set_time_limit(0);
+
+    $bytes = @readfile($file);
+    $aborted = connection_aborted() === 1;
+    export_log('download_finished', ['job' => $jobId, 'bytes' => $bytes, 'aborted' => $aborted]);
+
+    // Only cleanup when we are confident the download was sent.
+    if ($bytes !== false && (int) $bytes > 0 && !$aborted) {
+        @unlink($file);
+        @unlink(export_job_path($jobId));
+        export_log('download_cleanup', ['job' => $jobId, 'file' => $file]);
+    } else {
+        export_log('download_cleanup_skipped', ['job' => $jobId, 'file' => $file]);
+    }
     exit;
 }
 

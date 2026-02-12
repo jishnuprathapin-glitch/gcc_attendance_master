@@ -24,6 +24,13 @@ function current_week_range(): array {
     return [$start->format('Y-m-d'), $end->format('Y-m-d')];
 }
 
+function current_month_range(): array {
+    $today = new DateTimeImmutable('today');
+    $start = $today->modify('first day of this month');
+    $end = $today->modify('last day of this month');
+    return [$start->format('Y-m-d'), $end->format('Y-m-d')];
+}
+
 function bind_params(mysqli_stmt $stmt, string $types, array $params): void {
     if ($types === '' || empty($params)) {
         return;
@@ -91,6 +98,7 @@ function json_response(array $payload, int $status = 200): void {
 }
 
 [$defaultStart, $defaultEnd] = current_week_range();
+[$defaultMonthStart, $defaultMonthEnd] = current_month_range();
 
 $hasQuery = !empty($_GET);
 $employeeCodeFilter = trim((string) ($_GET['employeeCode'] ?? ''));
@@ -592,7 +600,83 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
     }
 }
 
+$escalations = [];
+$anomalies = [];
+if (!$loadError && isset($bd) && $bd instanceof mysqli) {
+    ensure_no_punch_review_table($bd);
+    ensure_no_punch_reason_table($bd);
+
+    $reviewFilters = [];
+    $reviewParams = [];
+    $reviewTypes = '';
+    if ($hasQuery) {
+        $reviewFilters[] = 'r.att_date BETWEEN ? AND ?';
+        $reviewParams[] = $startDate;
+        $reviewParams[] = $endDate;
+        $reviewTypes .= 'ss';
+    }
+
+    $reviewWhere = '';
+    if (!empty($reviewFilters)) {
+        $reviewWhere = ' AND ' . implode(' AND ', $reviewFilters);
+    }
+
+    $escalationSql = 'SELECT r.emp_code, r.att_date, r.campboss_reason_code, r.campboss_note, ' .
+        'r.campboss_reviewed_at, r.escalated_at, h.emp_name, h.desg_name, h.dept_name, h.jbno, ' .
+        'rr.reason_text ' .
+        'FROM gcc_attendance_master.attendance_no_punch_reviews r ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci ' .
+        'LEFT JOIN gcc_attendance_master.attendance_no_punch_reasons rr ON rr.reason_code = r.campboss_reason_code ' .
+        'WHERE r.is_escalated = 1' . $reviewWhere .
+        ' ORDER BY COALESCE(r.escalated_at, r.att_date) DESC, r.emp_code ASC' .
+        ($hasQuery ? '' : ' LIMIT 10');
+    $stmt = $bd->prepare($escalationSql);
+    if ($stmt) {
+        if ($reviewTypes !== '') {
+            bind_params($stmt, $reviewTypes, $reviewParams);
+        }
+        if ($stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $escalations[] = $row;
+                }
+                $result->free();
+            }
+        }
+        $stmt->close();
+    }
+
+    $anomalySql = 'SELECT r.emp_code, r.att_date, r.timekeeper_submitted_at, h.emp_name, h.desg_name, h.dept_name, h.jbno ' .
+        'FROM gcc_attendance_master.attendance_no_punch_reviews r ' .
+        'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci ' .
+        'WHERE (r.campboss_reason_code IS NULL OR r.campboss_reason_code = "") ' .
+        'AND r.timekeeper_submitted_at IS NOT NULL ' .
+        'AND (r.is_escalated = 0 OR r.is_escalated IS NULL)' .
+        $reviewWhere .
+        ' ORDER BY r.timekeeper_submitted_at DESC, r.emp_code ASC' .
+        ($hasQuery ? '' : ' LIMIT 10');
+    $stmt = $bd->prepare($anomalySql);
+    if ($stmt) {
+        if ($reviewTypes !== '') {
+            bind_params($stmt, $reviewTypes, $reviewParams);
+        }
+        if ($stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $anomalies[] = $row;
+                }
+                $result->free();
+            }
+        }
+        $stmt->close();
+    }
+}
+
 $pendingCount = count($pending);
+$escalationCount = count($escalations);
+$anomalyCount = count($anomalies);
 $pendingMeta = $hasQuery ? 'matching pending overrides' : 'latest pending overrides';
 $rangeLabel = $hasQuery ? ($startDate . ' to ' . $endDate) : 'All dates';
 $heroTitle = $hasQuery ? 'Filtered overrides' : 'Latest overrides';
@@ -918,6 +1002,16 @@ include __DIR__ . '/include/layout_top.php';
             <div class="approval-stat-meta"><?= h($pendingMeta) ?></div>
           </div>
           <div class="approval-stat">
+            <div class="approval-stat-label">Escalations</div>
+            <div class="approval-stat-value"><?= h((string) $escalationCount) ?></div>
+            <div class="approval-stat-meta">No-show cases</div>
+          </div>
+          <div class="approval-stat">
+            <div class="approval-stat-label">Anomalies</div>
+            <div class="approval-stat-value"><?= h((string) $anomalyCount) ?></div>
+            <div class="approval-stat-meta">Awaiting camp boss</div>
+          </div>
+          <div class="approval-stat">
             <div class="approval-stat-label">Range</div>
             <div class="approval-stat-value"><?= h($rangeLabel) ?></div>
             <div class="approval-stat-meta">Date window</div>
@@ -974,7 +1068,11 @@ include __DIR__ . '/include/layout_top.php';
             <a class="btn btn-outline-secondary btn-block" href="<?= h(admin_url('Attendance_AttendanceApproval.php')) ?>">Reset</a>
           </div>
         </form>
-        <div class="small approval-meta">Default week: <?= h($defaultStart) ?> to <?= h($defaultEnd) ?></div>
+        <div class="small approval-meta">
+          Default week: <?= h($defaultStart) ?> to <?= h($defaultEnd) ?> |
+          <a href="<?= h(admin_url('Attendance_AttendanceApproval.php')) ?>?start_date=<?= h($defaultStart) ?>&end_date=<?= h($defaultEnd) ?>">This week</a> |
+          <a href="<?= h(admin_url('Attendance_AttendanceApproval.php')) ?>?start_date=<?= h($defaultMonthStart) ?>&end_date=<?= h($defaultMonthEnd) ?>">This month</a>
+        </div>
       </div>
     </div>
 
@@ -1079,6 +1177,82 @@ include __DIR__ . '/include/layout_top.php';
             </tr>
           </tbody>
         </table>
+      </div>
+      <div class="card approval-card mt-4">
+        <div class="card-header">
+          <h3 class="card-title">Escalations (No show / Missing in camp)</h3>
+        </div>
+        <div class="card-body table-responsive p-0">
+          <table class="table table-bordered table-sm">
+            <thead>
+              <tr>
+                <th>Emp Code</th>
+                <th>Emp Name</th>
+                <th>Department</th>
+                <th>Date</th>
+                <th>Reason</th>
+                <th>Camp Boss Note</th>
+                <th>Reviewed At</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php if (!empty($escalations)): ?>
+                <?php foreach ($escalations as $row): ?>
+                  <?php $reasonText = trim((string) ($row['reason_text'] ?? '')); ?>
+                  <tr>
+                    <td><?= h($row['emp_code'] ?? '-') ?></td>
+                    <td><?= h($row['emp_name'] ?? '-') ?></td>
+                    <td><?= h($row['dept_name'] ?? '-') ?></td>
+                    <td><?= h($row['att_date'] ?? '-') ?></td>
+                    <td><?= h($reasonText !== '' ? $reasonText : ($row['campboss_reason_code'] ?? '-')) ?></td>
+                    <td><?= h($row['campboss_note'] ?? '-') ?></td>
+                    <td><?= h($row['campboss_reviewed_at'] ?? '-') ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              <?php else: ?>
+                <tr>
+                  <td colspan="7" class="text-center text-muted">No escalations found.</td>
+                </tr>
+              <?php endif; ?>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card approval-card mt-4">
+        <div class="card-header">
+          <h3 class="card-title">Anomalies (Awaiting camp boss)</h3>
+        </div>
+        <div class="card-body table-responsive p-0">
+          <table class="table table-bordered table-sm">
+            <thead>
+              <tr>
+                <th>Emp Code</th>
+                <th>Emp Name</th>
+                <th>Department</th>
+                <th>Date</th>
+                <th>Submitted At</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php if (!empty($anomalies)): ?>
+                <?php foreach ($anomalies as $row): ?>
+                  <tr>
+                    <td><?= h($row['emp_code'] ?? '-') ?></td>
+                    <td><?= h($row['emp_name'] ?? '-') ?></td>
+                    <td><?= h($row['dept_name'] ?? '-') ?></td>
+                    <td><?= h($row['att_date'] ?? '-') ?></td>
+                    <td><?= h($row['timekeeper_submitted_at'] ?? '-') ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              <?php else: ?>
+                <tr>
+                  <td colspan="5" class="text-center text-muted">No anomalies found.</td>
+                </tr>
+              <?php endif; ?>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
