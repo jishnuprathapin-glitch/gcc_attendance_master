@@ -195,6 +195,9 @@ function run_override_rule(
                 $skippedDuration++;
                 continue;
             }
+            if ($minSeconds === null && $maxSeconds === null && !$requireBoth) {
+                $qualifies = true;
+            } else {
             $startTime = parse_log_time($firstLog);
             $endTime = parse_log_time($lastLog);
             if (!$startTime || !$endTime) {
@@ -208,6 +211,7 @@ function run_override_rule(
                 if ($minOk && $maxOk) {
                     $qualifies = true;
                 }
+            }
             }
         } else {
             if ($requireBoth) {
@@ -294,9 +298,9 @@ $staff = run_override_rule(
     ['01'],
     '8.00',
     'AUTO_8H_STAFF',
-    'AUTO_8H_STAFF: STAFF login incomplete; set 8 hours',
-    0,
-    28800,
+    'AUTO_8H_STAFF: STAFF has at least one punch; set 8 hours',
+    null,
+    null,
     false,
     false
 );
