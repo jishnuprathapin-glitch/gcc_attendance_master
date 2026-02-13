@@ -78,6 +78,8 @@ function ensure_attendance_override_table(mysqli $bd): bool {
         '`att_date` date NOT NULL,' .
         '`override_work_hours` decimal(9,2) NULL,' .
         '`override_work_code` varchar(10) NULL,' .
+        '`override_reason_code` varchar(20) NULL,' .
+        '`override_reason_note` varchar(255) NULL,' .
         '`override_change_date` datetime NULL,' .
         '`override_changed_by_email` varchar(255) NULL,' .
         '`override_changed_by_name` varchar(100) NULL,' .
@@ -106,6 +108,8 @@ function ensure_attendance_override_table(mysqli $bd): bool {
     $columns = [
         'override_work_hours' => 'decimal(9,2) NULL',
         'override_work_code' => 'varchar(10) NULL',
+        'override_reason_code' => 'varchar(20) NULL',
+        'override_reason_note' => 'varchar(255) NULL',
         'override_change_date' => 'datetime NULL',
         'override_changed_by_email' => 'varchar(255) NULL',
         'override_changed_by_name' => 'varchar(100) NULL',

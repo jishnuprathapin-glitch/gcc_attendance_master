@@ -130,6 +130,7 @@ $mappingRequired = false;
 $mappedProjects = [];
 $projectOptions = [];
 $workTypeOptions = [];
+$noPunchReasonOptions = [];
 $rows = [];
 $remainingCount = 0;
 $flash = get_flash();
@@ -177,6 +178,36 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         }
         $workResult->free();
     }
+
+    if (!$loadError) {
+        // Use a DB-backed list so production can extend without code changes.
+        ensure_no_punch_reason_table($bd);
+
+        // Seed a minimal set of timekeeper-friendly reasons (idempotent).
+        $bd->query(
+            'INSERT IGNORE INTO gcc_attendance_master.attendance_no_punch_reasons (reason_code, reason_text, override_work_hours, override_work_code) VALUES ' .
+            '("TIME_INCORRECT","Time Captured Incorrectly",NULL,NULL),' .
+            '("NO_LUNCH","No Lunch",NULL,NULL),' .
+            '("MISS_PUNCH","Miss Punch",NULL,NULL),' .
+            '("NIGHT_SHIFT","Night Shift",NULL,NULL),' .
+            '("NIGHT_DAY_SHIFT","Night Day Shift",NULL,NULL),' .
+            '("COMP_OFF","Compensatory Off",NULL,NULL)'
+        );
+
+        $reasonResult = $bd->query(
+            'SELECT reason_code, reason_text FROM gcc_attendance_master.attendance_no_punch_reasons ORDER BY reason_text, reason_code'
+        );
+        if ($reasonResult) {
+            while ($row = $reasonResult->fetch_assoc()) {
+                $code = strtoupper(trim((string) ($row['reason_code'] ?? '')));
+                if ($code === '') {
+                    continue;
+                }
+                $noPunchReasonOptions[$code] = trim((string) ($row['reason_text'] ?? ''));
+            }
+            $reasonResult->free();
+        }
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
@@ -191,6 +222,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
             $attDates = $_POST['att_date'] ?? [];
             $hoursList = $_POST['work_hours'] ?? [];
             $codeList = $_POST['work_code'] ?? [];
+            $reasonCodeList = $_POST['override_reason_code'] ?? [];
+            $reasonNoteList = $_POST['override_reason_note'] ?? [];
 
             if (!is_array($empCodes)) {
                 $empCodes = [$empCodes];
@@ -204,20 +237,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
             if (!is_array($codeList)) {
                 $codeList = [$codeList];
             }
+            if (!is_array($reasonCodeList)) {
+                $reasonCodeList = [$reasonCodeList];
+            }
+            if (!is_array($reasonNoteList)) {
+                $reasonNoteList = [$reasonNoteList];
+            }
 
-            $max = max(count($empCodes), count($attDates), count($hoursList), count($codeList), 1);
+            $max = max(
+                count($empCodes),
+                count($attDates),
+                count($hoursList),
+                count($codeList),
+                count($reasonCodeList),
+                count($reasonNoteList),
+                1
+            );
             $updated = 0;
             $deleted = 0;
             $errors = [];
 
             $insertSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
-                '(emp_code, att_date, override_work_hours, override_work_code, override_change_date, ' .
+                '(emp_code, att_date, override_work_hours, override_work_code, override_reason_code, override_reason_note, override_change_date, ' .
                 'override_changed_by_email, override_changed_by_name, override_is_approved, ' .
                 'override_approved_by_email, override_approved_by_name, override_approved_date) ' .
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
                 'ON DUPLICATE KEY UPDATE ' .
                 'override_work_hours = VALUES(override_work_hours), ' .
                 'override_work_code = VALUES(override_work_code), ' .
+                'override_reason_code = VALUES(override_reason_code), ' .
+                'override_reason_note = VALUES(override_reason_note), ' .
                 'override_change_date = VALUES(override_change_date), ' .
                 'override_changed_by_email = VALUES(override_changed_by_email), ' .
                 'override_changed_by_name = VALUES(override_changed_by_name), ' .
@@ -244,6 +293,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 $workCode = normalize_work_type_code($workCodeRaw);
                 $hours = null;
 
+                $reasonCodeRaw = strtoupper(trim((string) ($reasonCodeList[$i] ?? '')));
+                $reasonCode = $reasonCodeRaw !== '' ? $reasonCodeRaw : null;
+                $reasonNote = trim((string) ($reasonNoteList[$i] ?? ''));
+                if ($reasonNote !== '') {
+                    $reasonNote = substr($reasonNote, 0, 255);
+                } else {
+                    $reasonNote = null;
+                }
+
                 if ($hoursRaw !== '') {
                     if (!is_numeric($hoursRaw)) {
                         $errors[] = 'Invalid hours for ' . $empCode . ' on ' . $attDate . '.';
@@ -255,6 +313,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                         continue;
                     }
                     $hours = number_format($hoursFloat, 2, '.', '');
+                }
+
+                // If work hours are overridden, a reason must be selected.
+                if ($hours !== null && $reasonCode === null) {
+                    $errors[] = 'Reason is required when overriding hours for ' . $empCode . ' on ' . $attDate . '.';
+                    continue;
+                }
+
+                if ($reasonCode !== null) {
+                    if (empty($noPunchReasonOptions)) {
+                        $errors[] = 'Reason list not available for validation.';
+                        continue;
+                    }
+                    if (!isset($noPunchReasonOptions[$reasonCode])) {
+                        $errors[] = 'Invalid reason "' . $reasonCode . '" for ' . $empCode . ' on ' . $attDate . '.';
+                        continue;
+                    }
                 }
 
                 if ($workCode !== null) {
@@ -287,11 +362,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
 
                 if ($insertStmt) {
                     $insertStmt->bind_param(
-                        'sssssssisss',
+                        'sssssssssisss',
                         $empCode,
                         $attDate,
                         $hours,
                         $workCode,
+                        $reasonCode,
+                        $reasonNote,
                         $changeDate,
                         $emailParam,
                         $nameParam,
@@ -516,7 +593,7 @@ if (!$loadError && !$mappingRequired) {
                 $stmt->close();
             }
 
-            $overrideSql = 'SELECT emp_code, override_work_hours, override_work_code, override_is_approved ' .
+            $overrideSql = 'SELECT emp_code, override_work_hours, override_work_code, override_reason_code, override_reason_note, override_is_approved ' .
                 'FROM gcc_attendance_master.employee_att_daily_overrides ' .
                 'WHERE emp_code IN (' . $placeholders . ') AND att_date = ?';
             $stmt = $bd->prepare($overrideSql);
@@ -584,6 +661,8 @@ if (!$loadError && !$mappingRequired) {
 
             $overrideHours = trim((string) ($override['override_work_hours'] ?? ''));
             $overrideCode = trim((string) ($override['override_work_code'] ?? ''));
+            $overrideReasonCode = strtoupper(trim((string) ($override['override_reason_code'] ?? '')));
+            $overrideReasonNote = trim((string) ($override['override_reason_note'] ?? ''));
             $overrideStatus = (int) ($override['override_is_approved'] ?? 0);
 
             $submittedAt = trim((string) ($review['timekeeper_submitted_at'] ?? ''));
@@ -604,6 +683,8 @@ if (!$loadError && !$mappingRequired) {
                 'project_name' => trim((string) ($employee['jbdesc'] ?? '')),
                 'override_hours' => $overrideHours,
                 'override_code' => $overrideCode,
+                'override_reason_code' => $overrideReasonCode,
+                'override_reason_note' => $overrideReasonNote,
                 'override_status' => $overrideStatus,
                 'submitted_at' => $submittedAt,
                 'campboss_reason' => $campbossReason,
@@ -734,6 +815,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                   <th>Project</th>
                   <th>Override hours</th>
                   <th>Override code</th>
+                  <th>Reason</th>
                   <th>Override status</th>
                   <th>Camp boss</th>
                 </tr>
@@ -741,7 +823,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
               <tbody>
                 <?php if (empty($rows)): ?>
                   <tr>
-                    <td colspan="9" class="text-center text-muted p-4">No no-punch employees for this date.</td>
+                    <td colspan="10" class="text-center text-muted p-4">No no-punch employees for this date.</td>
                   </tr>
                 <?php else: ?>
                   <?php foreach ($rows as $rowIndex => $row): ?>
@@ -798,6 +880,31 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           <?= $overrideStatus === 1 ? 'disabled' : '' ?>
                         >
                       </td>
+                      <td>
+                        <select
+                          class="form-control form-control-sm js-override-reason"
+                          name="override_reason_code[]"
+                          <?= $overrideStatus === 1 ? 'disabled' : '' ?>
+                          title=""
+                        >
+                          <option value="">-- Select --</option>
+                          <?php foreach ($noPunchReasonOptions as $code => $text): ?>
+                            <?php $selected = strtoupper((string) ($row['override_reason_code'] ?? '')) === $code; ?>
+                            <option value="<?= h($code) ?>" data-desc="<?= h($text) ?>" <?= $selected ? 'selected' : '' ?>>
+                              <?= h($code . ' - ' . $text) ?>
+                            </option>
+                          <?php endforeach; ?>
+                        </select>
+                        <input
+                          type="text"
+                          class="form-control form-control-sm mt-1"
+                          name="override_reason_note[]"
+                          maxlength="255"
+                          placeholder="Note (optional)"
+                          value="<?= h($row['override_reason_note'] ?? '') ?>"
+                          <?= $overrideStatus === 1 ? 'disabled' : '' ?>
+                        >
+                      </td>
                       <td><span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span></td>
                       <td><span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span></td>
                     </tr>
@@ -818,6 +925,49 @@ include __DIR__ . '/../admin/include/layout_top.php';
 
 <script>
   window.WORK_CODE_OPTIONS = <?= json_encode($workTypeOptions, JSON_UNESCAPED_SLASHES) ?>;
+
+  (function () {
+    function setReasonTitle(selectEl) {
+      if (!selectEl) return;
+      var opt = selectEl.options[selectEl.selectedIndex];
+      if (!opt) return;
+      var desc = opt.getAttribute('data-desc') || '';
+      selectEl.title = desc;
+    }
+
+    var form = document.querySelector('form[method=\"post\"]');
+    if (form) {
+      form.addEventListener('submit', function (e) {
+        var submitter = e.submitter || document.activeElement;
+        if (!submitter) return;
+        if (!(submitter.name === 'action' && submitter.value === 'save_overrides')) return;
+
+        var rows = form.querySelectorAll('tbody tr');
+        for (var i = 0; i < rows.length; i++) {
+          var tr = rows[i];
+          var hours = tr.querySelector('input[name=\"work_hours[]\"]');
+          var reason = tr.querySelector('select[name=\"override_reason_code[]\"]');
+          if (!hours || !reason) continue;
+
+          var hoursVal = (hours.value || '').trim();
+          if (hoursVal !== '' && (reason.value || '').trim() === '') {
+            e.preventDefault();
+            alert('Reason is required when overriding hours. Please select a reason.');
+            reason.focus();
+            return;
+          }
+        }
+      });
+    }
+
+    var selects = document.querySelectorAll('select.js-override-reason');
+    for (var j = 0; j < selects.length; j++) {
+      (function (sel) {
+        setReasonTitle(sel);
+        sel.addEventListener('change', function () { setReasonTitle(sel); });
+      })(selects[j]);
+    }
+  })();
 </script>
 
 <?php include __DIR__ . '/../admin/include/layout_bottom.php'; ?>
