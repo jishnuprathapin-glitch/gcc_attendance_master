@@ -459,6 +459,11 @@ $reasonOptions = [
     'OTHER' => 'Other',
 ];
 
+$workTypeOptions = [];
+if (isset($bd) && $bd instanceof mysqli) {
+    $workTypeOptions = load_work_type_options($bd);
+}
+
 $formRows = [
     ['employeeCode' => '', 'attDate' => '', 'workHours' => '', 'workCode' => '', 'reasonCode' => '', 'reasonNote' => ''],
     ['employeeCode' => '', 'attDate' => '', 'workHours' => '', 'workCode' => '', 'reasonCode' => '', 'reasonNote' => ''],
@@ -495,11 +500,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $employeeCode = trim((string) ($input['employeeCode'] ?? ''));
             $attDate = normalize_post_date($input['attDate'] ?? null);
             $workHoursRaw = trim((string) ($input['workHours'] ?? ''));
-            $workCode = trim((string) ($input['workCode'] ?? ''));
+            $workCodeRaw = trim((string) ($input['workCode'] ?? ''));
             $reasonCode = trim((string) ($input['reasonCode'] ?? ''));
             $reasonNote = trim((string) ($input['reasonNote'] ?? ''));
 
-            if ($employeeCode === '' && $attDate === null && $workHoursRaw === '' && $workCode === '' && $reasonCode === '' && $reasonNote === '') {
+            if ($employeeCode === '' && $attDate === null && $workHoursRaw === '' && $workCodeRaw === '' && $reasonCode === '' && $reasonNote === '') {
                 continue;
             }
 
@@ -511,7 +516,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $rowErrors[] = 'Row ' . $rowNumber . ': Attendance date is required.';
                 continue;
             }
-            if ($workHoursRaw === '' && $workCode === '') {
+            if ($workHoursRaw === '' && $workCodeRaw === '') {
                 $rowErrors[] = 'Row ' . $rowNumber . ': Override work hours or override work code is required.';
                 continue;
             }
@@ -536,11 +541,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
+            $workCode = normalize_work_type_code($workCodeRaw);
+            if ($workCode !== null) {
+                if (empty($workTypeOptions)) {
+                    $rowErrors[] = 'Row ' . $rowNumber . ': Work code list not available.';
+                    continue;
+                }
+                if (!isset($workTypeOptions[$workCode])) {
+                    $rowErrors[] = 'Row ' . $rowNumber . ': Invalid work code "' . $workCode . '". Choose from the list.';
+                    continue;
+                }
+            }
+
             $rows[] = [
                 'employeeCode' => $employeeCode,
                 'attDate' => $attDate,
                 'workHours' => $workHours,
-                'workCode' => $workCode !== '' ? $workCode : null,
+                'workCode' => $workCode,
                 'changeDate' => gmdate(DATE_ATOM),
                 'changedByEmail' => $userEmail,
                 'changedByName' => $userName,
@@ -551,7 +568,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'emp_code' => $employeeCode,
                     'att_date' => $attDate,
                     'work_hours' => $workHours !== null ? (string) $workHours : null,
-                    'work_code' => $workCode !== '' ? $workCode : null,
+                    'work_code' => $workCode,
                     'reason_code' => $reasonCode !== '' ? $reasonCode : null,
                     'reason_note' => $reasonNote !== '' ? $reasonNote : null,
                 ];
@@ -954,7 +971,7 @@ include __DIR__ . '/include/layout_top.php';
                 <input id="bulkHours" class="form-control" placeholder="Work hours (e.g. 8.00)">
               </div>
               <div class="form-group col-md-6">
-                <input id="bulkWorkCode" class="form-control" placeholder="Work code">
+                <input id="bulkWorkCode" class="form-control js-work-code" placeholder="Work code" maxlength="10" autocomplete="off">
               </div>
             </div>
             <div class="form-row">
@@ -1051,7 +1068,7 @@ include __DIR__ . '/include/layout_top.php';
                   <td><input name="employeeCode[]" class="form-control form-control-sm" value="<?= h($row['employeeCode'] ?? '') ?>" required></td>
                   <td><input name="attDate[]" type="date" class="form-control form-control-sm" value="<?= h($row['attDate'] ?? '') ?>" required></td>
                   <td><input name="workHours[]" class="form-control form-control-sm" placeholder="8.00" value="<?= h($row['workHours'] ?? '') ?>"></td>
-                  <td><input name="workCode[]" class="form-control form-control-sm" placeholder="Work code" value="<?= h($row['workCode'] ?? '') ?>"></td>
+                  <td><input name="workCode[]" class="form-control form-control-sm js-work-code" placeholder="Work code" maxlength="10" autocomplete="off" value="<?= h($row['workCode'] ?? '') ?>"></td>
                   <td>
                     <select name="reasonCode[]" class="form-control form-control-sm">
                       <?php foreach ($reasonOptions as $value => $label): ?>
@@ -1081,7 +1098,7 @@ include __DIR__ . '/include/layout_top.php';
     <td><input name="employeeCode[]" class="form-control form-control-sm" required></td>
     <td><input name="attDate[]" type="date" class="form-control form-control-sm" required></td>
     <td><input name="workHours[]" class="form-control form-control-sm" placeholder="8.00"></td>
-    <td><input name="workCode[]" class="form-control form-control-sm" placeholder="Work code"></td>
+    <td><input name="workCode[]" class="form-control form-control-sm js-work-code" placeholder="Work code" maxlength="10" autocomplete="off"></td>
     <td>
       <select name="reasonCode[]" class="form-control form-control-sm">
         <?php foreach ($reasonOptions as $value => $label): ?>
@@ -1614,6 +1631,10 @@ include __DIR__ . '/include/layout_top.php';
       });
     }
   });
+</script>
+
+<script>
+  window.WORK_CODE_OPTIONS = <?= json_encode($workTypeOptions, JSON_UNESCAPED_SLASHES) ?>;
 </script>
 
 <?php include __DIR__ . '/include/layout_bottom.php'; ?>

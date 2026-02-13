@@ -524,7 +524,9 @@ function render_attendance_results(array $context): string {
                     <td class="day-col <?= h($dayClass) ?> col-extra col-override-code<?= $overrideClass ?>">
                       <input
                         type="text"
-                        class="override-input override-code"
+                        class="override-input override-code js-work-code"
+                        maxlength="10"
+                        autocomplete="off"
                         value="<?= h($overrideCode) ?>"
                         data-override-key="<?= h($empCode . '|' . $date) ?>"
                         data-override-field="code"
@@ -1112,6 +1114,7 @@ $projectOptions = [];
 $loginProjectOptions = [];
 $costCenterOptions = [];
 $employeeTypeOptions = [];
+$workTypeOptions = [];
 $offset = 0;
 $totalEmployees = 0;
 $totalPages = 1;
@@ -1213,6 +1216,8 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $typeResult->free();
     }
 
+    $workTypeOptions = load_work_type_options($bd);
+
     if (!ensure_timekeeper_project_map_table($bd)) {
         $loadError = 'Unable to load project access configuration.';
     } else {
@@ -1252,34 +1257,10 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
             $userEmail = trim((string) ($_SESSION['user_email'] ?? ''));
             $userName = trim((string) ($_SESSION['user_name'] ?? ''));
             $changeDate = gmdate('Y-m-d H:i:s');
-            $insertSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
-                '(emp_code, att_date, override_work_hours, override_work_code, override_change_date, ' .
-                'override_changed_by_email, override_changed_by_name, override_is_approved, ' .
-                'override_approved_by_email, override_approved_by_name, override_approved_date) ' .
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
-                'ON DUPLICATE KEY UPDATE ' .
-                'override_work_hours = VALUES(override_work_hours), ' .
-                'override_work_code = VALUES(override_work_code), ' .
-                'override_change_date = VALUES(override_change_date), ' .
-                'override_changed_by_email = VALUES(override_changed_by_email), ' .
-                'override_changed_by_name = VALUES(override_changed_by_name), ' .
-                'override_is_approved = 0, ' .
-                'override_approved_by_email = NULL, ' .
-                'override_approved_by_name = NULL, ' .
-                'override_approved_date = NULL';
-            $deleteSql = 'DELETE FROM `gcc_attendance_master`.`employee_att_daily_overrides` WHERE emp_code = ? AND att_date = ?';
-            $insertStmt = $bd->prepare($insertSql);
-            $deleteStmt = $bd->prepare($deleteSql);
-            if (!$insertStmt || !$deleteStmt) {
-                http_response_code(500);
-                echo json_encode(['ok' => false, 'message' => 'Unable to prepare override update.'], JSON_UNESCAPED_SLASHES);
-                exit;
-            }
 
             $errors = [];
-            $updated = 0;
-            $deleted = 0;
             $seen = [];
+            $sanitized = [];
             foreach ($changes as $change) {
                 if (!is_array($change)) {
                     continue;
@@ -1306,11 +1287,70 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                     $hours = number_format((float) $hoursRaw, 2, '.', '');
                 }
 
-                $code = trim((string) ($change['overrideWorkCode'] ?? ''));
-                if ($code === '') {
-                    $code = null;
+                $code = normalize_work_type_code($change['overrideWorkCode'] ?? null);
+                if ($code !== null && empty($workTypeOptions)) {
+                    $errors[] = 'Work code list not available for validation.';
+                    continue;
+                }
+                if ($code !== null && !isset($workTypeOptions[$code])) {
+                    $errors[] = 'Invalid work code "' . $code . '" for ' . $empCode . ' on ' . $attDate . '.';
+                    continue;
                 }
 
+                $sanitized[] = [
+                    'empCode' => $empCode,
+                    'attDate' => $attDate,
+                    'hours' => $hours,
+                    'code' => $code,
+                ];
+            }
+
+            if (!empty($errors)) {
+                http_response_code(400);
+                echo json_encode([
+                    'ok' => false,
+                    'message' => $errors[0],
+                    'errors' => $errors,
+                ], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+
+            if (empty($sanitized)) {
+                echo json_encode(['ok' => true, 'updated' => 0, 'deleted' => 0, 'errors' => []], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+
+            $insertSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
+                '(emp_code, att_date, override_work_hours, override_work_code, override_change_date, ' .
+                'override_changed_by_email, override_changed_by_name, override_is_approved, ' .
+                'override_approved_by_email, override_approved_by_name, override_approved_date) ' .
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
+                'ON DUPLICATE KEY UPDATE ' .
+                'override_work_hours = VALUES(override_work_hours), ' .
+                'override_work_code = VALUES(override_work_code), ' .
+                'override_change_date = VALUES(override_change_date), ' .
+                'override_changed_by_email = VALUES(override_changed_by_email), ' .
+                'override_changed_by_name = VALUES(override_changed_by_name), ' .
+                'override_is_approved = 0, ' .
+                'override_approved_by_email = NULL, ' .
+                'override_approved_by_name = NULL, ' .
+                'override_approved_date = NULL';
+            $deleteSql = 'DELETE FROM `gcc_attendance_master`.`employee_att_daily_overrides` WHERE emp_code = ? AND att_date = ?';
+            $insertStmt = $bd->prepare($insertSql);
+            $deleteStmt = $bd->prepare($deleteSql);
+            if (!$insertStmt || !$deleteStmt) {
+                http_response_code(500);
+                echo json_encode(['ok' => false, 'message' => 'Unable to prepare override update.'], JSON_UNESCAPED_SLASHES);
+                exit;
+            }
+
+            $updated = 0;
+            $deleted = 0;
+            foreach ($sanitized as $change) {
+                $empCode = $change['empCode'];
+                $attDate = $change['attDate'];
+                $hours = $change['hours'];
+                $code = $change['code'];
                 if ($hours === null && $code === null) {
                     $deleteStmt->bind_param('ss', $empCode, $attDate);
                     if ($deleteStmt->execute()) {
@@ -2705,7 +2745,9 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
                     <td class="day-col <?= $dayClass ?> col-extra col-override-code<?= $overrideClass ?>">
                       <input
                         type="text"
-                        class="override-input override-code"
+                        class="override-input override-code js-work-code"
+                        maxlength="10"
+                        autocomplete="off"
                         value="<?= h($overrideCode) ?>"
                         data-override-key="<?= h($empCode . '|' . $date) ?>"
                         data-override-field="code"
@@ -3194,6 +3236,16 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     const overrideButtons = Array.from(document.querySelectorAll('.js-save-overrides'));
     const overrideStatusEls = Array.from(document.querySelectorAll('.override-save-status'));
 
+    const workCodeOptions = <?= json_encode($workTypeOptions, JSON_UNESCAPED_SLASHES) ?>;
+    const workCodeKeys = new Set(Object.keys(workCodeOptions || {}).map((code) => String(code || '').trim().toUpperCase()));
+    const normalizeWorkCode = (value) => String(value || '').trim().toUpperCase();
+    const isWorkCodeAllowed = (code) => {
+      if (!code) {
+        return true;
+      }
+      return workCodeKeys.has(code);
+    };
+
     const setOverrideStatus = (message, isError = false) => {
       overrideStatusEls.forEach((el) => {
         el.textContent = message;
@@ -3232,13 +3284,15 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
       });
 
       const changes = [];
+      const invalidInputs = [];
       groups.forEach((entry) => {
         const hoursInput = entry.hours;
         const codeInput = entry.code;
         const hoursValue = hoursInput ? String(hoursInput.value || '').trim() : '';
-        const codeValue = codeInput ? String(codeInput.value || '').trim() : '';
+        const codeValueRaw = codeInput ? String(codeInput.value || '').trim() : '';
+        const codeValue = normalizeWorkCode(codeValueRaw);
         const hoursOriginal = hoursInput ? String(hoursInput.dataset.original || '').trim() : '';
-        const codeOriginal = codeInput ? String(codeInput.dataset.original || '').trim() : '';
+        const codeOriginal = codeInput ? normalizeWorkCode(codeInput.dataset.original || '') : '';
         if (hoursValue === hoursOriginal && codeValue === codeOriginal) {
           return;
         }
@@ -3247,6 +3301,19 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
         if (!empCode || !attDate) {
           return;
         }
+
+        if (codeInput) {
+          if (codeValueRaw !== '' || codeValue !== '') {
+            codeInput.value = codeValue;
+          }
+          codeInput.title = (codeValue && workCodeOptions && workCodeOptions[codeValue]) ? workCodeOptions[codeValue] : '';
+          codeInput.setCustomValidity('');
+          if (codeValue && !isWorkCodeAllowed(codeValue)) {
+            codeInput.setCustomValidity('Invalid work code. Choose from the list.');
+            invalidInputs.push(codeInput);
+          }
+        }
+
         changes.push({
           empCode,
           attDate,
@@ -3254,7 +3321,7 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           overrideWorkCode: codeValue === '' ? null : codeValue,
         });
       });
-      return changes;
+      return { changes, invalidInputs };
     };
 
     const setButtonsDisabled = (disabled) => {
@@ -3264,7 +3331,13 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     };
 
     const saveOverrides = () => {
-      const changes = collectOverrideChanges();
+      const { changes, invalidInputs } = collectOverrideChanges();
+      if (invalidInputs && invalidInputs.length) {
+        setOverrideStatus('Invalid work code. Choose from the list.', true);
+        invalidInputs[0].focus();
+        invalidInputs[0].reportValidity();
+        return;
+      }
       if (!changes.length) {
         setOverrideStatus('No changes to save.');
         return;
@@ -3506,6 +3579,10 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
       });
     });
   });
+</script>
+
+<script>
+  window.WORK_CODE_OPTIONS = <?= json_encode($workTypeOptions, JSON_UNESCAPED_SLASHES) ?>;
 </script>
 
 <?php include dirname(__DIR__) . '/admin/include/layout_bottom.php'; ?>

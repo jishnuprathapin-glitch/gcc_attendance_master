@@ -240,7 +240,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 }
 
                 $hoursRaw = trim((string) ($hoursList[$i] ?? ''));
-                $workCode = trim((string) ($codeList[$i] ?? ''));
+                $workCodeRaw = trim((string) ($codeList[$i] ?? ''));
+                $workCode = normalize_work_type_code($workCodeRaw);
                 $hours = null;
 
                 if ($hoursRaw !== '') {
@@ -251,7 +252,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                     $hours = number_format((float) $hoursRaw, 2, '.', '');
                 }
 
-                if ($hours === null && $workCode === '') {
+                if ($workCode !== null) {
+                    if (empty($workTypeOptions)) {
+                        $errors[] = 'Work code list not available for validation.';
+                        continue;
+                    }
+                    if (!isset($workTypeOptions[$workCode])) {
+                        $errors[] = 'Invalid work code "' . $workCode . '" for ' . $empCode . ' on ' . $attDate . '.';
+                        continue;
+                    }
+                }
+
+                if ($hours === null && $workCode === null) {
                     if ($deleteStmt) {
                         $deleteStmt->bind_param('ss', $empCode, $attDate);
                         if ($deleteStmt->execute()) {
@@ -259,10 +271,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                         }
                     }
                     continue;
-                }
-
-                if ($workCode === '') {
-                    $workCode = null;
                 }
 
                 $approved = 0;
@@ -774,13 +782,16 @@ include __DIR__ . '/../admin/include/layout_top.php';
                         <input class="form-control form-control-sm" name="work_hours[]" value="<?= h($row['override_hours']) ?>" <?= $overrideStatus === 1 ? 'disabled' : '' ?>>
                       </td>
                       <td>
-                        <select class="form-control form-control-sm" name="work_code[]" <?= $overrideStatus === 1 ? 'disabled' : '' ?>>
-                          <option value="">Select</option>
-                          <?php foreach ($workTypeOptions as $code => $label): ?>
-                            <?php $display = $label !== '' ? ($code . ' - ' . $label) : $code; ?>
-                            <option value="<?= h($code) ?>" <?= $code === ($row['override_code'] ?? '') ? 'selected' : '' ?>><?= h($display) ?></option>
-                          <?php endforeach; ?>
-                        </select>
+                        <input
+                          type="text"
+                          class="form-control form-control-sm js-work-code"
+                          name="work_code[]"
+                          maxlength="10"
+                          autocomplete="off"
+                          placeholder="Work code"
+                          value="<?= h($row['override_code'] ?? '') ?>"
+                          <?= $overrideStatus === 1 ? 'disabled' : '' ?>
+                        >
                       </td>
                       <td><span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span></td>
                       <td><span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span></td>
@@ -799,5 +810,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
     <?php endif; ?>
   </div>
 </section>
+
+<script>
+  window.WORK_CODE_OPTIONS = <?= json_encode($workTypeOptions, JSON_UNESCAPED_SLASHES) ?>;
+</script>
 
 <?php include __DIR__ . '/../admin/include/layout_bottom.php'; ?>

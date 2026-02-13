@@ -198,4 +198,31 @@ function get_api_config(mysqli $bd, string $key, ?string $fallback = null): ?str
     return $value;
 }
 
+function normalize_work_type_code(?string $value): ?string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    return strtoupper($value);
+}
+
+function load_work_type_options(mysqli $bd): array {
+    $options = [];
+    $result = $bd->query(
+        'SELECT wt_cd, wt_desc FROM gcc_attendance_master.work_type_master ORDER BY wt_desc, wt_cd'
+    );
+    if (!$result) {
+        return $options;
+    }
+    while ($row = $result->fetch_assoc()) {
+        $code = normalize_work_type_code($row['wt_cd'] ?? null);
+        if ($code === null) {
+            continue;
+        }
+        $options[$code] = trim((string) ($row['wt_desc'] ?? ''));
+    }
+    $result->free();
+    return $options;
+}
+
 ?>

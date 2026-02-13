@@ -89,6 +89,7 @@ $mappingRequired = false;
 $mappedProjects = [];
 $projectOptions = [];
 $reasonOptions = [];
+$workTypeOptions = [];
 $rows = [];
 $flash = get_flash();
 $reviewedCount = 0;
@@ -143,6 +144,8 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         }
         $reasonResult->free();
     }
+
+    $workTypeOptions = load_work_type_options($bd);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
@@ -255,9 +258,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 $note = trim((string) ($notes[$i] ?? ''));
                 $reasonMeta = $reasonCode !== '' ? ($reasonOptions[$reasonCode] ?? null) : null;
                 $overrideHours = $reasonMeta['override_hours'] ?? null;
-                $overrideCode = $reasonMeta['override_code'] ?? null;
-                if ($overrideCode === '') {
-                    $overrideCode = null;
+                $overrideCode = normalize_work_type_code($reasonMeta['override_code'] ?? null);
+                if ($overrideCode !== null) {
+                    if (empty($workTypeOptions)) {
+                        $errors[] = 'Work code list not available for validation.';
+                        $overrideCode = null;
+                    } elseif (!isset($workTypeOptions[$overrideCode])) {
+                        $errors[] = 'Reason ' . ($reasonCode !== '' ? $reasonCode : '(blank)') . ' has invalid work code "' . $overrideCode . '".';
+                        $overrideCode = null;
+                    }
                 }
 
                 $isEscalated = 0;
