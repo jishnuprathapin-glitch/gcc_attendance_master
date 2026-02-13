@@ -136,7 +136,7 @@ function run_override_rule(
         'WHERE dp.punch_date BETWEEN ? AND ? ' .
         'AND hr.ty_cd IN (' . $placeholders . ') ' .
         'AND o.emp_code IS NULL ' .
-        'AND (d.work_code IS NULL OR d.work_code = "")';
+        'AND (d.work_code IS NULL OR TRIM(d.work_code) = "" OR UPPER(TRIM(d.work_code)) = "SUB")';
 
     $stmt = $bd->prepare($sql);
     if (!$stmt) {
