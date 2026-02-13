@@ -1,4 +1,4 @@
-﻿
+
 <?php
 
 $previewMode = (($_GET['preview'] ?? '') === '1');
@@ -539,6 +539,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $rowErrors[] = 'Row ' . $rowNumber . ': Work hours must be zero or greater.';
                     continue;
                 }
+                if ($workHours > 24) {
+                    $rowErrors[] = 'Row ' . $rowNumber . ': Work hours must be 24 or less.';
+                    continue;
+                }
             }
 
             $workCode = normalize_work_type_code($workCodeRaw);
@@ -968,7 +972,7 @@ include __DIR__ . '/include/layout_top.php';
             <label>Template override</label>
             <div class="form-row">
               <div class="form-group col-md-6">
-                <input id="bulkHours" class="form-control" placeholder="Work hours (e.g. 8.00)">
+                <input id="bulkHours" type="number" step="0.01" min="0" max="24" class="form-control" placeholder="Work hours (e.g. 8.00)">
               </div>
               <div class="form-group col-md-6">
                 <input id="bulkWorkCode" class="form-control js-work-code" placeholder="Work code" maxlength="10" autocomplete="off">
@@ -1067,7 +1071,7 @@ include __DIR__ . '/include/layout_top.php';
                   <td class="row-index">1</td>
                   <td><input name="employeeCode[]" class="form-control form-control-sm" value="<?= h($row['employeeCode'] ?? '') ?>" required></td>
                   <td><input name="attDate[]" type="date" class="form-control form-control-sm" value="<?= h($row['attDate'] ?? '') ?>" required></td>
-                  <td><input name="workHours[]" class="form-control form-control-sm" placeholder="8.00" value="<?= h($row['workHours'] ?? '') ?>"></td>
+                  <td><input name="workHours[]" type="number" step="0.01" min="0" max="24" class="form-control form-control-sm" placeholder="8.00" value="<?= h($row['workHours'] ?? '') ?>"></td>
                   <td><input name="workCode[]" class="form-control form-control-sm js-work-code" placeholder="Work code" maxlength="10" autocomplete="off" value="<?= h($row['workCode'] ?? '') ?>"></td>
                   <td>
                     <select name="reasonCode[]" class="form-control form-control-sm">
@@ -1097,7 +1101,7 @@ include __DIR__ . '/include/layout_top.php';
     <td class="row-index">1</td>
     <td><input name="employeeCode[]" class="form-control form-control-sm" required></td>
     <td><input name="attDate[]" type="date" class="form-control form-control-sm" required></td>
-    <td><input name="workHours[]" class="form-control form-control-sm" placeholder="8.00"></td>
+    <td><input name="workHours[]" type="number" step="0.01" min="0" max="24" class="form-control form-control-sm" placeholder="8.00"></td>
     <td><input name="workCode[]" class="form-control form-control-sm js-work-code" placeholder="Work code" maxlength="10" autocomplete="off"></td>
     <td>
       <select name="reasonCode[]" class="form-control form-control-sm">

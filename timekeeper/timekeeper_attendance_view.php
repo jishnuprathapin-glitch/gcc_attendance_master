@@ -512,6 +512,7 @@ function render_attendance_results(array $context): string {
                         type="number"
                         step="0.01"
                         min="0"
+                        max="24"
                         class="override-input override-hours"
                         value="<?= h($overrideHours) ?>"
                         data-override-key="<?= h($empCode . '|' . $date) ?>"
@@ -1284,7 +1285,12 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                         $errors[] = 'Invalid override hours for ' . $empCode . ' on ' . $attDate . '.';
                         continue;
                     }
-                    $hours = number_format((float) $hoursRaw, 2, '.', '');
+                    $hoursFloat = (float) $hoursRaw;
+                    if ($hoursFloat < 0 || $hoursFloat > 24) {
+                        $errors[] = 'Override hours must be between 0 and 24 for ' . $empCode . ' on ' . $attDate . '.';
+                        continue;
+                    }
+                    $hours = number_format($hoursFloat, 2, '.', '');
                 }
 
                 $code = normalize_work_type_code($change['overrideWorkCode'] ?? null);
@@ -2733,6 +2739,7 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
                         type="number"
                         step="0.01"
                         min="0"
+                        max="24"
                         class="override-input override-hours"
                         value="<?= h($overrideHours) ?>"
                         data-override-key="<?= h($empCode . '|' . $date) ?>"
@@ -3302,6 +3309,17 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           return;
         }
 
+        if (hoursInput) {
+          hoursInput.setCustomValidity('');
+          if (hoursValue !== '') {
+            const n = Number(hoursValue);
+            if (!Number.isFinite(n) || n < 0 || n > 24) {
+              hoursInput.setCustomValidity('Override hours must be between 0 and 24.');
+              invalidInputs.push(hoursInput);
+            }
+          }
+        }
+
         if (codeInput) {
           if (codeValueRaw !== '' || codeValue !== '') {
             codeInput.value = codeValue;
@@ -3333,7 +3351,8 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     const saveOverrides = () => {
       const { changes, invalidInputs } = collectOverrideChanges();
       if (invalidInputs && invalidInputs.length) {
-        setOverrideStatus('Invalid work code. Choose from the list.', true);
+        const message = invalidInputs[0].validationMessage || 'Invalid override value.';
+        setOverrideStatus(message, true);
         invalidInputs[0].focus();
         invalidInputs[0].reportValidity();
         return;

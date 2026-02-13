@@ -258,6 +258,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 $note = trim((string) ($notes[$i] ?? ''));
                 $reasonMeta = $reasonCode !== '' ? ($reasonOptions[$reasonCode] ?? null) : null;
                 $overrideHours = $reasonMeta['override_hours'] ?? null;
+                if ($overrideHours !== null && $overrideHours !== '') {
+                    $overrideHours = trim((string) $overrideHours);
+                    if (!is_numeric($overrideHours)) {
+                        $errors[] = 'Reason ' . ($reasonCode !== '' ? $reasonCode : '(blank)') . ' has invalid override hours.';
+                        $overrideHours = null;
+                    } else {
+                        $hoursFloat = (float) $overrideHours;
+                        if ($hoursFloat < 0 || $hoursFloat > 24) {
+                            $errors[] = 'Reason ' . ($reasonCode !== '' ? $reasonCode : '(blank)') . ' has override hours outside 0-24.';
+                            $overrideHours = null;
+                        } else {
+                            $overrideHours = number_format($hoursFloat, 2, '.', '');
+                        }
+                    }
+                } else {
+                    $overrideHours = null;
+                }
                 $overrideCode = normalize_work_type_code($reasonMeta['override_code'] ?? null);
                 if ($overrideCode !== null) {
                     if (empty($workTypeOptions)) {

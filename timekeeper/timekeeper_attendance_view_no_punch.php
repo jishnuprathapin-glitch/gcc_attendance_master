@@ -249,7 +249,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                         $errors[] = 'Invalid hours for ' . $empCode . ' on ' . $attDate . '.';
                         continue;
                     }
-                    $hours = number_format((float) $hoursRaw, 2, '.', '');
+                    $hoursFloat = (float) $hoursRaw;
+                    if ($hoursFloat < 0 || $hoursFloat > 24) {
+                        $errors[] = 'Hours must be between 0 and 24 for ' . $empCode . ' on ' . $attDate . '.';
+                        continue;
+                    }
+                    $hours = number_format($hoursFloat, 2, '.', '');
                 }
 
                 if ($workCode !== null) {
@@ -779,7 +784,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                       <td><?= h($row['department']) ?></td>
                       <td><?= h($row['project_code']) ?></td>
                       <td>
-                        <input class="form-control form-control-sm" name="work_hours[]" value="<?= h($row['override_hours']) ?>" <?= $overrideStatus === 1 ? 'disabled' : '' ?>>
+                        <input type="number" step="0.01" min="0" max="24" class="form-control form-control-sm" name="work_hours[]" placeholder="8.00" value="<?= h($row['override_hours']) ?>" <?= $overrideStatus === 1 ? 'disabled' : '' ?>>
                       </td>
                       <td>
                         <input
