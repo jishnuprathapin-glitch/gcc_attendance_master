@@ -1460,7 +1460,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
                         <?php endif; ?>
                       </td>
                       <td>
-                        <?php if (!$isSubmitted): ?>
+                        <?php if ($isSubmitted): ?>
+                          <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
+                        <?php else: ?>
                           <button
                             type="submit"
                             name="row_submit"
