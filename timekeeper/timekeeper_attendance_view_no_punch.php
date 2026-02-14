@@ -1389,9 +1389,20 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           $campClass = 'is-submitted';
                       }
 
-                      $isSubmitted = ($campLabel !== 'Not submitted');
-                      $lockInputs = ($overrideStatus === 1) || $isSubmitted;
-                      $canSubmitRow = (!$isSubmitted)
+                      $isCampbossWorkflow = ((int) ($row['is_escalated'] ?? 0) === 1)
+                        || trim((string) ($row['campboss_reviewed'] ?? '')) !== ''
+                        || trim((string) ($row['campboss_reason'] ?? '')) !== ''
+                        || trim((string) ($row['submitted_at'] ?? '')) !== '';
+
+                      $isHrWorkflow = ($overrideStatus === 1 || $overrideStatus === 2)
+                        || trim((string) ($row['override_hours'] ?? '')) !== ''
+                        || trim((string) ($row['override_code'] ?? '')) !== '';
+
+                      // Backward-compatible naming: the row is "submitted" as soon as it enters the camp boss flow.
+                      $isSubmitted = $isCampbossWorkflow;
+
+                      $lockInputs = ($overrideStatus === 1) || $isCampbossWorkflow;
+                      $canSubmitRow = (!$isCampbossWorkflow)
                         && !$lockInputs
                         && trim((string) ($row['override_hours'] ?? '')) === ''
                         && trim((string) ($row['override_code'] ?? '')) === '';
@@ -1450,17 +1461,17 @@ include __DIR__ . '/../admin/include/layout_top.php';
                         >
                       </td>
                       <td>
-                        <?php if ($isSubmitted): ?>
-                          
-                        <?php else: ?>
+                        <?php if (!$isCampbossWorkflow): ?>
                           <button type="submit" name="row_save" value="<?= (int) $rowIndex ?>" class="btn btn-sm btn-primary" <?= $lockInputs ? 'disabled' : '' ?>>Submit to HR for approval</button>
-                          <div class="mt-1">
-                            <span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span>
-                          </div>
+                          <?php if ($isHrWorkflow): ?>
+                            <div class="mt-1">
+                              <span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span>
+                            </div>
+                          <?php endif; ?>
                         <?php endif; ?>
                       </td>
                       <td>
-                        <?php if ($isSubmitted): ?>
+                        <?php if ($isCampbossWorkflow): ?>
                           <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
                         <?php else: ?>
                           <button
@@ -1471,9 +1482,11 @@ include __DIR__ . '/../admin/include/layout_top.php';
                             <?= $canSubmitRow ? '' : 'disabled' ?>
                             title="<?= $canSubmitRow ? '' : 'Clear overrides before submitting.' ?>"
                           >Submit to Camp boss for clarification</button>
-                          <div class="mt-1">
-                            <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
-                          </div>
+                          <?php if (!$isHrWorkflow): ?>
+                            <div class="mt-1">
+                              <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
+                            </div>
+                          <?php endif; ?>
                         <?php endif; ?>
                       </td>
                     </tr>
