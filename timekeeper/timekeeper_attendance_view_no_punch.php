@@ -1220,6 +1220,21 @@ include __DIR__ . '/../admin/include/layout_top.php';
     flex-wrap: wrap;
     gap: 0.5rem;
   }
+  .bulk-override-group {
+    min-width: 360px;
+  }
+  .bulk-override-hours {
+    max-width: 110px;
+  }
+  @media (max-width: 576px) {
+    .bulk-override-group {
+      width: 100%;
+      min-width: 0;
+    }
+    .bulk-override-hours {
+      max-width: none;
+    }
+  }
 </style>
 
 <section class="content-header">
@@ -1290,6 +1305,34 @@ include __DIR__ . '/../admin/include/layout_top.php';
         <div class="card-header d-flex justify-content-between align-items-center">
           <h3 class="card-title">Employees with no punch</h3>
           <div class="no-punch-actions">
+            <div class="input-group input-group-sm bulk-override-group">
+              <div class="input-group-prepend">
+                <span class="input-group-text">Bulk</span>
+              </div>
+              <input
+                id="bulkOverrideHours"
+                type="number"
+                step="0.01"
+                min="0"
+                max="24"
+                class="form-control bulk-override-hours"
+                inputmode="decimal"
+                aria-label="Bulk override hours"
+              >
+              <select id="bulkOverrideReason" class="form-control" aria-label="Bulk override reason">
+                <option value="">Reason</option>
+                <?php foreach ($noPunchReasonOptions as $code => $text): ?>
+                  <option value="<?= h($code) ?>"><?= h($code . ' - ' . $text) ?></option>
+                <?php endforeach; ?>
+              </select>
+              <div class="input-group-append">
+                <button type="button" class="btn btn-outline-primary" id="bulkOverrideApply">Apply</button>
+              </div>
+            </div>
+            <div class="custom-control custom-checkbox align-self-center">
+              <input type="checkbox" class="custom-control-input" id="bulkOverrideOverwrite">
+              <label class="custom-control-label text-muted small" for="bulkOverrideOverwrite">Overwrite</label>
+            </div>
             <span class="text-muted small"><?= h(count($rows)) ?> records</span>
           </div>
         </div>
@@ -1342,7 +1385,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           $campLabel = 'Reviewed';
                           $campClass = 'is-reviewed';
                       } elseif (($row['submitted_at'] ?? '') !== '') {
-                          $campLabel = 'Submitted';
+                          $campLabel = 'Submitted to Camp boss for clarification';
                           $campClass = 'is-submitted';
                       }
 
@@ -1408,9 +1451,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
                       </td>
                       <td>
                         <?php if ($isSubmitted): ?>
-                          <span class="text-muted">-</span>
+                          
                         <?php else: ?>
-                          <button type="submit" name="row_save" value="<?= (int) $rowIndex ?>" class="btn btn-sm btn-primary" <?= $lockInputs ? 'disabled' : '' ?>>Save</button>
+                          <button type="submit" name="row_save" value="<?= (int) $rowIndex ?>" class="btn btn-sm btn-primary" <?= $lockInputs ? 'disabled' : '' ?>>Submit to HR for approval</button>
                           <div class="mt-1">
                             <span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span>
                           </div>
@@ -1427,7 +1470,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                             class="btn btn-sm btn-outline-secondary"
                             <?= $canSubmitRow ? '' : 'disabled' ?>
                             title="<?= $canSubmitRow ? '' : 'Clear overrides before submitting.' ?>"
-                          >Submit</button>
+                          >Submit to Camp boss for clarification</button>
                           <div class="mt-1">
                             <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
                           </div>
@@ -1584,6 +1627,79 @@ include __DIR__ . '/../admin/include/layout_top.php';
         setSelectTitle(sel);
         sel.addEventListener('change', function () { setSelectTitle(sel); });
       })(reasonSelects[j]);
+    }
+
+    function applyBulkOverride() {
+      var hoursEl = document.getElementById('bulkOverrideHours');
+      var reasonEl = document.getElementById('bulkOverrideReason');
+      var overwriteEl = document.getElementById('bulkOverrideOverwrite');
+      if (!hoursEl || !reasonEl) return;
+
+      var hoursVal = (hoursEl.value || '').trim();
+      var reasonVal = (reasonEl.value || '').trim();
+      var overwrite = overwriteEl && overwriteEl.checked;
+
+      if (hoursVal === '') {
+        alert('Enter bulk override hours.');
+        hoursEl.focus();
+        return;
+      }
+
+      var n = Number(hoursVal);
+      if (!isFinite(n) || n < 0 || n > 24) {
+        alert('Hours must be a number between 0 and 24.');
+        hoursEl.focus();
+        return;
+      }
+
+      if (reasonVal === '') {
+        alert('Select a reason for bulk hour overrides.');
+        reasonEl.focus();
+        return;
+      }
+
+      // Normalize to 2 decimals for consistency with server-side formatting.
+      var normalizedHours = n.toFixed(2);
+
+      var rows = document.querySelectorAll('tbody tr');
+      var applied = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var tr = rows[i];
+        var rowHours = tr.querySelector('input[name=\"work_hours[]\"]');
+        var rowCode = tr.querySelector('input[name=\"work_code[]\"]');
+        var rowReason = tr.querySelector('select[name=\"override_reason_code[]\"]');
+        if (!rowHours || !rowCode || !rowReason) continue;
+
+        if (rowHours.readOnly || rowHours.disabled || rowCode.readOnly || rowCode.disabled || rowReason.disabled) {
+          continue;
+        }
+
+        if (!overwrite) {
+          var existingHours = (rowHours.value || '').trim();
+          var existingCode = (rowCode.value || '').trim();
+          var existingReason = (rowReason.value || '').trim();
+          if (existingHours !== '' || existingCode !== '' || existingReason !== '') {
+            continue;
+          }
+        }
+
+        rowHours.value = normalizedHours;
+        rowCode.value = '';
+        rowReason.value = reasonVal;
+        setSelectTitle(rowReason);
+        applied++;
+      }
+
+      if (applied === 0) {
+        alert('No editable rows found to apply the bulk override.');
+      }
+    }
+
+    var bulkApplyBtn = document.getElementById('bulkOverrideApply');
+    if (bulkApplyBtn) {
+      bulkApplyBtn.addEventListener('click', function () {
+        applyBulkOverride();
+      });
     }
 
   })();
