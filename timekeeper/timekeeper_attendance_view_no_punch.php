@@ -343,6 +343,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                     }
                 }
 
+                if ($hours !== null && $workCode !== null) {
+                    $errors[] = 'Choose only one override (hours OR work code) for ' . $empCode . ' on ' . $attDate . '.';
+                    continue;
+                }
+
                 if ($hours === null && $workCode === null) {
                     if ($deleteStmt) {
                         $deleteStmt->bind_param('ss', $empCode, $attDate);
@@ -946,10 +951,19 @@ include __DIR__ . '/../admin/include/layout_top.php';
         for (var i = 0; i < rows.length; i++) {
           var tr = rows[i];
           var hours = tr.querySelector('input[name=\"work_hours[]\"]');
+          var code = tr.querySelector('input[name=\"work_code[]\"]');
           var reason = tr.querySelector('select[name=\"override_reason_code[]\"]');
-          if (!hours || !reason) continue;
+          if (!hours || !code || !reason) continue;
 
           var hoursVal = (hours.value || '').trim();
+          var codeVal = (code.value || '').trim();
+
+          if (hoursVal !== '' && codeVal !== '') {
+            e.preventDefault();
+            alert('Choose only one override per row: work hours OR work code (not both).');
+            code.focus();
+            return;
+          }
           if (hoursVal !== '' && (reason.value || '').trim() === '') {
             e.preventDefault();
             alert('Reason is required when overriding hours. Please select a reason.');
@@ -958,6 +972,27 @@ include __DIR__ . '/../admin/include/layout_top.php';
           }
         }
       });
+    }
+
+    // UX: keep inputs mutually exclusive while typing.
+    var dataRows = document.querySelectorAll('tbody tr');
+    for (var k = 0; k < dataRows.length; k++) {
+      var row = dataRows[k];
+      var hoursInput = row.querySelector('input[name=\"work_hours[]\"]');
+      var codeInput = row.querySelector('input[name=\"work_code[]\"]');
+      if (!hoursInput || !codeInput) continue;
+      (function (hoursEl, codeEl) {
+        hoursEl.addEventListener('input', function () {
+          if ((hoursEl.value || '').trim() !== '') {
+            codeEl.value = '';
+          }
+        });
+        codeEl.addEventListener('input', function () {
+          if ((codeEl.value || '').trim() !== '') {
+            hoursEl.value = '';
+          }
+        });
+      })(hoursInput, codeInput);
     }
 
     var selects = document.querySelectorAll('select.js-override-reason');

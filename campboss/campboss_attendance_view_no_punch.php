@@ -286,6 +286,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                     }
                 }
 
+                if ($overrideHours !== null && $overrideCode !== null) {
+                    $errors[] = 'Reason ' . ($reasonCode !== '' ? $reasonCode : '(blank)') . ' has BOTH override hours and override work code. Keep only one.';
+                    $overrideHours = null;
+                    $overrideCode = null;
+                }
+
                 $isEscalated = 0;
                 $escalatedAt = null;
                 if ($reasonCode !== '' && $overrideHours === null && $overrideCode === null) {

@@ -520,6 +520,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $rowErrors[] = 'Row ' . $rowNumber . ': Override work hours or override work code is required.';
                 continue;
             }
+            if ($workHoursRaw !== '' && $workCodeRaw !== '') {
+                $rowErrors[] = 'Row ' . $rowNumber . ': Choose only one override (work hours OR work code), not both.';
+                continue;
+            }
 
             $dupKey = $employeeCode . '|' . $attDate;
             if (isset($seenKeys[$dupKey])) {
@@ -1088,7 +1092,7 @@ include __DIR__ . '/include/layout_top.php';
           </table>
         </div>
         <div class="override-footer">
-          <div class="text-muted small">Overrides are sent via Attendance API. At least work hours or work code is required per row.</div>
+          <div class="text-muted small">Overrides are sent via Attendance API. Enter exactly one value per row: work hours OR work code.</div>
           <button type="submit" class="btn btn-primary btn-lg">Submit overrides</button>
         </div>
       </div>
@@ -1301,7 +1305,10 @@ include __DIR__ . '/include/layout_top.php';
       }
       const hours = hoursInput.value.trim();
       const code = codeInput.value.trim();
-      const message = (hours === '' && code === '') ? 'Work hours or work code is required.' : '';
+      const message =
+        (hours !== '' && code !== '') ? 'Choose only one override: work hours OR work code.' :
+        (hours === '' && code === '') ? 'Work hours or work code is required.' :
+        '';
       hoursInput.setCustomValidity(message);
       codeInput.setCustomValidity(message);
     }

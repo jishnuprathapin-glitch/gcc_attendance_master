@@ -1303,6 +1303,11 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                     continue;
                 }
 
+                if ($hours !== null && $code !== null) {
+                    $errors[] = 'Choose only one override (hours OR work code) for ' . $empCode . ' on ' . $attDate . '.';
+                    continue;
+                }
+
                 $sanitized[] = [
                     'empCode' => $empCode,
                     'attDate' => $attDate,
@@ -3266,10 +3271,52 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
       input.classList.toggle('is-dirty', current !== original);
     };
 
+    const overridePairs = new Map();
     overrideInputs.forEach((input) => {
+      const key = input.dataset.overrideKey || '';
+      if (key === '') {
+        return;
+      }
+      if (!overridePairs.has(key)) {
+        overridePairs.set(key, { hours: null, code: null });
+      }
+      const entry = overridePairs.get(key);
+      if (input.dataset.overrideField === 'hours') {
+        entry.hours = input;
+      } else if (input.dataset.overrideField === 'code') {
+        entry.code = input;
+      }
+    });
+
+    overrideInputs.forEach((input) => {
+      const sync = () => {
+        updateDirtyState(input);
+
+        // Enforce mutual exclusivity: if hours is set, clear code and vice versa.
+        const key = input.dataset.overrideKey || '';
+        const field = input.dataset.overrideField || '';
+        const entry = overridePairs.get(key);
+        if (!entry) {
+          return;
+        }
+        const value = String(input.value || '').trim();
+        if (value === '') {
+          return;
+        }
+        if (field === 'hours' && entry.code) {
+          entry.code.value = '';
+          entry.code.setCustomValidity('');
+          updateDirtyState(entry.code);
+        } else if (field === 'code' && entry.hours) {
+          entry.hours.value = '';
+          entry.hours.setCustomValidity('');
+          updateDirtyState(entry.hours);
+        }
+      };
+
       updateDirtyState(input);
-      input.addEventListener('input', () => updateDirtyState(input));
-      input.addEventListener('change', () => updateDirtyState(input));
+      input.addEventListener('input', sync);
+      input.addEventListener('change', sync);
     });
 
     const collectOverrideChanges = () => {
@@ -3330,6 +3377,14 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
             codeInput.setCustomValidity('Invalid work code. Choose from the list.');
             invalidInputs.push(codeInput);
           }
+        }
+
+        if (hoursValue !== '' && codeValue !== '' && hoursInput && codeInput) {
+          const message = 'Choose only one override: hours OR work code.';
+          hoursInput.setCustomValidity(message);
+          codeInput.setCustomValidity(message);
+          invalidInputs.push(hoursInput);
+          invalidInputs.push(codeInput);
         }
 
         changes.push({
