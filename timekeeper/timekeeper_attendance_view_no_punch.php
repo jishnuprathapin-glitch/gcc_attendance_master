@@ -214,8 +214,411 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
     $action = $_POST['action'] ?? '';
+    $rowSave = $_POST['row_save'] ?? null;
+    $rowSubmit = $_POST['row_submit'] ?? null;
+    if ($rowSave !== null) {
+        $action = 'row_save';
+    } elseif ($rowSubmit !== null) {
+        $action = 'row_submit';
+    }
     if (!verify_csrf($_POST['csrf'] ?? null)) {
         set_flash('warning', 'Invalid request token. Please try again.');
+    } elseif ($action === 'row_save') {
+        if (!ensure_attendance_override_table($bd)) {
+            set_flash('warning', 'Override table not available.');
+        } else {
+            $empCodes = $_POST['emp_code'] ?? [];
+            $attDates = $_POST['att_date'] ?? [];
+            $hoursList = $_POST['work_hours'] ?? [];
+            $codeList = $_POST['work_code'] ?? [];
+            $reasonCodeList = $_POST['override_reason_code'] ?? [];
+            $reasonNoteList = $_POST['override_reason_note'] ?? [];
+
+            if (!is_array($empCodes)) {
+                $empCodes = [$empCodes];
+            }
+            if (!is_array($attDates)) {
+                $attDates = [$attDates];
+            }
+            if (!is_array($hoursList)) {
+                $hoursList = [$hoursList];
+            }
+            if (!is_array($codeList)) {
+                $codeList = [$codeList];
+            }
+            if (!is_array($reasonCodeList)) {
+                $reasonCodeList = [$reasonCodeList];
+            }
+            if (!is_array($reasonNoteList)) {
+                $reasonNoteList = [$reasonNoteList];
+            }
+
+            $i = is_scalar($rowSave) ? (int) $rowSave : -1;
+            $empCode = trim((string) ($empCodes[$i] ?? ''));
+            $attDate = trim((string) ($attDates[$i] ?? ''));
+            if ($empCode === '' || $attDate === '') {
+                set_flash('warning', 'Row data missing. Please refresh the page.');
+            } else {
+                // Lock after submission/review.
+                $lockStmt = $bd->prepare(
+                    'SELECT timekeeper_submitted_at, campboss_reason_code, campboss_reviewed_at, is_escalated ' .
+                    'FROM gcc_attendance_master.attendance_no_punch_reviews WHERE emp_code = ? AND att_date = ? LIMIT 1'
+                );
+                $isLocked = false;
+                if ($lockStmt) {
+                    $lockStmt->bind_param('ss', $empCode, $attDate);
+                    if ($lockStmt->execute()) {
+                        $res = $lockStmt->get_result();
+                        if ($res) {
+                            $rev = $res->fetch_assoc() ?: null;
+                            $res->free();
+                            if ($rev) {
+                                $submittedAt = trim((string) ($rev['timekeeper_submitted_at'] ?? ''));
+                                $campbossReason = trim((string) ($rev['campboss_reason_code'] ?? ''));
+                                $campbossReviewed = trim((string) ($rev['campboss_reviewed_at'] ?? ''));
+                                $isEscalated = (int) ($rev['is_escalated'] ?? 0);
+                                if ($submittedAt !== '' || $campbossReason !== '' || $campbossReviewed !== '' || $isEscalated === 1) {
+                                    $isLocked = true;
+                                }
+                            }
+                        }
+                    }
+                    $lockStmt->close();
+                }
+
+                if ($isLocked) {
+                    set_flash('warning', 'This entry is already submitted to camp boss. Overrides are locked.');
+                } else {
+                    $approvedStmt = $bd->prepare(
+                        'SELECT override_is_approved FROM gcc_attendance_master.employee_att_daily_overrides WHERE emp_code = ? AND att_date = ? LIMIT 1'
+                    );
+                    $isApproved = false;
+                    if ($approvedStmt) {
+                        $approvedStmt->bind_param('ss', $empCode, $attDate);
+                        if ($approvedStmt->execute()) {
+                            $res = $approvedStmt->get_result();
+                            if ($res) {
+                                $ov = $res->fetch_assoc() ?: null;
+                                $res->free();
+                                if ($ov && (int) ($ov['override_is_approved'] ?? 0) === 1) {
+                                    $isApproved = true;
+                                }
+                            }
+                        }
+                        $approvedStmt->close();
+                    }
+
+                    if ($isApproved) {
+                        set_flash('warning', 'This override is already approved and cannot be edited.');
+                    } else {
+                        $hoursRaw = trim((string) ($hoursList[$i] ?? ''));
+                        $workCodeRaw = trim((string) ($codeList[$i] ?? ''));
+                        $workCode = normalize_work_type_code($workCodeRaw);
+                        $hours = null;
+
+                        $reasonCodeRaw = strtoupper(trim((string) ($reasonCodeList[$i] ?? '')));
+                        $reasonCode = $reasonCodeRaw !== '' ? $reasonCodeRaw : null;
+                        $reasonNote = trim((string) ($reasonNoteList[$i] ?? ''));
+                        if ($reasonNote !== '') {
+                            $reasonNote = substr($reasonNote, 0, 255);
+                        } else {
+                            $reasonNote = null;
+                        }
+
+                        $errors = [];
+
+                        if ($hoursRaw !== '') {
+                            if (!is_numeric($hoursRaw)) {
+                                $errors[] = 'Invalid hours.';
+                            } else {
+                                $hoursFloat = (float) $hoursRaw;
+                                if ($hoursFloat < 0 || $hoursFloat > 24) {
+                                    $errors[] = 'Hours must be between 0 and 24.';
+                                } else {
+                                    $hours = number_format($hoursFloat, 2, '.', '');
+                                }
+                            }
+                        }
+
+                        if ($hours !== null && $workCode !== null) {
+                            $errors[] = 'Choose only one override (hours OR work code).';
+                        }
+                        if ($hours !== null && $reasonCode === null) {
+                            $errors[] = 'Reason is required when overriding hours.';
+                        }
+                        if ($reasonCode !== null) {
+                            if (empty($noPunchReasonOptions) || !isset($noPunchReasonOptions[$reasonCode])) {
+                                $errors[] = 'Invalid reason.';
+                            }
+                        }
+                        if ($workCode !== null) {
+                            if (empty($workTypeOptions) || !isset($workTypeOptions[$workCode])) {
+                                $errors[] = 'Invalid work code.';
+                            }
+                        }
+
+                        if (!empty($errors)) {
+                            set_flash('warning', implode(' ', $errors));
+                        } else {
+                            $insertSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
+                                '(emp_code, att_date, override_work_hours, override_work_code, override_reason_code, override_reason_note, override_change_date, ' .
+                                'override_changed_by_email, override_changed_by_name, override_is_approved, ' .
+                                'override_approved_by_email, override_approved_by_name, override_approved_date) ' .
+                                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
+                                'ON DUPLICATE KEY UPDATE ' .
+                                'override_work_hours = VALUES(override_work_hours), ' .
+                                'override_work_code = VALUES(override_work_code), ' .
+                                'override_reason_code = VALUES(override_reason_code), ' .
+                                'override_reason_note = VALUES(override_reason_note), ' .
+                                'override_change_date = VALUES(override_change_date), ' .
+                                'override_changed_by_email = VALUES(override_changed_by_email), ' .
+                                'override_changed_by_name = VALUES(override_changed_by_name), ' .
+                                'override_is_approved = 0, ' .
+                                'override_approved_by_email = NULL, ' .
+                                'override_approved_by_name = NULL, ' .
+                                'override_approved_date = NULL';
+
+                            $insertStmt = $bd->prepare($insertSql);
+                            $deleteStmt = $bd->prepare(
+                                'DELETE FROM `gcc_attendance_master`.`employee_att_daily_overrides` WHERE emp_code = ? AND att_date = ?'
+                            );
+
+                            if ($hours === null && $workCode === null) {
+                                if ($deleteStmt) {
+                                    $deleteStmt->bind_param('ss', $empCode, $attDate);
+                                    $deleteStmt->execute();
+                                }
+                                set_flash('success', 'Override cleared.');
+                            } else {
+                                $changeDate = gmdate('Y-m-d H:i:s');
+                                $approved = 0;
+                                $approvedByEmail = null;
+                                $approvedByName = null;
+                                $approvedDate = null;
+                                $emailParam = $userEmail !== '' ? $userEmail : null;
+                                $nameParam = $userName !== '' ? $userName : null;
+
+                                if ($insertStmt) {
+                                    $insertStmt->bind_param(
+                                        'sssssssssisss',
+                                        $empCode,
+                                        $attDate,
+                                        $hours,
+                                        $workCode,
+                                        $reasonCode,
+                                        $reasonNote,
+                                        $changeDate,
+                                        $emailParam,
+                                        $nameParam,
+                                        $approved,
+                                        $approvedByEmail,
+                                        $approvedByName,
+                                        $approvedDate
+                                    );
+                                    if ($insertStmt->execute()) {
+                                        set_flash('success', 'Override saved.');
+                                    } else {
+                                        set_flash('warning', 'Unable to save override.');
+                                    }
+                                } else {
+                                    set_flash('warning', 'Unable to save override.');
+                                }
+                            }
+
+                            if ($insertStmt) {
+                                $insertStmt->close();
+                            }
+                            if ($deleteStmt) {
+                                $deleteStmt->close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } elseif ($action === 'row_submit') {
+        if (!ensure_no_punch_review_table($bd)) {
+            set_flash('warning', 'Unable to submit to camp boss.');
+        } else {
+            $empCodes = $_POST['emp_code'] ?? [];
+            $attDates = $_POST['att_date'] ?? [];
+            $hoursList = $_POST['work_hours'] ?? [];
+            $codeList = $_POST['work_code'] ?? [];
+
+            if (!is_array($empCodes)) {
+                $empCodes = [$empCodes];
+            }
+            if (!is_array($attDates)) {
+                $attDates = [$attDates];
+            }
+            if (!is_array($hoursList)) {
+                $hoursList = [$hoursList];
+            }
+            if (!is_array($codeList)) {
+                $codeList = [$codeList];
+            }
+
+            $i = is_scalar($rowSubmit) ? (int) $rowSubmit : -1;
+            $empCode = trim((string) ($empCodes[$i] ?? ''));
+            $attDate = trim((string) ($attDates[$i] ?? ''));
+            if ($empCode === '' || $attDate === '') {
+                set_flash('warning', 'Row data missing. Please refresh the page.');
+            } else {
+                $hoursRaw = trim((string) ($hoursList[$i] ?? ''));
+                $workCodeRaw = trim((string) ($codeList[$i] ?? ''));
+                $workCode = normalize_work_type_code($workCodeRaw);
+                if ($hoursRaw !== '' || $workCode !== null) {
+                    set_flash('warning', 'Clear override hours/code before submitting to camp boss.');
+                } else {
+                    // Verify employee is active + within the timekeeper's mapped projects.
+                    $jbno = null;
+                    $empStmt = $bd->prepare(
+                        'SELECT jbno, is_deleted, st_code FROM gcc_attendance_master.hrmsvw_sync WHERE emp_code = ? LIMIT 1'
+                    );
+                    if ($empStmt) {
+                        $empStmt->bind_param('s', $empCode);
+                        if ($empStmt->execute()) {
+                            $res = $empStmt->get_result();
+                            if ($res) {
+                                $row = $res->fetch_assoc() ?: null;
+                                $res->free();
+                                if ($row) {
+                                    $isDeleted = (int) ($row['is_deleted'] ?? 0);
+                                    $stCode = trim((string) ($row['st_code'] ?? ''));
+                                    $jbnoCandidate = trim((string) ($row['jbno'] ?? ''));
+                                    if ($isDeleted !== 0 || strtoupper($stCode) !== 'A') {
+                                        $jbno = null;
+                                    } else {
+                                        $jbno = $jbnoCandidate !== '' ? $jbnoCandidate : null;
+                                    }
+                                }
+                            }
+                        }
+                        $empStmt->close();
+                    }
+
+                    if ($jbno === null || !in_array($jbno, $mappedProjects, true)) {
+                        set_flash('warning', 'Employee not found or not mapped to your projects.');
+                    } else {
+                        // Block if already submitted/reviewed/escalated.
+                        $lockStmt = $bd->prepare(
+                            'SELECT timekeeper_submitted_at, campboss_reason_code, campboss_reviewed_at, is_escalated ' .
+                            'FROM gcc_attendance_master.attendance_no_punch_reviews WHERE emp_code = ? AND att_date = ? LIMIT 1'
+                        );
+                        $isLocked = false;
+                        if ($lockStmt) {
+                            $lockStmt->bind_param('ss', $empCode, $attDate);
+                            if ($lockStmt->execute()) {
+                                $res = $lockStmt->get_result();
+                                if ($res) {
+                                    $rev = $res->fetch_assoc() ?: null;
+                                    $res->free();
+                                    if ($rev) {
+                                        $submittedAt = trim((string) ($rev['timekeeper_submitted_at'] ?? ''));
+                                        $campbossReason = trim((string) ($rev['campboss_reason_code'] ?? ''));
+                                        $campbossReviewed = trim((string) ($rev['campboss_reviewed_at'] ?? ''));
+                                        $isEscalated = (int) ($rev['is_escalated'] ?? 0);
+                                        if ($submittedAt !== '' || $campbossReason !== '' || $campbossReviewed !== '' || $isEscalated === 1) {
+                                            $isLocked = true;
+                                        }
+                                    }
+                                }
+                            }
+                            $lockStmt->close();
+                        }
+                        if ($isLocked) {
+                            set_flash('warning', 'This entry is already submitted to camp boss.');
+                        } else {
+                            // Must still be a no-punch entry.
+                            $punchStmt = $bd->prepare(
+                                'SELECT first_log, last_log FROM gcc_attendance_master.employee_daily_punch WHERE emp_code = ? AND punch_date = ? LIMIT 1'
+                            );
+                            $hasPunch = false;
+                            if ($punchStmt) {
+                                $punchStmt->bind_param('ss', $empCode, $attDate);
+                                if ($punchStmt->execute()) {
+                                    $res = $punchStmt->get_result();
+                                    if ($res) {
+                                        $p = $res->fetch_assoc() ?: null;
+                                        $res->free();
+                                        if ($p) {
+                                            $firstLog = trim((string) ($p['first_log'] ?? ''));
+                                            $lastLog = trim((string) ($p['last_log'] ?? ''));
+                                            if ($firstLog !== '' || $lastLog !== '') {
+                                                $hasPunch = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                $punchStmt->close();
+                            }
+                            if ($hasPunch) {
+                                set_flash('warning', 'This employee has punch logs for the selected date.');
+                            } else {
+                                // Do not submit if an override exists.
+                                if (!ensure_attendance_override_table($bd)) {
+                                    set_flash('warning', 'Override table not available.');
+                                } else {
+                                    $ovStmt = $bd->prepare(
+                                        'SELECT override_work_hours, override_work_code FROM gcc_attendance_master.employee_att_daily_overrides ' .
+                                        'WHERE emp_code = ? AND att_date = ? LIMIT 1'
+                                    );
+                                    $hasOverride = false;
+                                    if ($ovStmt) {
+                                        $ovStmt->bind_param('ss', $empCode, $attDate);
+                                        if ($ovStmt->execute()) {
+                                            $res = $ovStmt->get_result();
+                                            if ($res) {
+                                                $ov = $res->fetch_assoc() ?: null;
+                                                $res->free();
+                                                if ($ov) {
+                                                    $h = trim((string) ($ov['override_work_hours'] ?? ''));
+                                                    $c = trim((string) ($ov['override_work_code'] ?? ''));
+                                                    if ($h !== '' || $c !== '') {
+                                                        $hasOverride = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        $ovStmt->close();
+                                    }
+                                    if ($hasOverride) {
+                                        set_flash('warning', 'This entry already has an override. Clear it before submitting to camp boss.');
+                                    } else {
+                                        $insertSql = 'INSERT INTO `gcc_attendance_master`.`attendance_no_punch_reviews` ' .
+                                            '(emp_code, att_date, timekeeper_note, timekeeper_email, timekeeper_name, timekeeper_submitted_at) ' .
+                                            'VALUES (?, ?, ?, ?, ?, ?) ' .
+                                            'ON DUPLICATE KEY UPDATE ' .
+                                            'timekeeper_note = VALUES(timekeeper_note), ' .
+                                            'timekeeper_email = VALUES(timekeeper_email), ' .
+                                            'timekeeper_name = VALUES(timekeeper_name), ' .
+                                            'timekeeper_submitted_at = VALUES(timekeeper_submitted_at)';
+
+                                        $timekeeperNote = null;
+                                        $emailParam = $userEmail !== '' ? $userEmail : null;
+                                        $nameParam = $userName !== '' ? $userName : null;
+                                        $submittedAt = gmdate('Y-m-d H:i:s');
+
+                                        $stmt = $bd->prepare($insertSql);
+                                        if ($stmt) {
+                                            $stmt->bind_param('ssssss', $empCode, $attDate, $timekeeperNote, $emailParam, $nameParam, $submittedAt);
+                                            if ($stmt->execute()) {
+                                                set_flash('success', 'Submitted to camp boss.');
+                                            } else {
+                                                set_flash('warning', 'Unable to submit entry to camp boss.');
+                                            }
+                                            $stmt->close();
+                                        } else {
+                                            set_flash('warning', 'Unable to submit entry to camp boss.');
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     } elseif ($action === 'save_overrides') {
         if (!ensure_attendance_override_table($bd)) {
             set_flash('warning', 'Override table not available.');
@@ -257,7 +660,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
             );
             $updated = 0;
             $deleted = 0;
+            $skipped = 0;
             $errors = [];
+
+            // Lock rows that were already submitted/reviewed/escalated (camp boss flow),
+            // or overrides that were already approved (attendance approval flow).
+            $locks = [];
+            $approved = [];
+            $uniqueEmp = [];
+            for ($i = 0; $i < count($empCodes); $i++) {
+                $emp = trim((string) ($empCodes[$i] ?? ''));
+                $date = trim((string) ($attDates[$i] ?? ''));
+                if ($emp === '' || $date === '') {
+                    continue;
+                }
+                $uniqueEmp[$emp] = true;
+            }
+            $uniqueEmp = array_keys($uniqueEmp);
+            if (!empty($uniqueEmp)) {
+                $placeholders = implode(',', array_fill(0, count($uniqueEmp), '?'));
+                $types2 = str_repeat('s', count($uniqueEmp)) . 's';
+                $params2 = array_merge($uniqueEmp, [$selectedDate]);
+
+                $reviewSql = 'SELECT emp_code, timekeeper_submitted_at, campboss_reason_code, campboss_reviewed_at, is_escalated ' .
+                    'FROM gcc_attendance_master.attendance_no_punch_reviews ' .
+                    'WHERE emp_code IN (' . $placeholders . ') AND att_date = ?';
+                $stmt2 = $bd->prepare($reviewSql);
+                if ($stmt2) {
+                    bind_params($stmt2, $types2, $params2);
+                    if ($stmt2->execute()) {
+                        $res = $stmt2->get_result();
+                        if ($res) {
+                            while ($r = $res->fetch_assoc()) {
+                                $emp = trim((string) ($r['emp_code'] ?? ''));
+                                if ($emp === '') {
+                                    continue;
+                                }
+                                $submittedAt = trim((string) ($r['timekeeper_submitted_at'] ?? ''));
+                                $campbossReason = trim((string) ($r['campboss_reason_code'] ?? ''));
+                                $campbossReviewed = trim((string) ($r['campboss_reviewed_at'] ?? ''));
+                                $isEscalated = (int) ($r['is_escalated'] ?? 0);
+                                if ($submittedAt !== '' || $campbossReason !== '' || $campbossReviewed !== '' || $isEscalated === 1) {
+                                    $locks[$emp . '|' . $selectedDate] = true;
+                                }
+                            }
+                            $res->free();
+                        }
+                    }
+                    $stmt2->close();
+                }
+
+                $approvedSql = 'SELECT emp_code, override_is_approved FROM gcc_attendance_master.employee_att_daily_overrides ' .
+                    'WHERE emp_code IN (' . $placeholders . ') AND att_date = ?';
+                $stmt2 = $bd->prepare($approvedSql);
+                if ($stmt2) {
+                    bind_params($stmt2, $types2, $params2);
+                    if ($stmt2->execute()) {
+                        $res = $stmt2->get_result();
+                        if ($res) {
+                            while ($r = $res->fetch_assoc()) {
+                                $emp = trim((string) ($r['emp_code'] ?? ''));
+                                if ($emp === '') {
+                                    continue;
+                                }
+                                if ((int) ($r['override_is_approved'] ?? 0) === 1) {
+                                    $approved[$emp . '|' . $selectedDate] = true;
+                                }
+                            }
+                            $res->free();
+                        }
+                    }
+                    $stmt2->close();
+                }
+            }
 
             $insertSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
                 '(emp_code, att_date, override_work_hours, override_work_code, override_reason_code, override_reason_note, override_change_date, ' .
@@ -287,6 +762,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 $empCode = trim((string) ($empCodes[$i] ?? ''));
                 $attDate = trim((string) ($attDates[$i] ?? ''));
                 if ($empCode === '' || $attDate === '') {
+                    continue;
+                }
+
+                $key = $empCode . '|' . $attDate;
+                if (isset($locks[$key]) || isset($approved[$key])) {
+                    $skipped++;
                     continue;
                 }
 
@@ -408,6 +889,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 }
                 if ($deleted > 0) {
                     $message .= ' Cleared ' . $deleted . ' override(s).';
+                }
+                if ($skipped > 0) {
+                    $message .= ' Skipped ' . $skipped . ' locked row(s).';
                 }
                 set_flash('success', $message);
             }
@@ -861,6 +1345,13 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           $campLabel = 'Submitted';
                           $campClass = 'is-submitted';
                       }
+
+                      $isSubmitted = ($campLabel !== 'Not submitted');
+                      $lockInputs = ($overrideStatus === 1) || $isSubmitted;
+                      $canSubmitRow = (!$isSubmitted)
+                        && !$lockInputs
+                        && trim((string) ($row['override_hours'] ?? '')) === ''
+                        && trim((string) ($row['override_code'] ?? '')) === '';
                     ?>
                     <tr>
                       <td>
@@ -873,7 +1364,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                       <td><?= h($row['department']) ?></td>
                       <td><?= h($row['project_code']) ?></td>
                       <td>
-                        <input type="number" step="0.01" min="0" max="24" class="form-control form-control-sm" name="work_hours[]" placeholder="8.00" value="<?= h($row['override_hours']) ?>" <?= $overrideStatus === 1 ? 'disabled' : '' ?>>
+                        <input type="number" step="0.01" min="0" max="24" class="form-control form-control-sm" name="work_hours[]" placeholder="8.00" value="<?= h($row['override_hours']) ?>" <?= $lockInputs ? 'readonly' : '' ?>>
                       </td>
                       <td>
                         <input
@@ -884,14 +1375,14 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           autocomplete="off"
                           placeholder="Work code"
                           value="<?= h($row['override_code'] ?? '') ?>"
-                          <?= $overrideStatus === 1 ? 'disabled' : '' ?>
+                          <?= $lockInputs ? 'readonly' : '' ?>
                         >
                       </td>
                       <td>
                         <select
                           class="form-control form-control-sm js-override-reason"
                           name="override_reason_code[]"
-                          <?= $overrideStatus === 1 ? 'disabled' : '' ?>
+                          <?= $lockInputs ? 'disabled' : '' ?>
                           title=""
                         >
                           <option value="">-- Select --</option>
@@ -902,6 +1393,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
                             </option>
                           <?php endforeach; ?>
                         </select>
+                        <?php if ($lockInputs): ?>
+                          <input type="hidden" name="override_reason_code[]" value="<?= h($row['override_reason_code'] ?? '') ?>">
+                        <?php endif; ?>
                         <input
                           type="text"
                           class="form-control form-control-sm mt-1"
@@ -909,11 +1403,36 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           maxlength="255"
                           placeholder="Note (optional)"
                           value="<?= h($row['override_reason_note'] ?? '') ?>"
-                          <?= $overrideStatus === 1 ? 'disabled' : '' ?>
+                          <?= $lockInputs ? 'readonly' : '' ?>
                         >
                       </td>
-                      <td><span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span></td>
-                      <td><span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span></td>
+                      <td>
+                        <?php if ($isSubmitted): ?>
+                          <span class="text-muted">-</span>
+                        <?php else: ?>
+                          <button type="submit" name="row_save" value="<?= (int) $rowIndex ?>" class="btn btn-sm btn-primary" <?= $lockInputs ? 'disabled' : '' ?>>Save</button>
+                          <div class="mt-1">
+                            <span class="status-pill <?= h($overrideClass) ?>"><?= h($overrideLabel) ?></span>
+                          </div>
+                        <?php endif; ?>
+                      </td>
+                      <td>
+                        <?php if ($isSubmitted): ?>
+                          <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
+                        <?php else: ?>
+                          <button
+                            type="submit"
+                            name="row_submit"
+                            value="<?= (int) $rowIndex ?>"
+                            class="btn btn-sm btn-outline-secondary"
+                            <?= $canSubmitRow ? '' : 'disabled' ?>
+                            title="<?= $canSubmitRow ? '' : 'Clear overrides before submitting.' ?>"
+                          >Submit</button>
+                          <div class="mt-1">
+                            <span class="status-pill <?= h($campClass) ?>"><?= h($campLabel) ?></span>
+                          </div>
+                        <?php endif; ?>
+                      </td>
                     </tr>
                   <?php endforeach; ?>
                 <?php endif; ?>
@@ -931,10 +1450,11 @@ include __DIR__ . '/../admin/include/layout_top.php';
 </section>
 
 <script>
+  // Used by the shared work-code autocomplete in `admin/include/layout_bottom.php`.
   window.WORK_CODE_OPTIONS = <?= json_encode($workTypeOptions, JSON_UNESCAPED_SLASHES) ?>;
 
   (function () {
-    function setReasonTitle(selectEl) {
+    function setSelectTitle(selectEl) {
       if (!selectEl) return;
       var opt = selectEl.options[selectEl.selectedIndex];
       if (!opt) return;
@@ -942,41 +1462,101 @@ include __DIR__ . '/../admin/include/layout_top.php';
       selectEl.title = desc;
     }
 
+    function validateOverrideRow(tr) {
+      if (!tr) return true;
+      var hours = tr.querySelector('input[name=\"work_hours[]\"]');
+      var code = tr.querySelector('input[name=\"work_code[]\"]');
+      var reason = tr.querySelector('select[name=\"override_reason_code[]\"]');
+      if (!hours || !code || !reason) return true;
+
+      var hoursVal = (hours.value || '').trim();
+      var codeVal = (code.value || '').trim();
+
+      if (hoursVal !== '' && codeVal !== '') {
+        alert('Choose only one override per row: work hours OR work code (not both).');
+        code.focus();
+        return false;
+      }
+
+      if (hoursVal !== '') {
+        var n = Number(hoursVal);
+        if (!isFinite(n)) {
+          alert('Invalid hours. Please enter a number between 0 and 24.');
+          hours.focus();
+          return false;
+        }
+        if (n < 0 || n > 24) {
+          alert('Hours must be between 0 and 24.');
+          hours.focus();
+          return false;
+        }
+        if ((reason.value || '').trim() === '') {
+          alert('Reason is required when overriding hours. Please select a reason.');
+          reason.focus();
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    function validateSubmitRow(tr) {
+      if (!tr) return true;
+      var hours = tr.querySelector('input[name=\"work_hours[]\"]');
+      var code = tr.querySelector('input[name=\"work_code[]\"]');
+      if (!hours || !code) return true;
+
+      var hoursVal = (hours.value || '').trim();
+      var codeVal = (code.value || '').trim();
+      if (hoursVal !== '' || codeVal !== '') {
+        alert('To submit to camp boss, clear override hours and override code first.');
+        if (hoursVal !== '') {
+          hours.focus();
+        } else {
+          code.focus();
+        }
+        return false;
+      }
+
+      return true;
+    }
+
     var form = document.querySelector('form[method=\"post\"]');
     if (form) {
       form.addEventListener('submit', function (e) {
         var submitter = e.submitter || document.activeElement;
         if (!submitter) return;
-        if (!(submitter.name === 'action' && submitter.value === 'save_overrides')) return;
 
-        var rows = form.querySelectorAll('tbody tr');
-        for (var i = 0; i < rows.length; i++) {
-          var tr = rows[i];
-          var hours = tr.querySelector('input[name=\"work_hours[]\"]');
-          var code = tr.querySelector('input[name=\"work_code[]\"]');
-          var reason = tr.querySelector('select[name=\"override_reason_code[]\"]');
-          if (!hours || !code || !reason) continue;
-
-          var hoursVal = (hours.value || '').trim();
-          var codeVal = (code.value || '').trim();
-
-          if (hoursVal !== '' && codeVal !== '') {
-            e.preventDefault();
-            alert('Choose only one override per row: work hours OR work code (not both).');
-            code.focus();
-            return;
+        if (submitter.name === 'action' && submitter.value === 'save_overrides') {
+          var rows = form.querySelectorAll('tbody tr');
+          for (var i = 0; i < rows.length; i++) {
+            if (!validateOverrideRow(rows[i])) {
+              e.preventDefault();
+              return;
+            }
           }
-          if (hoursVal !== '' && (reason.value || '').trim() === '') {
+          return;
+        }
+
+        if (submitter.name === 'row_save') {
+          var tr = submitter.closest('tr');
+          if (!validateOverrideRow(tr)) {
             e.preventDefault();
-            alert('Reason is required when overriding hours. Please select a reason.');
-            reason.focus();
-            return;
           }
+          return;
+        }
+
+        if (submitter.name === 'row_submit') {
+          var tr = submitter.closest('tr');
+          if (!validateSubmitRow(tr)) {
+            e.preventDefault();
+          }
+          return;
         }
       });
     }
 
-    // UX: keep inputs mutually exclusive while typing.
+    // UX: keep inputs mutually exclusive while editing.
     var dataRows = document.querySelectorAll('tbody tr');
     for (var k = 0; k < dataRows.length; k++) {
       var row = dataRows[k];
@@ -987,6 +1567,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
         hoursEl.addEventListener('input', function () {
           if ((hoursEl.value || '').trim() !== '') {
             codeEl.value = '';
+            codeEl.title = '';
           }
         });
         codeEl.addEventListener('input', function () {
@@ -997,13 +1578,14 @@ include __DIR__ . '/../admin/include/layout_top.php';
       })(hoursInput, codeInput);
     }
 
-    var selects = document.querySelectorAll('select.js-override-reason');
-    for (var j = 0; j < selects.length; j++) {
+    var reasonSelects = document.querySelectorAll('select.js-override-reason');
+    for (var j = 0; j < reasonSelects.length; j++) {
       (function (sel) {
-        setReasonTitle(sel);
-        sel.addEventListener('change', function () { setReasonTitle(sel); });
-      })(selects[j]);
+        setSelectTitle(sel);
+        sel.addEventListener('change', function () { setSelectTitle(sel); });
+      })(reasonSelects[j]);
     }
+
   })();
 </script>
 
