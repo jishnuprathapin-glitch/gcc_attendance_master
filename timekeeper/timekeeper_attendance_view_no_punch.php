@@ -191,11 +191,13 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
             '("MISS_PUNCH","Miss Punch",NULL,NULL),' .
             '("NIGHT_SHIFT","Night Shift",NULL,NULL),' .
             '("NIGHT_DAY_SHIFT","Night Day Shift",NULL,NULL),' .
-            '("COMP_OFF","Compensatory Off",NULL,NULL)'
+            '("COMP_OFF","Compensatory Off",NULL,NULL),' .
+            '("OTH","Others",NULL,NULL)'
         );
 
         $reasonResult = $bd->query(
-            'SELECT reason_code, reason_text FROM gcc_attendance_master.attendance_no_punch_reasons ORDER BY reason_text, reason_code'
+            'SELECT reason_code, reason_text FROM gcc_attendance_master.attendance_no_punch_reasons ' .
+            'ORDER BY CASE WHEN UPPER(TRIM(reason_code)) = \'OTH\' THEN 1 ELSE 0 END, reason_text, reason_code'
         );
         if ($reasonResult) {
             while ($row = $reasonResult->fetch_assoc()) {
