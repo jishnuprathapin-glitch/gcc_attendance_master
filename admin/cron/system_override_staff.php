@@ -172,13 +172,14 @@ function run_override_rule(
         $attDate = trim((string) ($row['punch_date'] ?? ''));
         $firstLog = trim((string) ($row['first_log'] ?? ''));
         $lastLog = trim((string) ($row['last_log'] ?? ''));
-        $workCode = trim((string) ($row['work_code'] ?? ''));
+        $workCode = strtoupper(trim((string) ($row['work_code'] ?? '')));
 
         if ($empCode === '' || $attDate === '') {
             $skippedInvalid++;
             continue;
         }
-        if ($workCode !== '') {
+        // Treat SUB as eligible (same as empty) for system auto-overrides.
+        if ($workCode !== '' && $workCode !== 'SUB') {
             $skippedInvalid++;
             continue;
         }
