@@ -29,6 +29,27 @@ if (!ensure_attendance_override_table($bd)) {
     exit(1);
 }
 
+function ensure_employee_att_daily_index(mysqli $bd): bool {
+    $res = $bd->query(
+        "SHOW INDEX FROM `gcc_attendance_master`.`employee_att_daily` WHERE Key_name = 'idx_emp_att_date'"
+    );
+    if ($res) {
+        if ($res->num_rows > 0) {
+            $res->free();
+            return true;
+        }
+        $res->free();
+    }
+    // Speeds up joins/filters on (emp_code, att_date) used by system override queries.
+    return (bool) $bd->query(
+        'CREATE INDEX `idx_emp_att_date` ON `gcc_attendance_master`.`employee_att_daily` (`emp_code`, `att_date`)'
+    );
+}
+
+if (!ensure_employee_att_daily_index($bd)) {
+    fwrite(STDERR, "Warning: unable to create employee_att_daily index; system overrides may be slow.\n");
+}
+
 function ensure_override_notes_table(mysqli $bd): bool {
     $sql = 'CREATE TABLE IF NOT EXISTS `gcc_attendance_master`.`attendance_override_notes` (' .
         '`id` int NOT NULL AUTO_INCREMENT,' .
@@ -66,6 +87,53 @@ function parse_log_time(?string $value): ?DateTimeImmutable {
     }
 }
 
+function parse_att_date(?string $value): ?DateTimeImmutable {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return null;
+    }
+    $dt = DateTimeImmutable::createFromFormat('Y-m-d', $value);
+    if (!$dt) {
+        return null;
+    }
+    return $dt;
+}
+
+function is_sunday_date(?string $attDate): bool {
+    static $cache = [];
+
+    $key = trim((string) $attDate);
+    if ($key === '') {
+        return false;
+    }
+    if (array_key_exists($key, $cache)) {
+        return $cache[$key];
+    }
+
+    $dt = parse_att_date($key);
+    $isSunday = $dt ? ($dt->format('w') === '0') : false;
+    $cache[$key] = $isSunday;
+    return $isSunday;
+}
+
+function normalize_work_code(?string $value): string {
+    return strtoupper(trim((string) $value));
+}
+
+function has_work_code(?string $value): bool {
+    return normalize_work_code($value) !== '';
+}
+
+function is_public_holiday(?string $value): bool {
+    return normalize_work_code($value) === 'PHL';
+}
+
+function is_wcxh(?string $value): bool {
+    // "WCXH" in the spec represents work codes that should carry into Sunday when both sides match.
+    // Current default: any non-empty code qualifies.
+    return has_work_code($value);
+}
+
 $notesEnabled = ensure_override_notes_table($bd);
 if (!$notesEnabled) {
     fwrite(STDERR, "Warning: attendance_override_notes table not available; notes will be skipped.\n");
@@ -75,6 +143,15 @@ $daysBack = 60;
 $today = new DateTimeImmutable('today');
 $startDate = $today->modify('-' . ($daysBack - 1) . ' days')->format('Y-m-d');
 $endDate = $today->format('Y-m-d');
+
+$onlyRule = null;
+if (isset($argv) && is_array($argv)) {
+    foreach ($argv as $arg) {
+        if (strpos($arg, '--only=') === 0) {
+            $onlyRule = trim((string) substr($arg, 7));
+        }
+    }
+}
 
 $insertSql = 'INSERT IGNORE INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
     '(emp_code, att_date, override_work_hours, override_work_code, override_change_date, ' .
@@ -289,56 +366,362 @@ function run_override_rule(
     ];
 }
 
-$staff = run_override_rule(
-    $bd,
-    $insertStmt,
-    $noteStmt,
-    $notesEnabled,
-    $startDate,
-    $endDate,
-    ['01'],
-    '8.00',
-    'AUTO_8H_STAFF',
-    'AUTO_8H_STAFF: STAFF has at least one punch; set 8 hours',
-    null,
-    null,
-    false,
-    false
-);
+function run_sunday_work_code_rule(
+    mysqli $bd,
+    mysqli_stmt $insertStmt,
+    ?mysqli_stmt $noteStmt,
+    bool $notesEnabled,
+    string $startDate,
+    string $endDate
+): array {
+    $start = parse_att_date($startDate);
+    $end = parse_att_date($endDate);
+    if (!$start || !$end) {
+        return ['error' => 'Invalid date range provided.'];
+    }
 
-$nonStaff = run_override_rule(
-    $bd,
-    $insertStmt,
-    $noteStmt,
-    $notesEnabled,
-    $startDate,
-    $endDate,
-    ['02'],
-    '10.00',
-    'AUTO_10H_NON_STAFF',
-    'AUTO_10H_NON_STAFF: NON STAFF login incomplete; set 10 hours',
-    null,
-    null,
-    false,
-    true
-);
+    // Pull a little extra context so "nearest previous/next" can cross the window edge.
+    $extStart = $start->modify('-14 days')->format('Y-m-d');
+    $extEnd = $end->modify('+14 days')->format('Y-m-d');
 
-$nonStaffOt = run_override_rule(
-    $bd,
-    $insertStmt,
-    $noteStmt,
-    $notesEnabled,
-    $startDate,
-    $endDate,
-    ['02', '03'],
-    '10.00',
-    'OT_ELG_EMPLOYEE_9_12',
-    'OT_ELG_EMPLOYEE_9_12: duration 9-12h; set 10 hours',
-    32400,
-    43200,
-    true,
-    false
-);
+    // Preload existing overrides (core range only) so we never overwrite a manual/system override row.
+    $existingOverrides = [];
+    $ovStmt = $bd->prepare(
+        'SELECT emp_code, att_date FROM gcc_attendance_master.employee_att_daily_overrides WHERE att_date BETWEEN ? AND ?'
+    );
+    if ($ovStmt) {
+        $ovStmt->bind_param('ss', $startDate, $endDate);
+        if ($ovStmt->execute()) {
+            $ovRes = $ovStmt->get_result();
+            if ($ovRes) {
+                while ($row = $ovRes->fetch_assoc()) {
+                    $emp = trim((string) ($row['emp_code'] ?? ''));
+                    $date = trim((string) ($row['att_date'] ?? ''));
+                    if ($emp !== '' && $date !== '') {
+                        $existingOverrides[$emp . '|' . $date] = true;
+                    }
+                }
+                $ovRes->free();
+            }
+        }
+        $ovStmt->close();
+    }
+
+    $sql = 'SELECT emp_code, att_date, work_code ' .
+        'FROM gcc_attendance_master.employee_att_daily ' .
+        'WHERE att_date BETWEEN ? AND ? ' .
+        'ORDER BY emp_code, att_date';
+
+    $stmt = $bd->prepare($sql);
+    if (!$stmt) {
+        return ['error' => 'Unable to prepare attendance query.'];
+    }
+    $stmt->bind_param('ss', $extStart, $extEnd);
+    if (!$stmt->execute()) {
+        $stmt->close();
+        return ['error' => 'Unable to execute attendance query.'];
+    }
+
+    $result = $stmt->get_result();
+    if (!$result) {
+        $stmt->close();
+        return ['error' => 'Unable to fetch attendance rows.'];
+    }
+
+    $totalSundays = 0;
+    $eligible = 0;
+    $inserted = 0;
+    $skippedHasCode = 0;
+    $skippedOverrideExists = 0;
+    $notesInserted = 0;
+
+    $currentEmp = null;
+    $days = [];
+
+    $processEmployee = static function (
+        ?string $empCode,
+        array $days,
+        array $existingOverrides,
+        mysqli_stmt $insertStmt,
+        ?mysqli_stmt $noteStmt,
+        bool $notesEnabled,
+        string $startDate,
+        string $endDate,
+        int &$totalSundays,
+        int &$eligible,
+        int &$inserted,
+        int &$skippedHasCode,
+        int &$skippedOverrideExists,
+        int &$notesInserted
+    ): void {
+        if ($empCode === null || $empCode === '') {
+            return;
+        }
+        if (empty($days)) {
+            return;
+        }
+
+        $systemEmail = 'SYSTEM';
+        $systemName = 'SYSTEM';
+
+        for ($i = 0, $n = count($days); $i < $n; $i++) {
+            $attDate = $days[$i]['att_date'] ?? '';
+            $workCode = $days[$i]['work_code'] ?? null;
+
+            if (!is_sunday_date($attDate)) {
+                continue;
+            }
+            if ($attDate < $startDate || $attDate > $endDate) {
+                continue;
+            }
+
+            $totalSundays++;
+
+            // If a Sunday already has a work code, do nothing.
+            if (has_work_code($workCode)) {
+                $skippedHasCode++;
+                continue;
+            }
+
+            // Never overwrite an existing override row.
+            if (isset($existingOverrides[$empCode . '|' . $attDate])) {
+                $skippedOverrideExists++;
+                continue;
+            }
+
+            $prevCode = null;
+            for ($j = $i - 1; $j >= 0; $j--) {
+                $candidateDate = $days[$j]['att_date'] ?? '';
+                if (is_sunday_date($candidateDate)) {
+                    continue;
+                }
+                $candidateCode = $days[$j]['work_code'] ?? null;
+                if (is_public_holiday($candidateCode)) {
+                    continue;
+                }
+                $prevCode = $candidateCode;
+                break;
+            }
+
+            $nextCode = null;
+            for ($k = $i + 1; $k < $n; $k++) {
+                $candidateDate = $days[$k]['att_date'] ?? '';
+                if (is_sunday_date($candidateDate)) {
+                    continue;
+                }
+                $candidateCode = $days[$k]['work_code'] ?? null;
+                if (is_public_holiday($candidateCode)) {
+                    continue;
+                }
+                $nextCode = $candidateCode;
+                break;
+            }
+
+            $prevNorm = normalize_work_code($prevCode);
+            $nextNorm = normalize_work_code($nextCode);
+
+            $newCode = 'HOL';
+            if (is_wcxh($prevNorm) && $prevNorm !== '' && $prevNorm === $nextNorm) {
+                $newCode = $prevNorm;
+            }
+
+            $eligible++;
+            $changeDate = gmdate('Y-m-d H:i:s');
+            $approvedDate = $changeDate;
+            $isApproved = 1;
+            $overrideHours = null;
+            $overrideCode = $newCode;
+
+            $changedByEmail = $systemEmail;
+            $changedByName = $systemName;
+            $approvedByEmail = $systemEmail;
+            $approvedByName = $systemName;
+
+            $insertStmt->bind_param(
+                'sssssssisss',
+                $empCode,
+                $attDate,
+                $overrideHours,
+                $overrideCode,
+                $changeDate,
+                $changedByEmail,
+                $changedByName,
+                $isApproved,
+                $approvedByEmail,
+                $approvedByName,
+                $approvedDate
+            );
+
+            if (!$insertStmt->execute()) {
+                fwrite(STDERR, "Sunday work-code override insert failed for {$empCode} {$attDate}: {$insertStmt->error}\n");
+                continue;
+            }
+            if ($insertStmt->affected_rows < 1) {
+                continue;
+            }
+
+            $inserted++;
+
+            if ($notesEnabled && $noteStmt) {
+                $reasonCode = 'AUTO_SUN_WORK_CODE';
+                $reasonNote = "AUTO_SUN_WORK_CODE: Sunday empty; prev={$prevNorm}; next={$nextNorm}; set={$newCode}";
+                $noteStmt->bind_param(
+                    'ssssssss',
+                    $empCode,
+                    $attDate,
+                    $overrideHours,
+                    $overrideCode,
+                    $reasonCode,
+                    $reasonNote,
+                    $systemEmail,
+                    $systemName
+                );
+                if ($noteStmt->execute()) {
+                    $notesInserted++;
+                }
+            }
+        }
+    };
+
+    while ($row = $result->fetch_assoc()) {
+        $emp = trim((string) ($row['emp_code'] ?? ''));
+        $date = trim((string) ($row['att_date'] ?? ''));
+        if ($emp === '' || $date === '') {
+            continue;
+        }
+
+        if ($currentEmp !== null && $emp !== $currentEmp) {
+            $processEmployee(
+                $currentEmp,
+                $days,
+                $existingOverrides,
+                $insertStmt,
+                $noteStmt,
+                $notesEnabled,
+                $startDate,
+                $endDate,
+                $totalSundays,
+                $eligible,
+                $inserted,
+                $skippedHasCode,
+                $skippedOverrideExists,
+                $notesInserted
+            );
+            $days = [];
+        }
+
+        $currentEmp = $emp;
+        $days[] = [
+            'att_date' => $date,
+            'work_code' => $row['work_code'] ?? null,
+        ];
+    }
+
+    if ($currentEmp !== null) {
+        $processEmployee(
+            $currentEmp,
+            $days,
+            $existingOverrides,
+            $insertStmt,
+            $noteStmt,
+            $notesEnabled,
+            $startDate,
+            $endDate,
+            $totalSundays,
+            $eligible,
+            $inserted,
+            $skippedHasCode,
+            $skippedOverrideExists,
+            $notesInserted
+        );
+    }
+
+    $result->free();
+    $stmt->close();
+
+    return [
+        'sundays' => $totalSundays,
+        'eligible' => $eligible,
+        'inserted' => $inserted,
+        'skippedHasCode' => $skippedHasCode,
+        'skippedOverrideExists' => $skippedOverrideExists,
+        'notesInserted' => $notesInserted,
+    ];
+}
+
+$staff = ['total' => 0, 'eligible' => 0, 'inserted' => 0, 'skippedDuration' => 0, 'skippedInvalid' => 0, 'notesInserted' => 0];
+$nonStaff = ['total' => 0, 'eligible' => 0, 'inserted' => 0, 'skippedDuration' => 0, 'skippedInvalid' => 0, 'notesInserted' => 0];
+$nonStaffOt = ['total' => 0, 'eligible' => 0, 'inserted' => 0, 'skippedDuration' => 0, 'skippedInvalid' => 0, 'notesInserted' => 0];
+$sundayWorkCode = ['sundays' => 0, 'eligible' => 0, 'inserted' => 0, 'skippedHasCode' => 0, 'skippedOverrideExists' => 0, 'notesInserted' => 0];
+
+if ($onlyRule !== null && !in_array($onlyRule, ['hours', 'sunday_work_code'], true)) {
+    fwrite(STDERR, "Warning: unknown --only value '{$onlyRule}'. Expected 'hours' or 'sunday_work_code'. Running all rules.\n");
+    $onlyRule = null;
+}
+
+if ($onlyRule === null || $onlyRule === 'hours') {
+    $staff = run_override_rule(
+        $bd,
+        $insertStmt,
+        $noteStmt,
+        $notesEnabled,
+        $startDate,
+        $endDate,
+        ['01'],
+        '8.00',
+        'AUTO_8H_STAFF',
+        'AUTO_8H_STAFF: STAFF has at least one punch; set 8 hours',
+        null,
+        null,
+        false,
+        false
+    );
+
+    $nonStaff = run_override_rule(
+        $bd,
+        $insertStmt,
+        $noteStmt,
+        $notesEnabled,
+        $startDate,
+        $endDate,
+        ['02'],
+        '10.00',
+        'AUTO_10H_NON_STAFF',
+        'AUTO_10H_NON_STAFF: NON STAFF login incomplete; set 10 hours',
+        null,
+        null,
+        false,
+        true
+    );
+
+    $nonStaffOt = run_override_rule(
+        $bd,
+        $insertStmt,
+        $noteStmt,
+        $notesEnabled,
+        $startDate,
+        $endDate,
+        ['02', '03'],
+        '10.00',
+        'OT_ELG_EMPLOYEE_9_12',
+        'OT_ELG_EMPLOYEE_9_12: duration 9-12h; set 10 hours',
+        32400,
+        43200,
+        true,
+        false
+    );
+}
+
+if ($onlyRule === null || $onlyRule === 'sunday_work_code') {
+    $sundayWorkCode = run_sunday_work_code_rule(
+        $bd,
+        $insertStmt,
+        $noteStmt,
+        $notesEnabled,
+        $startDate,
+        $endDate
+    );
+}
 
 $insertStmt->close();
 if ($noteStmt) {
@@ -362,8 +745,16 @@ if (isset($nonStaffOt['error'])) {
 } else {
     fwrite(STDOUT, "OT_ELG_EMPLOYEE_9_12 (02,03) - Candidates: {$nonStaffOt['total']}, Eligible: {$nonStaffOt['eligible']}, Inserted: {$nonStaffOt['inserted']}, Skipped (duration): {$nonStaffOt['skippedDuration']}, Skipped (invalid): {$nonStaffOt['skippedInvalid']}\n");
 }
+if (isset($sundayWorkCode['error'])) {
+    fwrite(STDOUT, "SUNDAY_WORK_CODE: {$sundayWorkCode['error']}\n");
+} else {
+    fwrite(
+        STDOUT,
+        "SUNDAY_WORK_CODE - Sundays: {$sundayWorkCode['sundays']}, Eligible: {$sundayWorkCode['eligible']}, Inserted: {$sundayWorkCode['inserted']}, Skipped (has code): {$sundayWorkCode['skippedHasCode']}, Skipped (override exists): {$sundayWorkCode['skippedOverrideExists']}\n"
+    );
+}
 if ($notesEnabled) {
-    $notesTotal = ($staff['notesInserted'] ?? 0) + ($nonStaff['notesInserted'] ?? 0) + ($nonStaffOt['notesInserted'] ?? 0);
+    $notesTotal = ($staff['notesInserted'] ?? 0) + ($nonStaff['notesInserted'] ?? 0) + ($nonStaffOt['notesInserted'] ?? 0) + ($sundayWorkCode['notesInserted'] ?? 0);
     fwrite(STDOUT, "Notes inserted: {$notesTotal}\n");
 } else {
     fwrite(STDOUT, "Notes inserted: 0 (notes disabled)\n");
