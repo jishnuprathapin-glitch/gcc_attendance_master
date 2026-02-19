@@ -87,7 +87,12 @@ if ($remember && session_status() === PHP_SESSION_ACTIVE) {
     ]);
 }
 
-header('Location: ' . admin_url('Attendance_Dashboard.php'));
+$landingUrl = resolve_attendance_landing_url(
+    $bd,
+    (int) $user['id'],
+    (string) $user['role']
+);
+header('Location: ' . $landingUrl);
 exit;
 
 ?>

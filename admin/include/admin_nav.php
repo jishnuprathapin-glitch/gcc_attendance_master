@@ -1,5 +1,6 @@
 <?php
 $nav_mode = $nav_mode ?? 'admin';
+$appBase = function_exists('attendance_app_base') ? attendance_app_base() : '/gcc_attendance_master';
 $script = $_SERVER['SCRIPT_NAME'] ?? '';
 if ($script === '') {
     if ($nav_mode === 'timekeeper') {
@@ -14,23 +15,28 @@ if ($script === '') {
 }
 $links = ($nav_mode === 'timekeeper')
     ? [
+        ['label' => 'Dashboard', 'path' => 'timekeeper_dashboard.php', 'icon' => 'fas fa-tachometer-alt'],
         ['label' => 'Attendance Daily', 'path' => 'timekeeper_attendance_view.php', 'icon' => 'fas fa-calendar-alt'],
         ['label' => 'No Punch', 'path' => 'timekeeper_attendance_view_no_punch.php', 'icon' => 'fas fa-user-times'],
         ['label' => 'Access Requests', 'path' => 'timekeeper_project_request.php', 'icon' => 'fas fa-key'],
       ]
     : (($nav_mode === 'campboss')
         ? [
+            ['label' => 'Dashboard', 'path' => 'campboss_dashboard.php', 'icon' => 'fas fa-tachometer-alt'],
             ['label' => 'No Punch Review', 'path' => 'campboss_attendance_view_no_punch.php', 'icon' => 'fas fa-clipboard-check'],
           ]
         : [
             ['label' => 'Dashboard', 'path' => 'Attendance_Dashboard.php', 'icon' => 'fas fa-home'],
             ['label' => 'HR Insights', 'path' => 'Attendance_HRDashboard.php', 'icon' => 'fas fa-heartbeat'],
+            ['label' => 'Timekeeper Dashboard', 'path' => $appBase . '/timekeeper/timekeeper_dashboard.php', 'icon' => 'fas fa-user-clock'],
+            ['label' => 'Camp Boss Dashboard', 'path' => $appBase . '/campboss/campboss_dashboard.php', 'icon' => 'fas fa-campground'],
             ['label' => 'Employees', 'path' => 'Attendance_Employees.php', 'icon' => 'fas fa-users'],
             ['label' => 'Attendance Daily', 'path' => 'Attendance_AttendanceDaily.php', 'icon' => 'fas fa-calendar-alt'],
             ['label' => 'Adjust Time', 'path' => 'Attendance_AttendanceAdjustTime.php', 'icon' => 'fas fa-clock'],
             ['label' => 'Approvals', 'path' => 'Attendance_AttendanceApproval.php', 'icon' => 'fas fa-check-circle'],
             ['label' => 'Device Mapping', 'path' => 'Attendance_DeviceMapping.php', 'icon' => 'fas fa-project-diagram'],
             ['label' => 'Timekeeper Requests', 'path' => 'Attendance_TimekeeperAccess.php', 'icon' => 'fas fa-user-check'],
+            ['label' => 'Camp Boss Camps', 'path' => 'Attendance_CampbossCampMapping.php', 'icon' => 'fas fa-map-marked-alt'],
           ]);
 $currentPage = strtolower(basename($_SERVER['SCRIPT_NAME'] ?? ''));
 ?>
@@ -163,8 +169,18 @@ $currentPage = strtolower(basename($_SERVER['SCRIPT_NAME'] ?? ''));
   <div class="att-nav-head"></div>
   <div class="att-nav-links">
     <?php foreach ($links as $link): ?>
-      <?php $isActive = strtolower($link['path']) === $currentPage; ?>
-      <a class="att-nav-link <?= $isActive ? 'is-active' : '' ?>" href="<?= h($base . '/' . ltrim($link['path'], '/')) ?>">
+      <?php
+        $path = (string) ($link['path'] ?? '');
+        $resolvedPath = parse_url($path, PHP_URL_PATH);
+        if (!is_string($resolvedPath) || $resolvedPath === '') {
+            $resolvedPath = $path;
+        }
+        $targetPage = strtolower(basename($resolvedPath));
+        $isActive = $targetPage === $currentPage;
+        $isAbsolutePath = (strpos($path, '/') === 0) || (bool) preg_match('#^https?://#i', $path);
+        $href = $isAbsolutePath ? $path : ($base . '/' . ltrim($path, '/'));
+      ?>
+      <a class="att-nav-link <?= $isActive ? 'is-active' : '' ?>" href="<?= h($href) ?>">
         <i class="<?= h($link['icon']) ?>"></i>
         <span><?= h($link['label']) ?></span>
       </a>

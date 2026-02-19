@@ -1389,6 +1389,23 @@ include __DIR__ . '/include/layout_top.php';
       validateDuplicateRows();
     }
 
+    function showSpectacularPopup(message, type, title) {
+      const text = String(message || '').trim();
+      if (text === '') {
+        return;
+      }
+      if (window.AttendancePopup && typeof window.AttendancePopup.show === 'function') {
+        window.AttendancePopup.show({
+          message: text,
+          type: type || 'warning',
+          title: title || 'Action Required',
+          durationMs: 3600,
+        });
+        return;
+      }
+      window.alert(text);
+    }
+
     function setupRow(row) {
       if (!row) {
         return;
@@ -1464,7 +1481,7 @@ include __DIR__ . '/include/layout_top.php';
         return;
       }
       if (rowsBody.querySelectorAll('.override-row').length + added.length > maxRows) {
-        alert('Too many rows. Please reduce the batch size (max ' + maxRows + ').');
+        showSpectacularPopup('Too many rows. Please reduce the batch size (max ' + maxRows + ').', 'warning');
         return;
       }
       added.forEach((values) => addRow(values));
@@ -1489,12 +1506,12 @@ include __DIR__ . '/include/layout_top.php';
         const employees = parseEmployeeList(bulkEmployeeInput ? bulkEmployeeInput.value : '');
         const dates = buildDateRange(bulkStart ? bulkStart.value : '', bulkEnd ? bulkEnd.value : '');
         if (!employees.length || !dates.length) {
-          alert('Please provide employee codes and a valid date range.');
+          showSpectacularPopup('Please provide employee codes and a valid date range.', 'warning');
           return;
         }
         const total = employees.length * dates.length;
         if (total > maxRows) {
-          alert('Too many rows (' + total + '). Please reduce the date range or employee list (max ' + maxRows + ').');
+          showSpectacularPopup('Too many rows (' + total + '). Please reduce the date range or employee list (max ' + maxRows + ').', 'warning');
           return;
         }
         pruneEmptyRows();
@@ -1527,7 +1544,7 @@ include __DIR__ . '/include/layout_top.php';
       importPasteBtn.addEventListener('click', () => {
         const text = pasteRows ? pasteRows.value : '';
         if (!text.trim()) {
-          alert('Paste some rows first.');
+          showSpectacularPopup('Paste some rows first.', 'warning');
           return;
         }
         pruneEmptyRows();

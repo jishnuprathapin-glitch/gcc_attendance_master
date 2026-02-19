@@ -124,6 +124,22 @@ function has_work_code(?string $value): bool {
     return normalize_work_code($value) !== '';
 }
 
+function has_positive_work_hours($value): bool {
+    if ($value === null) {
+        return false;
+    }
+    if (is_string($value)) {
+        $value = trim($value);
+        if ($value === '') {
+            return false;
+        }
+    }
+    if (!is_numeric($value)) {
+        return false;
+    }
+    return ((float) $value) > 0.0;
+}
+
 function is_public_holiday(?string $value): bool {
     return normalize_work_code($value) === 'PHL';
 }
@@ -407,7 +423,7 @@ function run_sunday_work_code_rule(
         $ovStmt->close();
     }
 
-    $sql = 'SELECT emp_code, att_date, work_code ' .
+    $sql = 'SELECT emp_code, att_date, work_code, work_hours ' .
         'FROM gcc_attendance_master.employee_att_daily ' .
         'WHERE att_date BETWEEN ? AND ? ' .
         'ORDER BY emp_code, att_date';
@@ -490,6 +506,7 @@ function run_sunday_work_code_rule(
             }
 
             $prevCode = null;
+            $prevHours = null;
             for ($j = $i - 1; $j >= 0; $j--) {
                 $candidateDate = $days[$j]['att_date'] ?? '';
                 if (is_sunday_date($candidateDate)) {
@@ -500,6 +517,7 @@ function run_sunday_work_code_rule(
                     continue;
                 }
                 $prevCode = $candidateCode;
+                $prevHours = $days[$j]['work_hours'] ?? null;
                 break;
             }
 
@@ -519,9 +537,10 @@ function run_sunday_work_code_rule(
 
             $prevNorm = normalize_work_code($prevCode);
             $nextNorm = normalize_work_code($nextCode);
+            $prevCodeEmptyWithHours = ($prevNorm === '' && has_positive_work_hours($prevHours));
 
             $newCode = 'HOL';
-            if (is_wcxh($prevNorm) && $prevNorm !== '' && $prevNorm === $nextNorm) {
+            if (!$prevCodeEmptyWithHours && is_wcxh($prevNorm) && $prevNorm !== '' && $prevNorm === $nextNorm) {
                 $newCode = $prevNorm;
             }
 
@@ -614,6 +633,7 @@ function run_sunday_work_code_rule(
         $days[] = [
             'att_date' => $date,
             'work_code' => $row['work_code'] ?? null,
+            'work_hours' => $row['work_hours'] ?? null,
         ];
     }
 

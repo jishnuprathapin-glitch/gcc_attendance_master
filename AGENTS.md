@@ -172,3 +172,10 @@ Script behavior:
 Review steps:
 - Check layout/legibility, buttons, drag/drop, and any critical interactions.
 - If export exists, click export, download file, open it, and validate contents.
+
+## UX Non-Negotiable
+- No full page reload for any button click, submit, save, validate, approve, or reject flow.
+- All form/button actions must use AJAX (`fetch`/`XMLHttpRequest`) and update UI inline.
+- Validation errors must be shown inline without reload.
+- Success/failure feedback must be shown inline without reload.
+- Treat any reload-based interaction as a bug unless explicitly approved by user.

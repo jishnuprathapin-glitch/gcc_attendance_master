@@ -90,6 +90,20 @@ function format_filter_list(array $items, int $max = 3): string {
     return implode(', ', $head) . ' +' . ($count - $max);
 }
 
+function parse_override_hours($value): ?float {
+    if ($value === null) {
+        return null;
+    }
+    if (!is_scalar($value)) {
+        return null;
+    }
+    $normalized = trim((string) $value);
+    if ($normalized === '' || !is_numeric($normalized)) {
+        return null;
+    }
+    return (float) $normalized;
+}
+
 function json_response(array $payload, int $status = 200): void {
     header('Content-Type: application/json');
     http_response_code($status);
@@ -622,7 +636,7 @@ if (!$loadError && isset($bd) && $bd instanceof mysqli) {
     }
 
     $escalationSql = 'SELECT r.emp_code, r.att_date, r.campboss_reason_code, r.campboss_note, ' .
-        'r.campboss_reviewed_at, r.escalated_at, h.emp_name, h.desg_name, h.dept_name, h.jbno, ' .
+        'r.campboss_reviewed_at, r.escalated_at, r.transfer_to_project_code, r.transfer_to_project_name, r.transfer_to_camp_code, r.transfer_to_camp_name, h.emp_name, h.desg_name, h.dept_name, h.jbno, ' .
         'rr.reason_text ' .
         'FROM gcc_attendance_master.attendance_no_punch_reviews r ' .
         'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci ' .
@@ -674,7 +688,18 @@ if (!$loadError && isset($bd) && $bd instanceof mysqli) {
     }
 }
 
-$pendingCount = count($pending);
+$pendingStandard = [];
+$pendingOvertime = [];
+foreach ($pending as $row) {
+    $hours = parse_override_hours($row['override_work_hours'] ?? null);
+    if ($hours !== null && $hours > 10) {
+        $pendingOvertime[] = $row;
+    } else {
+        $pendingStandard[] = $row;
+    }
+}
+
+$pendingCount = count($pendingStandard) + count($pendingOvertime);
 $escalationCount = count($escalations);
 $anomalyCount = count($anomalies);
 $pendingMeta = $hasQuery ? 'matching pending overrides' : 'latest pending overrides';
@@ -872,6 +897,76 @@ include __DIR__ . '/include/layout_top.php';
     border-radius: 10px;
   }
 
+  .approval-accordion {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .approval-accordion-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .approval-accordion-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    border: none;
+    background: transparent;
+    padding: 0;
+    color: var(--approval-ink);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .approval-accordion-toggle .card-title {
+    margin: 0;
+  }
+
+  .approval-accordion-toggle-indicator {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    border: 1px solid rgba(31, 60, 136, 0.28);
+    background: rgba(31, 60, 136, 0.08);
+    color: #1f3c88;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+  }
+
+  .approval-accordion-toggle[aria-expanded="true"] .approval-accordion-toggle-indicator {
+    transform: rotate(90deg);
+    background: #1f3c88;
+    color: #fff;
+  }
+
+  .approval-accordion-toggle-meta {
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 12px;
+    color: var(--approval-muted);
+    font-weight: 500;
+  }
+
+  .approval-accordion-panel {
+    background: #fff;
+  }
+
+  .approval-accordion-panel[hidden] {
+    display: none !important;
+  }
+
+  .approval-overtime-title {
+    color: #c2410c;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
   .approval-table thead th {
     background: #0f172a;
     color: #fff;
@@ -894,6 +989,7 @@ include __DIR__ . '/include/layout_top.php';
     display: inline-flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .approval-actions form {
@@ -952,6 +1048,10 @@ include __DIR__ . '/include/layout_top.php';
     .approval-stat {
       min-width: 140px;
     }
+    .approval-accordion-header {
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
   }
 </style>
 
@@ -998,7 +1098,7 @@ include __DIR__ . '/include/layout_top.php';
         <div class="approval-stats">
           <div class="approval-stat">
             <div class="approval-stat-label">Pending</div>
-            <div class="approval-stat-value js-pending-count"><?= h((string) $pendingCount) ?></div>
+            <div class="approval-stat-value js-pending-total-count"><?= h((string) $pendingCount) ?></div>
             <div class="approval-stat-meta"><?= h($pendingMeta) ?></div>
           </div>
           <div class="approval-stat">
@@ -1097,161 +1197,322 @@ include __DIR__ . '/include/layout_top.php';
       }
     ?>
 
-    <div class="card approval-card approval-card--table">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <h3 class="card-title">Pending overrides</h3>
-        <div class="approval-actions">
-          <span class="text-muted small"><span class="js-pending-count"><?= count($pending) ?></span> pending</span>
-          <?php if (!empty($pending)): ?>
-            <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-all-form js-bulk-action-form">
-              <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-              <input type="hidden" name="action" value="approve-all">
-              <?php foreach ($pending as $row): ?>
-                <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
-                <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
-              <?php endforeach; ?>
-              <button type="submit" class="btn btn-sm btn-outline-success approval-approve-all-btn">Approve all</button>
-            </form>
-            <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-all-form js-bulk-action-form">
-              <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-              <input type="hidden" name="action" value="reject-all">
-              <?php foreach ($pending as $row): ?>
-                <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
-                <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
-              <?php endforeach; ?>
-              <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-all-btn">Reject all</button>
-            </form>
-          <?php endif; ?>
-        </div>
-      </div>
-      <div class="card-body table-responsive p-0">
-        <table class="table table-bordered table-sm approval-table">
-          <thead>
-            <tr>
-              <th>Emp Code</th>
-              <th>Emp Name</th>
-              <th>Designation</th>
-              <th>Department</th>
-              <th>Date</th>
-              <th>Override hrs</th>
-              <th>Override code</th>
-              <th>Requested by</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            <?php if (!empty($pending)): ?>
-              <?php foreach ($pending as $row): ?>
-                <tr data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
-                  <td><?= h($row['emp_code'] ?? '-') ?></td>
-                  <td><?= h($row['emp_name'] ?? '-') ?></td>
-                  <td><?= h($row['desg_name'] ?? '-') ?></td>
-                  <td><?= h($row['dept_name'] ?? '-') ?></td>
-                  <td><?= h($row['att_date'] ?? '-') ?></td>
-                  <td><?= h($row['override_work_hours'] ?? '-') ?></td>
-                  <td><?= h($row['override_work_code'] ?? '-') ?></td>
-                  <td><?= h(format_person($row['override_changed_by_name'] ?? '', $row['override_changed_by_email'] ?? '')) ?></td>
-                  <td>
-                    <div class="approval-row-actions">
-                      <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-form">
-                        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-                        <input type="hidden" name="action" value="approve">
-                        <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
-                        <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
-                        <button type="submit" class="btn btn-sm btn-success approval-approve-btn">Approve</button>
-                      </form>
-                      <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-form">
-                        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
-                        <input type="hidden" name="action" value="reject">
-                        <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
-                        <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
-                        <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-btn">Reject</button>
-                      </form>
-                    </div>
-                  </td>
-                </tr>
-              <?php endforeach; ?>
-            <?php endif; ?>
-            <tr class="js-empty-row" style="<?= !empty($pending) ? 'display: none;' : '' ?>">
-              <td colspan="9" class="text-center text-muted">No pending overrides found.</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div class="card approval-card mt-4">
-        <div class="card-header">
-          <h3 class="card-title">Escalations (No show / Missing in camp)</h3>
-        </div>
-        <div class="card-body table-responsive p-0">
-          <table class="table table-bordered table-sm">
-            <thead>
-              <tr>
-                <th>Emp Code</th>
-                <th>Emp Name</th>
-                <th>Department</th>
-                <th>Date</th>
-                <th>Reason</th>
-                <th>Camp Boss Note</th>
-                <th>Reviewed At</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php if (!empty($escalations)): ?>
-                <?php foreach ($escalations as $row): ?>
-                  <?php $reasonText = trim((string) ($row['reason_text'] ?? '')); ?>
-                  <tr>
-                    <td><?= h($row['emp_code'] ?? '-') ?></td>
-                    <td><?= h($row['emp_name'] ?? '-') ?></td>
-                    <td><?= h($row['dept_name'] ?? '-') ?></td>
-                    <td><?= h($row['att_date'] ?? '-') ?></td>
-                    <td><?= h($reasonText !== '' ? $reasonText : ($row['campboss_reason_code'] ?? '-')) ?></td>
-                    <td><?= h($row['campboss_note'] ?? '-') ?></td>
-                    <td><?= h($row['campboss_reviewed_at'] ?? '-') ?></td>
-                  </tr>
+    <div class="approval-accordion" id="approval-accordion">
+      <div class="card approval-card approval-card--table js-pending-section" data-section="pending-standard">
+        <div class="card-header approval-accordion-header">
+          <button
+            type="button"
+            class="approval-accordion-toggle js-approval-accordion-toggle"
+            data-panel-id="pending-standard-panel"
+            aria-controls="pending-standard-panel"
+            aria-expanded="true"
+          >
+            <span class="approval-accordion-toggle-indicator" aria-hidden="true">&#8250;</span>
+            <div>
+              <h3 class="card-title">Pending Overrides</h3>
+              <div class="approval-accordion-toggle-meta"><span class="js-section-pending-count"><?= count($pendingStandard) ?></span> rows</div>
+            </div>
+          </button>
+          <div class="approval-actions">
+            <span class="text-muted small"><span class="js-section-pending-count"><?= count($pendingStandard) ?></span> pending</span>
+            <?php if (!empty($pendingStandard)): ?>
+              <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-all-form js-bulk-action-form">
+                <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                <input type="hidden" name="action" value="approve-all">
+                <?php foreach ($pendingStandard as $row): ?>
+                  <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                  <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
                 <?php endforeach; ?>
-              <?php else: ?>
+                <button type="submit" class="btn btn-sm btn-outline-success approval-approve-all-btn">Approve all</button>
+              </form>
+              <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-all-form js-bulk-action-form">
+                <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                <input type="hidden" name="action" value="reject-all">
+                <?php foreach ($pendingStandard as $row): ?>
+                  <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                  <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                <?php endforeach; ?>
+                <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-all-btn">Reject all</button>
+              </form>
+            <?php endif; ?>
+          </div>
+        </div>
+        <div id="pending-standard-panel" class="approval-accordion-panel">
+          <div class="card-body table-responsive p-0">
+            <table class="table table-bordered table-sm approval-table">
+              <thead>
                 <tr>
-                  <td colspan="7" class="text-center text-muted">No escalations found.</td>
+                  <th>Emp Code</th>
+                  <th>Emp Name</th>
+                  <th>Designation</th>
+                  <th>Department</th>
+                  <th>Date</th>
+                  <th>Override hrs</th>
+                  <th>Override code</th>
+                  <th>Requested by</th>
+                  <th>Action</th>
                 </tr>
-              <?php endif; ?>
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                <?php if (!empty($pendingStandard)): ?>
+                  <?php foreach ($pendingStandard as $row): ?>
+                    <tr data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                      <td><?= h($row['emp_code'] ?? '-') ?></td>
+                      <td><?= h($row['emp_name'] ?? '-') ?></td>
+                      <td><?= h($row['desg_name'] ?? '-') ?></td>
+                      <td><?= h($row['dept_name'] ?? '-') ?></td>
+                      <td><?= h($row['att_date'] ?? '-') ?></td>
+                      <td><?= h($row['override_work_hours'] ?? '-') ?></td>
+                      <td><?= h($row['override_work_code'] ?? '-') ?></td>
+                      <td><?= h(format_person($row['override_changed_by_name'] ?? '', $row['override_changed_by_email'] ?? '')) ?></td>
+                      <td>
+                        <div class="approval-row-actions">
+                          <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-form">
+                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="action" value="approve">
+                            <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                            <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                            <button type="submit" class="btn btn-sm btn-success approval-approve-btn">Approve</button>
+                          </form>
+                          <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-form">
+                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="action" value="reject">
+                            <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                            <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                            <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-btn">Reject</button>
+                          </form>
+                        </div>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                <?php endif; ?>
+                <tr class="js-empty-row" style="<?= !empty($pendingStandard) ? 'display: none;' : '' ?>">
+                  <td colspan="9" class="text-center text-muted">No pending overrides found.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
-      <div class="card approval-card mt-4">
-        <div class="card-header">
-          <h3 class="card-title">Anomalies (Awaiting camp boss)</h3>
-        </div>
-        <div class="card-body table-responsive p-0">
-          <table class="table table-bordered table-sm">
-            <thead>
-              <tr>
-                <th>Emp Code</th>
-                <th>Emp Name</th>
-                <th>Department</th>
-                <th>Date</th>
-                <th>Submitted At</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php if (!empty($anomalies)): ?>
-                <?php foreach ($anomalies as $row): ?>
-                  <tr>
-                    <td><?= h($row['emp_code'] ?? '-') ?></td>
-                    <td><?= h($row['emp_name'] ?? '-') ?></td>
-                    <td><?= h($row['dept_name'] ?? '-') ?></td>
-                    <td><?= h($row['att_date'] ?? '-') ?></td>
-                    <td><?= h($row['timekeeper_submitted_at'] ?? '-') ?></td>
-                  </tr>
+      <div class="card approval-card approval-card--table js-pending-section" data-section="pending-overtime">
+        <div class="card-header approval-accordion-header">
+          <button
+            type="button"
+            class="approval-accordion-toggle js-approval-accordion-toggle"
+            data-panel-id="pending-overtime-panel"
+            aria-controls="pending-overtime-panel"
+            aria-expanded="false"
+          >
+            <span class="approval-accordion-toggle-indicator" aria-hidden="true">&#8250;</span>
+            <div>
+              <h3 class="card-title approval-overtime-title">OVERTIME APPROVAL</h3>
+              <div class="approval-accordion-toggle-meta"><span class="js-section-pending-count"><?= count($pendingOvertime) ?></span> rows (override hrs &gt; 10)</div>
+            </div>
+          </button>
+          <div class="approval-actions">
+            <span class="text-muted small"><span class="js-section-pending-count"><?= count($pendingOvertime) ?></span> pending</span>
+            <?php if (!empty($pendingOvertime)): ?>
+              <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-all-form js-bulk-action-form">
+                <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                <input type="hidden" name="action" value="approve-all">
+                <?php foreach ($pendingOvertime as $row): ?>
+                  <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                  <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
                 <?php endforeach; ?>
-              <?php else: ?>
+                <button type="submit" class="btn btn-sm btn-outline-success approval-approve-all-btn">Approve all</button>
+              </form>
+              <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-all-form js-bulk-action-form">
+                <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                <input type="hidden" name="action" value="reject-all">
+                <?php foreach ($pendingOvertime as $row): ?>
+                  <input type="hidden" name="bulk_emp_code[]" value="<?= h($row['emp_code'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                  <input type="hidden" name="bulk_att_date[]" value="<?= h($row['att_date'] ?? '') ?>" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                <?php endforeach; ?>
+                <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-all-btn">Reject all</button>
+              </form>
+            <?php endif; ?>
+          </div>
+        </div>
+        <div id="pending-overtime-panel" class="approval-accordion-panel" hidden>
+          <div class="card-body table-responsive p-0">
+            <table class="table table-bordered table-sm approval-table">
+              <thead>
                 <tr>
-                  <td colspan="5" class="text-center text-muted">No anomalies found.</td>
+                  <th>Emp Code</th>
+                  <th>Emp Name</th>
+                  <th>Designation</th>
+                  <th>Department</th>
+                  <th>Date</th>
+                  <th>Override hrs</th>
+                  <th>Override code</th>
+                  <th>Requested by</th>
+                  <th>Action</th>
                 </tr>
-              <?php endif; ?>
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                <?php if (!empty($pendingOvertime)): ?>
+                  <?php foreach ($pendingOvertime as $row): ?>
+                    <tr data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
+                      <td><?= h($row['emp_code'] ?? '-') ?></td>
+                      <td><?= h($row['emp_name'] ?? '-') ?></td>
+                      <td><?= h($row['desg_name'] ?? '-') ?></td>
+                      <td><?= h($row['dept_name'] ?? '-') ?></td>
+                      <td><?= h($row['att_date'] ?? '-') ?></td>
+                      <td><?= h($row['override_work_hours'] ?? '-') ?></td>
+                      <td><?= h($row['override_work_code'] ?? '-') ?></td>
+                      <td><?= h(format_person($row['override_changed_by_name'] ?? '', $row['override_changed_by_email'] ?? '')) ?></td>
+                      <td>
+                        <div class="approval-row-actions">
+                          <form method="post" action="<?= h($actionUrl) ?>" class="js-approve-form">
+                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="action" value="approve">
+                            <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                            <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                            <button type="submit" class="btn btn-sm btn-success approval-approve-btn">Approve</button>
+                          </form>
+                          <form method="post" action="<?= h($actionUrl) ?>" class="js-reject-form">
+                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="action" value="reject">
+                            <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                            <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                            <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-btn">Reject</button>
+                          </form>
+                        </div>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                <?php endif; ?>
+                <tr class="js-empty-row" style="<?= !empty($pendingOvertime) ? 'display: none;' : '' ?>">
+                  <td colspan="9" class="text-center text-muted">No overtime overrides found.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card approval-card">
+        <div class="card-header approval-accordion-header">
+          <button
+            type="button"
+            class="approval-accordion-toggle js-approval-accordion-toggle"
+            data-panel-id="escalations-panel"
+            aria-controls="escalations-panel"
+            aria-expanded="false"
+          >
+            <span class="approval-accordion-toggle-indicator" aria-hidden="true">&#8250;</span>
+            <div>
+              <h3 class="card-title">Escalations (No show / Missing in camp)</h3>
+              <div class="approval-accordion-toggle-meta"><?= h((string) $escalationCount) ?> rows</div>
+            </div>
+          </button>
+        </div>
+        <div id="escalations-panel" class="approval-accordion-panel" hidden>
+          <div class="card-body table-responsive p-0">
+            <table class="table table-bordered table-sm">
+              <thead>
+                <tr>
+                  <th>Emp Code</th>
+                  <th>Emp Name</th>
+                  <th>Department</th>
+                  <th>Date</th>
+                  <th>Reason</th>
+                  <th>Transfer To Camp</th>
+                  <th>Camp Boss Note</th>
+                  <th>Reviewed At</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php if (!empty($escalations)): ?>
+                  <?php foreach ($escalations as $row): ?>
+                    <?php $reasonText = trim((string) ($row['reason_text'] ?? '')); ?>
+                    <?php
+                      $transferCode = trim((string) ($row['transfer_to_camp_code'] ?? ''));
+                      $transferName = trim((string) ($row['transfer_to_camp_name'] ?? ''));
+                      if ($transferCode === '') {
+                          $transferCode = trim((string) ($row['transfer_to_project_code'] ?? ''));
+                      }
+                      if ($transferName === '') {
+                          $transferName = trim((string) ($row['transfer_to_project_name'] ?? ''));
+                      }
+                      $transferLabel = '-';
+                      if ($transferCode !== '') {
+                          $transferLabel = $transferCode;
+                          if ($transferName !== '') {
+                              $transferLabel .= ' - ' . $transferName;
+                          }
+                      }
+                    ?>
+                    <tr>
+                      <td><?= h($row['emp_code'] ?? '-') ?></td>
+                      <td><?= h($row['emp_name'] ?? '-') ?></td>
+                      <td><?= h($row['dept_name'] ?? '-') ?></td>
+                      <td><?= h($row['att_date'] ?? '-') ?></td>
+                      <td><?= h($reasonText !== '' ? $reasonText : ($row['campboss_reason_code'] ?? '-')) ?></td>
+                      <td><?= h($transferLabel) ?></td>
+                      <td><?= h($row['campboss_note'] ?? '-') ?></td>
+                      <td><?= h($row['campboss_reviewed_at'] ?? '-') ?></td>
+                    </tr>
+                  <?php endforeach; ?>
+                <?php else: ?>
+                  <tr>
+                    <td colspan="8" class="text-center text-muted">No escalations found.</td>
+                  </tr>
+                <?php endif; ?>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card approval-card">
+        <div class="card-header approval-accordion-header">
+          <button
+            type="button"
+            class="approval-accordion-toggle js-approval-accordion-toggle"
+            data-panel-id="anomalies-panel"
+            aria-controls="anomalies-panel"
+            aria-expanded="false"
+          >
+            <span class="approval-accordion-toggle-indicator" aria-hidden="true">&#8250;</span>
+            <div>
+              <h3 class="card-title">Anomalies (Awaiting camp boss)</h3>
+              <div class="approval-accordion-toggle-meta"><?= h((string) $anomalyCount) ?> rows</div>
+            </div>
+          </button>
+        </div>
+        <div id="anomalies-panel" class="approval-accordion-panel" hidden>
+          <div class="card-body table-responsive p-0">
+            <table class="table table-bordered table-sm">
+              <thead>
+                <tr>
+                  <th>Emp Code</th>
+                  <th>Emp Name</th>
+                  <th>Department</th>
+                  <th>Date</th>
+                  <th>Submitted At</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php if (!empty($anomalies)): ?>
+                  <?php foreach ($anomalies as $row): ?>
+                    <tr>
+                      <td><?= h($row['emp_code'] ?? '-') ?></td>
+                      <td><?= h($row['emp_name'] ?? '-') ?></td>
+                      <td><?= h($row['dept_name'] ?? '-') ?></td>
+                      <td><?= h($row['att_date'] ?? '-') ?></td>
+                      <td><?= h($row['timekeeper_submitted_at'] ?? '-') ?></td>
+                    </tr>
+                  <?php endforeach; ?>
+                <?php else: ?>
+                  <tr>
+                    <td colspan="5" class="text-center text-muted">No anomalies found.</td>
+                  </tr>
+                <?php endif; ?>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -1261,10 +1522,10 @@ include __DIR__ . '/include/layout_top.php';
 <script>
 (() => {
   const alerts = document.getElementById('approval-alerts');
-  const pendingCountEls = Array.from(document.querySelectorAll('.js-pending-count'));
-  const emptyRow = document.querySelector('.js-empty-row');
-  const tableBody = document.querySelector('.approval-table tbody');
+  const pendingCountEls = Array.from(document.querySelectorAll('.js-pending-total-count'));
+  const pendingSections = Array.from(document.querySelectorAll('.js-pending-section'));
   const bulkForms = Array.from(document.querySelectorAll('.js-bulk-action-form'));
+  const accordionToggles = Array.from(document.querySelectorAll('.js-approval-accordion-toggle'));
 
   const showAlert = (type, message) => {
     if (!alerts || !message) {
@@ -1277,15 +1538,6 @@ include __DIR__ . '/include/layout_top.php';
     setTimeout(() => {
       alert.remove();
     }, 5000);
-  };
-
-  const getPendingCount = () => {
-    const el = pendingCountEls[0];
-    if (!el) {
-      return 0;
-    }
-    const value = parseInt(el.textContent, 10);
-    return Number.isFinite(value) ? value : 0;
   };
 
   const setPendingCount = (value) => {
@@ -1302,14 +1554,35 @@ include __DIR__ . '/include/layout_top.php';
     return value.replace(/"/g, '\\"');
   };
 
-  const syncEmptyState = () => {
-    const hasRows = !!(tableBody && tableBody.querySelector('tr[data-emp-code]'));
-    if (emptyRow) {
-      emptyRow.style.display = hasRows ? 'none' : '';
+  const getSectionRows = (section) => {
+    if (!section) {
+      return [];
     }
-    bulkForms.forEach((form) => {
-      form.style.display = hasRows ? '' : 'none';
+    return Array.from(section.querySelectorAll('tbody tr[data-emp-code]'));
+  };
+
+  const syncPendingSection = (section) => {
+    const rows = getSectionRows(section);
+    const count = rows.length;
+    section.querySelectorAll('.js-section-pending-count').forEach((el) => {
+      el.textContent = String(count);
     });
+    const emptyRow = section.querySelector('.js-empty-row');
+    if (emptyRow) {
+      emptyRow.style.display = count > 0 ? 'none' : '';
+    }
+    section.querySelectorAll('.js-bulk-action-form').forEach((form) => {
+      form.style.display = count > 0 ? '' : 'none';
+    });
+  };
+
+  const syncPendingState = () => {
+    let total = 0;
+    pendingSections.forEach((section) => {
+      syncPendingSection(section);
+      total += getSectionRows(section).length;
+    });
+    setPendingCount(total);
   };
 
   const removeBulkInputs = (empCode, attDate) => {
@@ -1370,8 +1643,7 @@ include __DIR__ . '/include/layout_top.php';
           row.remove();
         }
         removeBulkInputs(data.empCode, data.attDate);
-        setPendingCount(getPendingCount() - 1);
-        syncEmptyState();
+        syncPendingState();
       } else {
         showAlert('warning', (data && data.error) || options.errorFallback || 'Action failed.');
         if (button) {
@@ -1399,19 +1671,17 @@ include __DIR__ . '/include/layout_top.php';
         button.disabled = true;
         button.textContent = options.busyLabel || 'Working...';
       }
-      const currentRows = tableBody
-        ? Array.from(tableBody.querySelectorAll('tr[data-emp-code]'))
-        : [];
+      const section = form.closest('.js-pending-section');
+      const currentRows = getSectionRows(section);
 
       const data = await submitForm(form);
       if (data && data.ok) {
         showAlert('success', data.message || options.successFallback || 'Bulk action completed.');
-        currentRows.forEach((row) => row.remove());
-        bulkForms.forEach((bulkForm) => {
-          bulkForm.querySelectorAll('[data-emp-code]').forEach((input) => input.remove());
+        currentRows.forEach((row) => {
+          row.remove();
+          removeBulkInputs(row.dataset.empCode || '', row.dataset.attDate || '');
         });
-        setPendingCount(0);
-        syncEmptyState();
+        syncPendingState();
       } else {
         showAlert('warning', (data && data.error) || options.errorFallback || 'Bulk action failed.');
         if (button) {
@@ -1454,6 +1724,39 @@ include __DIR__ . '/include/layout_top.php';
       errorFallback: 'Bulk rejection failed.',
     })
   );
+
+  const setAccordionState = (toggle, expanded) => {
+    const panelId = toggle.getAttribute('data-panel-id');
+    const panel = panelId ? document.getElementById(panelId) : null;
+    toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    if (panel) {
+      panel.hidden = !expanded;
+    }
+  };
+
+  const openAccordionPanel = (panelId) => {
+    accordionToggles.forEach((toggle) => {
+      setAccordionState(toggle, toggle.getAttribute('data-panel-id') === panelId);
+    });
+  };
+
+  accordionToggles.forEach((toggle) => {
+    const panelId = toggle.getAttribute('data-panel-id');
+    const expanded = toggle.getAttribute('aria-expanded') === 'true';
+    setAccordionState(toggle, expanded);
+    toggle.addEventListener('click', () => {
+      const isExpanded = toggle.getAttribute('aria-expanded') === 'true';
+      if (isExpanded) {
+        setAccordionState(toggle, false);
+        return;
+      }
+      if (panelId) {
+        openAccordionPanel(panelId);
+      }
+    });
+  });
+
+  syncPendingState();
 })();
 </script>
 
