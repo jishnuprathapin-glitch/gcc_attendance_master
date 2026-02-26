@@ -70,9 +70,78 @@ function build_month_range(string $month): array {
 function build_hrms_export_filename(string $month): string {
     $monthDt = DateTimeImmutable::createFromFormat('!Y-m', $month);
     if (!$monthDt) {
-        return 'attendance-hrms-' . $month . '.csv';
+        return 'attendance-hrms-' . $month . '.xls';
     }
-    return 'attendance-hrms-' . $monthDt->format('F-Y') . '.csv';
+    return 'attendance-hrms-' . $monthDt->format('F-Y') . '.xls';
+}
+
+function export_writer_open($output, string $format = 'xls'): array {
+    $format = strtolower(trim($format));
+    if (!in_array($format, ['csv', 'xls'], true)) {
+        $format = 'xls';
+    }
+
+    $writer = [
+        'output' => $output,
+        'format' => $format,
+        'failed' => false,
+    ];
+
+    if (!is_resource($output)) {
+        $writer['failed'] = true;
+        return $writer;
+    }
+
+    if ($format === 'csv') {
+        return $writer;
+    }
+
+    fwrite($output, '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>');
+    fwrite($output, 'table{border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11pt;}');
+    fwrite($output, 'th,td{border:1px solid #000;padding:4px 6px;text-align:center;vertical-align:middle;white-space:nowrap;}');
+    fwrite($output, '</style></head><body><table>');
+
+    return $writer;
+}
+
+function export_writer_row(array &$writer, array $row, bool $header = false): void {
+    $output = $writer['output'] ?? null;
+    $format = $writer['format'] ?? 'xls';
+    if (!empty($writer['failed'])) {
+        return;
+    }
+    if (!is_resource($output)) {
+        $writer['failed'] = true;
+        return;
+    }
+
+    if ($format === 'csv') {
+        fputcsv($output, $row);
+        return;
+    }
+
+    $tag = $header ? 'th' : 'td';
+    $cells = [];
+    foreach ($row as $value) {
+        $cellValue = (string) ($value ?? '');
+        $cells[] = '<' . $tag . '>' . htmlspecialchars($cellValue, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</' . $tag . '>';
+    }
+    fwrite($output, '<tr>' . implode('', $cells) . '</tr>');
+}
+
+function export_writer_close(array &$writer): void {
+    $output = $writer['output'] ?? null;
+    $format = $writer['format'] ?? 'xls';
+    if (!is_resource($output)) {
+        $writer['failed'] = true;
+        return;
+    }
+
+    if ($format === 'csv') {
+        return;
+    }
+
+    fwrite($output, '</table></body></html>');
 }
 
 function format_date_label(string $date): string {
@@ -318,7 +387,7 @@ function export_job_path(string $jobId): string {
 }
 
 function export_job_csv_path(string $jobId): string {
-    return export_job_dir() . DIRECTORY_SEPARATOR . $jobId . '.csv';
+    return export_job_dir() . DIRECTORY_SEPARATOR . $jobId . '.xls';
 }
 
 function sanitize_export_job_id(?string $jobId): ?string {
@@ -678,7 +747,7 @@ function export_attendance_csv(
     string $startDate,
     string $endDate,
     string $reportType,
-    $output,
+    array &$writer,
     ?callable $progress = null,
     int $batchSize = 200
 ): ?string {
@@ -697,8 +766,8 @@ function export_attendance_csv(
             $headerRow2[] = 'Final work code';
             $headerRow2[] = 'Final work hrs';
         }
-        fputcsv($output, $headerRow1);
-        fputcsv($output, $headerRow2);
+        export_writer_row($writer, $headerRow1, true);
+        export_writer_row($writer, $headerRow2, true);
     } else {
         $header = $baseHeader;
         foreach ($dateRange as $date) {
@@ -713,7 +782,7 @@ function export_attendance_csv(
             $header[] = $date . ' Final work code';
             $header[] = $date . ' Final work hrs';
         }
-        fputcsv($output, $header);
+        export_writer_row($writer, $header, true);
     }
 
     $exportSql = 'SELECT hr.emp_code, ' .
@@ -979,7 +1048,7 @@ function export_attendance_csv(
                 }
             }
 
-            fputcsv($output, $row);
+            export_writer_row($writer, $row, false);
         }
 
         $processed += count($batchEmployees);
@@ -1004,7 +1073,7 @@ function export_attendance_hrms_csv(
     array $dateRange,
     string $startDate,
     string $endDate,
-    $output,
+    array &$writer,
     ?callable $progress = null,
     int $batchSize = 200
 ): ?string {
@@ -1016,7 +1085,7 @@ function export_attendance_hrms_csv(
     foreach ($dateRange as $index => $date) {
         $header[] = 'D' . ($index + 1) . ' HRS';
     }
-    fputcsv($output, $header);
+    export_writer_row($writer, $header, true);
 
     $exportSql = 'SELECT hr.emp_code, ' .
         'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
@@ -1381,7 +1450,7 @@ function export_attendance_hrms_csv(
                     $jobRow['job'],
                 ];
                 $row = array_merge($row, $jobRow['cells']);
-                fputcsv($output, $row);
+                export_writer_row($writer, $row, false);
             }
         }
 
@@ -1479,8 +1548,8 @@ if ($exportType === 'download') {
         echo 'Export file missing.';
         exit;
     }
-    $filename = (string) ($job['filename'] ?? 'attendance-daily-export.csv');
-    header('Content-Type: text/csv; charset=utf-8');
+    $filename = (string) ($job['filename'] ?? 'attendance-daily-export.xls');
+    header('Content-Type: application/vnd.ms-excel; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
     $size = filesize($file);
     if ($size !== false) {
@@ -2342,7 +2411,7 @@ if ($exportStart) {
     if ($reportType === 'hrms') {
         $filename = build_hrms_export_filename($exportRunMonth);
     } else {
-        $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.csv';
+        $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.xls';
     }
     $csvPath = export_job_csv_path($jobId);
     $createdAt = gmdate('c');
@@ -2395,10 +2464,19 @@ if ($exportStart) {
     ignore_user_abort(true);
     set_time_limit(0);
 
-    $output = fopen($csvPath, 'w');
+    $output = fopen($csvPath, 'wb');
     if ($output === false) {
         $job['status'] = 'error';
         $job['message'] = 'Unable to create export file.';
+        write_export_job($jobId, $job);
+        export_log('export_error', ['job' => $jobId, 'message' => $job['message']]);
+        exit;
+    }
+    $writer = export_writer_open($output, 'xls');
+    if (!empty($writer['failed'])) {
+        fclose($output);
+        $job['status'] = 'error';
+        $job['message'] = 'Unable to initialize Excel export writer.';
         write_export_job($jobId, $job);
         export_log('export_error', ['job' => $jobId, 'message' => $job['message']]);
         exit;
@@ -2418,7 +2496,7 @@ if ($exportStart) {
             $exportRunDateRange,
             $exportRunStartDate,
             $exportRunEndDate,
-            $output,
+            $writer,
             $progress
         );
     } else {
@@ -2431,9 +2509,13 @@ if ($exportStart) {
             $exportRunStartDate,
             $exportRunEndDate,
             $reportType,
-            $output,
+            $writer,
             $progress
         );
+    }
+    export_writer_close($writer);
+    if (!empty($writer['failed']) && $exportError === null) {
+        $exportError = 'Unable to generate Excel file.';
     }
     fclose($output);
 
@@ -2475,15 +2557,22 @@ if ($exportRequested) {
     if ($reportType === 'hrms') {
         $filename = build_hrms_export_filename($exportRunMonth);
     } else {
-        $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.csv';
+        $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.xls';
     }
 
-    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Type: application/vnd.ms-excel; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
 
-    $output = fopen('php://output', 'w');
+    $output = fopen('php://output', 'wb');
     if ($output === false) {
         http_response_code(500);
+        exit;
+    }
+    $writer = export_writer_open($output, 'xls');
+    if (!empty($writer['failed'])) {
+        fclose($output);
+        http_response_code(500);
+        echo 'Unable to initialize Excel export writer.';
         exit;
     }
 
@@ -2496,7 +2585,7 @@ if ($exportRequested) {
             $exportRunDateRange,
             $exportRunStartDate,
             $exportRunEndDate,
-            $output
+            $writer
         );
     } else {
         $exportError = export_attendance_csv(
@@ -2508,13 +2597,20 @@ if ($exportRequested) {
             $exportRunStartDate,
             $exportRunEndDate,
             $reportType,
-            $output
+            $writer
         );
     }
     if ($exportError !== null) {
-        fputcsv($output, ['ERROR', $exportError]);
+        export_writer_row($writer, ['ERROR', $exportError], false);
     }
 
+    export_writer_close($writer);
+    if (!empty($writer['failed'])) {
+        fclose($output);
+        http_response_code(500);
+        echo 'Unable to generate Excel file.';
+        exit;
+    }
     fclose($output);
     exit;
 }
