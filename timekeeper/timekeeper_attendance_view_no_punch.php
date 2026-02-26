@@ -175,6 +175,10 @@ function is_timekeeper_sick_leave_reason(?string $reasonCode): bool {
     return strtoupper(trim((string) $reasonCode)) === 'SICK';
 }
 
+function is_timekeeper_other_reason(?string $reasonCode): bool {
+    return strtoupper(trim((string) $reasonCode)) === 'OTH';
+}
+
 $uaeTz = new DateTimeZone('Asia/Dubai');
 $todayUae = (new DateTimeImmutable('now', $uaeTz))->format('Y-m-d');
 
@@ -243,6 +247,30 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         ensure_no_punch_reason_table($bd);
         $workTypeOptions = load_work_type_options($bd);
         $noPunchReasonMeta = load_no_punch_reason_options($bd, 'timekeeper');
+        $blockedReasonCodes = [
+            'VISA_BIO' => true,
+            'VISA_OTH' => true,
+            'VISA_TAWJEEH' => true,
+        ];
+        $filteredReasonMeta = [];
+        foreach ($noPunchReasonMeta as $reasonCode => $meta) {
+            $normalizedReasonCode = strtoupper(trim((string) $reasonCode));
+            if ($normalizedReasonCode === '' || isset($blockedReasonCodes[$normalizedReasonCode])) {
+                continue;
+            }
+            $filteredReasonMeta[$normalizedReasonCode] = is_array($meta) ? $meta : [];
+        }
+        $noPunchReasonMeta = $filteredReasonMeta;
+
+        $filteredWorkTypeOptions = [];
+        foreach ($workTypeOptions as $workCode => $workLabel) {
+            $normalizedWorkCode = strtoupper(trim((string) $workCode));
+            if ($normalizedWorkCode === '' || $normalizedWorkCode === 'COM') {
+                continue;
+            }
+            $filteredWorkTypeOptions[$normalizedWorkCode] = trim((string) $workLabel);
+        }
+        $workTypeOptions = $filteredWorkTypeOptions;
         foreach ($noPunchReasonMeta as $reasonCode => $meta) {
             $noPunchReasonOptions[$reasonCode] = trim((string) ($meta['text'] ?? ''));
         }
@@ -460,6 +488,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                             if ($reasonMeta === null) {
                                 $errors[] = 'Invalid reason.';
                             }
+                        }
+                        if (is_timekeeper_other_reason($reasonCode) && $reasonNote === null) {
+                            $errors[] = 'Note is required when reason is OTH.';
                         }
                         if ($workCode !== null) {
                             if (empty($workTypeOptions) || !isset($workTypeOptions[$workCode])) {
@@ -967,6 +998,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                         $errors[] = 'Invalid reason "' . $reasonCode . '" for ' . $empCode . ' on ' . $attDate . '.';
                         continue;
                     }
+                }
+                if (is_timekeeper_other_reason($reasonCode) && $reasonNote === null) {
+                    $errors[] = 'Note is required when reason is OTH for ' . $empCode . ' on ' . $attDate . '.';
+                    continue;
                 }
 
                 if ($workCode !== null) {
@@ -1988,7 +2023,20 @@ include __DIR__ . '/../admin/include/layout_top.php';
                       <td><?= h($row['department']) ?></td>
                       <td><?= h($row['project_code']) ?></td>
                       <td>
-                        <input type="number" step="0.01" min="0" max="24" class="form-control form-control-sm" name="work_hours[]" value="<?= h($row['override_hours']) ?>" <?= $lockInputs ? 'readonly' : '' ?>>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="24"
+                          class="form-control form-control-sm"
+                          name="work_hours[]"
+                          value="<?= h($row['override_hours']) ?>"
+                          data-initial-value="<?= h($row['override_hours']) ?>"
+                          <?= $lockInputs ? 'disabled' : '' ?>
+                        >
+                        <?php if ($lockInputs): ?>
+                          <input type="hidden" name="work_hours[]" value="<?= h($row['override_hours']) ?>" data-generated-mirror="1">
+                        <?php endif; ?>
                       </td>
                       <td>
                         <input
@@ -1999,13 +2047,18 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           autocomplete="off"
                           placeholder="Work code"
                           value="<?= h($row['override_code'] ?? '') ?>"
-                          <?= $lockInputs ? 'readonly' : '' ?>
+                          data-initial-value="<?= h($row['override_code'] ?? '') ?>"
+                          <?= $lockInputs ? 'disabled' : '' ?>
                         >
+                        <?php if ($lockInputs): ?>
+                          <input type="hidden" name="work_code[]" value="<?= h($row['override_code'] ?? '') ?>" data-generated-mirror="1">
+                        <?php endif; ?>
                       </td>
                       <td>
                         <select
                           class="form-control form-control-sm js-override-reason"
                           name="override_reason_code[]"
+                          data-initial-value="<?= h($row['override_reason_code'] ?? '') ?>"
                           <?= $lockInputs ? 'disabled' : '' ?>
                           title=""
                         >
@@ -2025,7 +2078,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           <?php endforeach; ?>
                         </select>
                         <?php if ($lockInputs): ?>
-                          <input type="hidden" name="override_reason_code[]" value="<?= h($row['override_reason_code'] ?? '') ?>">
+                          <input type="hidden" name="override_reason_code[]" value="<?= h($row['override_reason_code'] ?? '') ?>" data-generated-mirror="1">
                         <?php endif; ?>
                         <input
                           type="text"
@@ -2034,8 +2087,12 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           maxlength="255"
                           placeholder="Note (optional)"
                           value="<?= h($row['override_reason_note'] ?? '') ?>"
-                          <?= $lockInputs ? 'readonly' : '' ?>
+                          data-initial-value="<?= h($row['override_reason_note'] ?? '') ?>"
+                          <?= $lockInputs ? 'disabled' : '' ?>
                         >
+                        <?php if ($lockInputs): ?>
+                          <input type="hidden" name="override_reason_note[]" value="<?= h($row['override_reason_note'] ?? '') ?>" data-generated-mirror="1">
+                        <?php endif; ?>
                         <?php if ($medicalCertificateUrl !== ''): ?>
                           <div class="small mt-1">
                             <a href="<?= h($medicalCertificateUrl) ?>" target="_blank" rel="noopener">
@@ -2169,10 +2226,14 @@ include __DIR__ . '/../admin/include/layout_top.php';
       var hours = tr.querySelector('input[name=\"work_hours[]\"]');
       var code = tr.querySelector('input[name=\"work_code[]\"]');
       var reason = tr.querySelector('select[name=\"override_reason_code[]\"]');
+      var note = tr.querySelector('input[name=\"override_reason_note[]\"]');
       if (!hours || !code || !reason) return true;
+      if (hours.disabled || code.disabled || reason.disabled) return true;
 
       var hoursVal = (hours.value || '').trim();
       var codeVal = (code.value || '').trim();
+      var reasonCode = String(reason.value || '').trim().toUpperCase();
+      var noteVal = note ? String(note.value || '').trim() : '';
 
       if (hoursVal !== '' && codeVal !== '') {
         showValidationError('Choose only one override per row: work hours OR work code (not both).');
@@ -2197,6 +2258,16 @@ include __DIR__ . '/../admin/include/layout_top.php';
           reason.focus();
           return false;
         }
+      }
+
+      if (reasonCode === 'OTH' && noteVal === '') {
+        showValidationError('Note is required when reason is OTH.');
+        if (note) {
+          note.focus();
+        } else {
+          reason.focus();
+        }
+        return false;
       }
 
       return true;
@@ -2415,15 +2486,15 @@ include __DIR__ . '/../admin/include/layout_top.php';
       if (!medicalModal || !medicalNoteInput || !medicalFileInput || !row || !submitter) {
         return false;
       }
-      var rowIndex = String(submitter.value || '').trim();
-      if (rowIndex === '') {
+      var submitterRowIndex = String(submitter.value || '').trim();
+      if (submitterRowIndex === '') {
         return false;
       }
       var rowReasonNote = row.querySelector('input.js-override-reason-note');
       medicalModalState = {
         row: row,
         submitter: submitter,
-        rowIndex: rowIndex
+        rowIndex: '0'
       };
       medicalNoteInput.value = rowReasonNote ? String(rowReasonNote.value || '').trim() : '';
       medicalFileInput.value = '';
@@ -2463,29 +2534,213 @@ include __DIR__ . '/../admin/include/layout_top.php';
       return hoursVal !== '' || codeVal !== '';
     }
 
+    function isRowEditableForSubmission(tr) {
+      if (!tr) return false;
+      var hours = tr.querySelector('input[name="work_hours[]"]');
+      var code = tr.querySelector('input[name="work_code[]"]');
+      if (!hours || !code) return false;
+      return !(hours.readOnly || hours.disabled || code.readOnly || code.disabled);
+    }
+
+    function normalizeComparableValue(value, upperCase) {
+      var text = String(value || '').trim();
+      return upperCase ? text.toUpperCase() : text;
+    }
+
+    function getFieldCurrentValue(el, upperCase) {
+      if (!el) return '';
+      return normalizeComparableValue(el.value || '', !!upperCase);
+    }
+
+    function getFieldInitialValue(el, upperCase) {
+      if (!el) return '';
+      return normalizeComparableValue(el.getAttribute('data-initial-value') || '', !!upperCase);
+    }
+
+    function setFieldInitialValue(el, value) {
+      if (!el) return;
+      el.setAttribute('data-initial-value', String(value || '').trim());
+    }
+
+    function isRowDirtyForSave(tr) {
+      if (!tr || !isRowEditableForSubmission(tr)) return false;
+      var hours = tr.querySelector('input[name="work_hours[]"]');
+      var code = tr.querySelector('input[name="work_code[]"]');
+      var reason = tr.querySelector('select[name="override_reason_code[]"]');
+      var note = tr.querySelector('input[name="override_reason_note[]"]');
+      if (!hours || !code || !reason || !note) return false;
+
+      if (getFieldCurrentValue(hours, false) !== getFieldInitialValue(hours, false)) return true;
+      if (getFieldCurrentValue(code, true) !== getFieldInitialValue(code, true)) return true;
+      if (getFieldCurrentValue(reason, true) !== getFieldInitialValue(reason, true)) return true;
+      if (getFieldCurrentValue(note, false) !== getFieldInitialValue(note, false)) return true;
+
+      return false;
+    }
+
+    function syncRowInitialValues(tr) {
+      if (!tr) return;
+      var hours = tr.querySelector('input[name="work_hours[]"]');
+      var code = tr.querySelector('input[name="work_code[]"]');
+      var reason = tr.querySelector('select[name="override_reason_code[]"]');
+      var note = tr.querySelector('input[name="override_reason_note[]"]');
+
+      if (hours) setFieldInitialValue(hours, hours.value || '');
+      if (code) setFieldInitialValue(code, code.value || '');
+      if (reason) setFieldInitialValue(reason, reason.value || '');
+      if (note) setFieldInitialValue(note, note.value || '');
+    }
+
+    function syncAllRowInitialValues() {
+      if (!form) return;
+      var rows = getNoPunchDataRows();
+      for (var i = 0; i < rows.length; i++) {
+        syncRowInitialValues(rows[i]);
+      }
+    }
+
+    function appendRowPayload(formData, tr) {
+      if (!formData || !tr) return false;
+
+      var empInput = tr.querySelector('input[name="emp_code[]"]');
+      var attInput = tr.querySelector('input[name="att_date[]"]');
+      if (!empInput || !attInput) return false;
+
+      var empCode = String(empInput.value || '').trim();
+      var attDate = String(attInput.value || '').trim();
+      if (empCode === '' || attDate === '') return false;
+
+      var hours = tr.querySelector('input[name="work_hours[]"]');
+      var code = tr.querySelector('input[name="work_code[]"]');
+      var reason = tr.querySelector('select[name="override_reason_code[]"]');
+      var note = tr.querySelector('input[name="override_reason_note[]"]');
+
+      var hoursVal = hours ? String(hours.value || '').trim() : '';
+      var codeVal = code ? String(code.value || '').trim() : '';
+      var reasonVal = reason ? String(reason.value || '').trim() : '';
+      var noteVal = note ? String(note.value || '').trim() : '';
+
+      formData.append('emp_code[]', empCode);
+      formData.append('att_date[]', attDate);
+      formData.append('work_hours[]', hoursVal);
+      formData.append('work_code[]', codeVal);
+      formData.append('override_reason_code[]', reasonVal);
+      formData.append('override_reason_note[]', noteVal);
+
+      return true;
+    }
+
+    function createBaseAjaxFormData() {
+      var formData = new FormData();
+      var csrfInput = form ? form.querySelector('input[name="csrf"]') : null;
+      formData.append('csrf', csrfInput ? String(csrfInput.value || '') : '');
+      formData.append('ajax', '1');
+      return formData;
+    }
+
+    var BULK_ROW_CHUNK_SIZE = 120;
+
+    function collectRowsForBulkAction(actionValue) {
+      var picked = [];
+      if (!form) return picked;
+      var rows = getNoPunchDataRows();
+      for (var i = 0; i < rows.length; i++) {
+        var tr = rows[i];
+        if (!isRowEditableForSubmission(tr)) {
+          continue;
+        }
+        if (actionValue === 'submit_to_hr' && !rowHasHrOverride(tr)) {
+          continue;
+        }
+        if (actionValue === 'save_overrides' && !isRowDirtyForSave(tr)) {
+          continue;
+        }
+        picked.push(tr);
+      }
+      return picked;
+    }
+
+    function postBulkRowsInChunks(actionValue, targetRows, onDone) {
+      var rows = Array.isArray(targetRows) ? targetRows : [];
+      var totalRows = rows.length;
+      var cursor = 0;
+      var processed = 0;
+      var lastMessage = '';
+
+      function finish(ok, message) {
+        if (typeof onDone === 'function') {
+          onDone({
+            ok: !!ok,
+            message: String(message || '').trim(),
+            processed: processed,
+            total: totalRows
+          });
+        }
+      }
+
+      function runNextChunk() {
+        if (cursor >= totalRows) {
+          finish(true, lastMessage);
+          return;
+        }
+
+        var formData = createBaseAjaxFormData();
+        formData.append('action', actionValue);
+
+        var end = Math.min(cursor + BULK_ROW_CHUNK_SIZE, totalRows);
+        var appended = 0;
+        for (var idx = cursor; idx < end; idx++) {
+          if (appendRowPayload(formData, rows[idx])) {
+            appended++;
+          }
+        }
+
+        cursor = end;
+        if (appended <= 0) {
+          runNextChunk();
+          return;
+        }
+
+        postRowAjax(formData, function (data) {
+          var ok = !!(data && data.ok === true);
+          if (!ok) {
+            finish(false, (data && data.message) ? data.message : 'Unable to process request.');
+            return;
+          }
+          processed += appended;
+          if (data && data.message) {
+            lastMessage = String(data.message || '').trim();
+          }
+          runNextChunk();
+        });
+      }
+
+      runNextChunk();
+    }
+
     function clearRowSearchCache(tr) {
       if (!tr) return;
       tr.removeAttribute('data-search-text');
     }
 
-    function ensureDisabledSelectMirror(selectEl) {
-      if (!selectEl || !selectEl.name || !selectEl.parentElement) return;
-      var existing = selectEl.parentElement.querySelector('input[type="hidden"][data-generated-mirror="1"][name="' + selectEl.name + '"]');
+    function ensureDisabledFieldMirror(fieldEl) {
+      if (!fieldEl || !fieldEl.name || !fieldEl.parentElement) return;
+      var existing = fieldEl.parentElement.querySelector('input[type="hidden"][data-generated-mirror="1"][name="' + fieldEl.name + '"]');
       if (existing) {
-        existing.value = selectEl.value || '';
+        existing.value = fieldEl.value || '';
         return;
       }
       var hidden = document.createElement('input');
       hidden.type = 'hidden';
-      hidden.name = selectEl.name;
-      hidden.value = selectEl.value || '';
+      hidden.name = fieldEl.name;
+      hidden.value = fieldEl.value || '';
       hidden.setAttribute('data-generated-mirror', '1');
-      selectEl.parentElement.insertBefore(hidden, selectEl.nextSibling);
+      fieldEl.parentElement.insertBefore(hidden, fieldEl.nextSibling);
     }
 
-    function removeDisabledSelectMirror(selectEl) {
-      if (!selectEl || !selectEl.name || !selectEl.parentElement) return;
-      var generated = selectEl.parentElement.querySelectorAll('input[type="hidden"][data-generated-mirror="1"][name="' + selectEl.name + '"]');
+    function removeDisabledFieldMirror(fieldEl) {
+      if (!fieldEl || !fieldEl.name || !fieldEl.parentElement) return;
+      var generated = fieldEl.parentElement.querySelectorAll('input[type="hidden"][data-generated-mirror="1"][name="' + fieldEl.name + '"]');
       for (var i = 0; i < generated.length; i++) {
         generated[i].remove();
       }
@@ -2499,21 +2754,36 @@ include __DIR__ . '/../admin/include/layout_top.php';
       var note = tr.querySelector('input[name="override_reason_note[]"]');
 
       if (hours) {
-        hours.readOnly = !!locked;
+        hours.disabled = !!locked;
+        if (locked) {
+          ensureDisabledFieldMirror(hours);
+        } else {
+          removeDisabledFieldMirror(hours);
+        }
       }
       if (code) {
-        code.readOnly = !!locked;
+        code.disabled = !!locked;
+        if (locked) {
+          ensureDisabledFieldMirror(code);
+        } else {
+          removeDisabledFieldMirror(code);
+        }
       }
       if (reason) {
         reason.disabled = !!locked;
         if (locked) {
-          ensureDisabledSelectMirror(reason);
+          ensureDisabledFieldMirror(reason);
         } else {
-          removeDisabledSelectMirror(reason);
+          removeDisabledFieldMirror(reason);
         }
       }
       if (note) {
-        note.readOnly = !!locked;
+        note.disabled = !!locked;
+        if (locked) {
+          ensureDisabledFieldMirror(note);
+        } else {
+          removeDisabledFieldMirror(note);
+        }
       }
     }
 
@@ -2893,6 +3163,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
         if (rowIndex === '') continue;
         renderRowForHrWorkflow(tr, rowIndex);
       }
+      syncAllRowInitialValues();
       updateRemainingCountHint();
       applyTableFilters();
     }
@@ -2917,10 +3188,13 @@ include __DIR__ . '/../admin/include/layout_top.php';
       var tr = submitter.closest('tr');
       if (!tr) return;
 
-      var rowIndex = String(submitter.value || '').trim();
-      var formData = new FormData(form);
-      formData.append('ajax', '1');
-      formData.append(submitter.name, rowIndex);
+      var displayRowIndex = String(submitter.value || '').trim();
+      var formData = createBaseAjaxFormData();
+      if (!appendRowPayload(formData, tr)) {
+        showAjaxMessage('Row data missing. Please refresh and try again.', true, submitter);
+        return;
+      }
+      formData.append(submitter.name, '0');
       if (Array.isArray(extraFields)) {
         for (var fieldIndex = 0; fieldIndex < extraFields.length; fieldIndex++) {
           var field = extraFields[fieldIndex] || {};
@@ -2953,14 +3227,15 @@ include __DIR__ . '/../admin/include/layout_top.php';
           return;
         }
 
-        renderRowForHrWorkflow(tr, rowIndex);
+        renderRowForHrWorkflow(tr, displayRowIndex);
+        syncRowInitialValues(tr);
         updateRemainingCountHint();
         applyTableFilters();
         submitter.disabled = false;
       });
 
       setTimeout(function () {
-        var liveBtn = tr.querySelector('button[name="' + submitter.name + '"][value="' + rowIndex + '"]');
+        var liveBtn = tr.querySelector('button[name="' + submitter.name + '"][value="' + displayRowIndex + '"]');
         if (liveBtn) {
           liveBtn.disabled = false;
         }
@@ -2971,28 +3246,57 @@ include __DIR__ . '/../admin/include/layout_top.php';
       if (!form || !submitter) return;
       var actionValue = String(submitter.value || '').trim();
       if (actionValue === '') return;
+      submitter.disabled = true;
 
-      var formData = new FormData(form);
-      formData.append('ajax', '1');
+      if (actionValue === 'save_overrides' || actionValue === 'submit_to_hr') {
+        var targetRows = collectRowsForBulkAction(actionValue);
+        if (targetRows.length === 0) {
+          submitter.disabled = false;
+          if (actionValue === 'submit_to_hr') {
+            showAjaxMessage('No override rows to send to HR.', true, submitter);
+          } else {
+            showAjaxMessage('No row changes to save.', true, submitter);
+          }
+          return;
+        }
+
+        postBulkRowsInChunks(actionValue, targetRows, function (result) {
+          if (!result || result.ok !== true) {
+            var partial = result && result.total > 0
+              ? (' Processed ' + (result.processed || 0) + ' of ' + (result.total || 0) + ' row(s).')
+              : '';
+            var failMessage = (result && result.message) ? result.message : 'Unable to process request.';
+            showAjaxMessage(failMessage + partial, true, submitter);
+            submitter.disabled = false;
+            return;
+          }
+
+          var batchInfo = result.total > BULK_ROW_CHUNK_SIZE
+            ? ('Processed ' + result.processed + ' row(s) in batches. ')
+            : '';
+          var doneMessage = (result.message || '').trim();
+          if (doneMessage === '') {
+            doneMessage = actionValue === 'submit_to_hr' ? 'Sent to HR.' : 'Overrides saved.';
+          }
+          showAjaxMessage(batchInfo + doneMessage, false, submitter);
+          refreshRowsAfterBulkSave();
+          submitter.disabled = false;
+        });
+        return;
+      }
+
+      var formData = createBaseAjaxFormData();
       if (submitter.name) {
         formData.append(submitter.name, actionValue);
       }
-
-      submitter.disabled = true;
 
       postRowAjax(formData, function (data) {
         var ok = !!(data && data.ok === true);
         var message = (data && data.message) ? data.message : (ok ? 'Done.' : 'Unable to process request.');
         showAjaxMessage(message, !ok, submitter);
-
-        if (ok) {
-          if (actionValue === 'save_overrides' || actionValue === 'submit_to_hr') {
-            refreshRowsAfterBulkSave();
-          } else if (actionValue === 'submit_to_campboss') {
-            refreshRowsAfterBulkCampbossSubmit();
-          }
+        if (ok && actionValue === 'submit_to_campboss') {
+          refreshRowsAfterBulkCampbossSubmit();
         }
-
         submitter.disabled = false;
       });
     }
