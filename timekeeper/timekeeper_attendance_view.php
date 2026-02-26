@@ -42,6 +42,39 @@ function build_date_range(string $start, string $end): array {
     return $dates;
 }
 
+function normalize_month(?string $value, string $fallback): string {
+    $value = trim((string) $value);
+    if ($value === '') {
+        return $fallback;
+    }
+    if (!preg_match('/^\d{4}-\d{2}$/', $value)) {
+        return $fallback;
+    }
+    $month = DateTimeImmutable::createFromFormat('!Y-m', $value);
+    if (!$month || $month->format('Y-m') !== $value) {
+        return $fallback;
+    }
+    return $value;
+}
+
+function build_month_range(string $month): array {
+    $monthDt = DateTimeImmutable::createFromFormat('!Y-m', $month);
+    if (!$monthDt) {
+        return [];
+    }
+    $start = $monthDt->format('Y-m-01');
+    $end = $monthDt->modify('last day of this month')->format('Y-m-d');
+    return [$start, $end];
+}
+
+function build_hrms_export_filename(string $month): string {
+    $monthDt = DateTimeImmutable::createFromFormat('!Y-m', $month);
+    if (!$monthDt) {
+        return 'attendance-hrms-' . $month . '.csv';
+    }
+    return 'attendance-hrms-' . $monthDt->format('F-Y') . '.csv';
+}
+
 function format_date_label(string $date): string {
     try {
         $dt = new DateTimeImmutable($date);
@@ -963,11 +996,414 @@ function export_attendance_csv(
     return null;
 }
 
+function export_attendance_hrms_csv(
+    mysqli $bd,
+    array $filters,
+    array $params,
+    string $types,
+    array $dateRange,
+    string $startDate,
+    string $endDate,
+    $output,
+    ?callable $progress = null,
+    int $batchSize = 200
+): ?string {
+    if (empty($dateRange)) {
+        return 'Invalid month range for HRMS export.';
+    }
+
+    $header = ['LNo', 'Employee Code', 'Employee Name', 'Job'];
+    foreach ($dateRange as $index => $date) {
+        $header[] = 'D' . ($index + 1) . ' HRS';
+    }
+    fputcsv($output, $header);
+
+    $exportSql = 'SELECT hr.emp_code, ' .
+        'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name, ' .
+        'hr.jbno ' .
+        'FROM gcc_attendance_master.hrmsvw_sync hr';
+    if (!empty($filters)) {
+        $exportSql .= ' WHERE ' . implode(' AND ', $filters);
+    }
+    $exportSql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT ? OFFSET ?';
+
+    $processed = 0;
+    $exportOffset = 0;
+    $lineNo = 0;
+
+    while (true) {
+        $batchEmployees = [];
+
+        $batchParams = $params;
+        $batchTypes = $types;
+        $batchParams[] = $batchSize;
+        $batchParams[] = $exportOffset;
+        $batchTypes .= 'ii';
+
+        $stmt = $bd->prepare($exportSql);
+        if (!$stmt) {
+            return 'Unable to prepare HRMS export query.';
+        }
+        bind_params($stmt, $batchTypes, $batchParams);
+        if ($stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $batchEmployees[] = $row;
+                }
+                $result->free();
+            }
+        } else {
+            $stmt->close();
+            return 'Unable to load employees for HRMS export.';
+        }
+        $stmt->close();
+
+        if (empty($batchEmployees)) {
+            break;
+        }
+
+        $empCodes = [];
+        foreach ($batchEmployees as $row) {
+            $code = trim((string) ($row['emp_code'] ?? ''));
+            if ($code !== '') {
+                $empCodes[] = $code;
+            }
+        }
+        $empCodes = array_values(array_unique($empCodes, SORT_STRING));
+
+        $attDaily = [];
+        $overrideDaily = [];
+        $punchDaily = [];
+        $previousProjectByEmp = [];
+        $nextProjectByEmp = [];
+
+        if (!empty($empCodes)) {
+            $placeholders = implode(',', array_fill(0, count($empCodes), '?'));
+            $rangeTypes = str_repeat('s', count($empCodes)) . 'ss';
+            $rangeParams = array_merge($empCodes, [$startDate, $endDate]);
+
+            $attSql = 'SELECT d.emp_code, d.att_date, d.work_code, d.work_hours ' .
+                'FROM gcc_attendance_master.employee_att_daily d ' .
+                'INNER JOIN (' .
+                    'SELECT emp_code, att_date, MAX(change_id) AS max_change_id ' .
+                    'FROM gcc_attendance_master.employee_att_daily ' .
+                    'WHERE emp_code IN (' . $placeholders . ') AND att_date BETWEEN ? AND ? ' .
+                    'AND (is_delete = 0 OR is_delete IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL) ' .
+                    'GROUP BY emp_code, att_date' .
+                ') latest ON latest.max_change_id = d.change_id';
+            $stmt = $bd->prepare($attSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['att_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($attDaily[$emp])) {
+                                $attDaily[$emp] = [];
+                            }
+                            $attDaily[$emp][$date] = $row;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load attendance details for HRMS export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare attendance query for HRMS export.';
+            }
+
+            $overrideSql = 'SELECT o.emp_code, o.att_date, o.override_work_hours, o.override_work_code, o.override_is_approved ' .
+                'FROM gcc_attendance_master.employee_att_daily_overrides o ' .
+                'WHERE o.emp_code IN (' . $placeholders . ') AND o.att_date BETWEEN ? AND ?';
+            $stmt = $bd->prepare($overrideSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['att_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($overrideDaily[$emp])) {
+                                $overrideDaily[$emp] = [];
+                            }
+                            $overrideDaily[$emp][$date] = $row;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load override details for HRMS export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare override query for HRMS export.';
+            }
+
+            $punchSql = 'SELECT dp.emp_code, dp.punch_date, dp.first_log, dp.last_log, p.pro_code ' .
+                'FROM gcc_attendance_master.employee_daily_punch dp ' .
+                'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+                'WHERE dp.emp_code IN (' . $placeholders . ') AND dp.punch_date BETWEEN ? AND ?';
+            $stmt = $bd->prepare($punchSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['punch_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($punchDaily[$emp])) {
+                                $punchDaily[$emp] = [];
+                            }
+                            $punchDaily[$emp][$date] = [
+                                'first_log' => $row['first_log'] ?? null,
+                                'last_log' => $row['last_log'] ?? null,
+                                'pro_code' => trim((string) ($row['pro_code'] ?? '')),
+                            ];
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load punch details for HRMS export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare punch query for HRMS export.';
+            }
+
+            $prevTypes = str_repeat('s', count($empCodes)) . 's';
+            $prevParams = array_merge($empCodes, [$startDate]);
+            $prevSql = 'SELECT latest.emp_code, p.pro_code ' .
+                'FROM (' .
+                    'SELECT dp.emp_code, MAX(dp.punch_date) AS punch_date ' .
+                    'FROM gcc_attendance_master.employee_daily_punch dp ' .
+                    'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                    'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+                    'WHERE dp.emp_code IN (' . $placeholders . ') AND dp.punch_date < ? ' .
+                    'AND p.pro_code IS NOT NULL AND p.pro_code <> "" ' .
+                    'GROUP BY dp.emp_code' .
+                ') latest ' .
+                'JOIN gcc_attendance_master.employee_daily_punch dp ON dp.emp_code = latest.emp_code AND dp.punch_date = latest.punch_date ' .
+                'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                'LEFT JOIN gcc_it.projects p ON p.id = d.project_id';
+            $stmt = $bd->prepare($prevSql);
+            if ($stmt) {
+                bind_params($stmt, $prevTypes, $prevParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $project = trim((string) ($row['pro_code'] ?? ''));
+                            if ($emp === '' || $project === '') {
+                                continue;
+                            }
+                            $previousProjectByEmp[$emp] = $project;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load previous project history for HRMS export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare previous project query for HRMS export.';
+            }
+
+            $nextTypes = str_repeat('s', count($empCodes)) . 's';
+            $nextParams = array_merge($empCodes, [$endDate]);
+            $nextSql = 'SELECT earliest.emp_code, p.pro_code ' .
+                'FROM (' .
+                    'SELECT dp.emp_code, MIN(dp.punch_date) AS punch_date ' .
+                    'FROM gcc_attendance_master.employee_daily_punch dp ' .
+                    'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                    'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+                    'WHERE dp.emp_code IN (' . $placeholders . ') AND dp.punch_date > ? ' .
+                    'AND p.pro_code IS NOT NULL AND p.pro_code <> "" ' .
+                    'GROUP BY dp.emp_code' .
+                ') earliest ' .
+                'JOIN gcc_attendance_master.employee_daily_punch dp ON dp.emp_code = earliest.emp_code AND dp.punch_date = earliest.punch_date ' .
+                'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                'LEFT JOIN gcc_it.projects p ON p.id = d.project_id';
+            $stmt = $bd->prepare($nextSql);
+            if ($stmt) {
+                bind_params($stmt, $nextTypes, $nextParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $project = trim((string) ($row['pro_code'] ?? ''));
+                            if ($emp === '' || $project === '') {
+                                continue;
+                            }
+                            $nextProjectByEmp[$emp] = $project;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load next project history for HRMS export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare next project query for HRMS export.';
+            }
+        }
+
+        foreach ($batchEmployees as $employee) {
+            $lineNo++;
+            $empCode = trim((string) ($employee['emp_code'] ?? ''));
+            $empName = trim((string) ($employee['emp_name'] ?? ''));
+            $defaultJobCode = trim((string) ($employee['jbno'] ?? ''));
+
+            $assignedByDate = [];
+            $lastKnownProject = trim((string) ($previousProjectByEmp[$empCode] ?? ''));
+            foreach ($dateRange as $date) {
+                $directProject = trim((string) ($punchDaily[$empCode][$date]['pro_code'] ?? ''));
+                if ($directProject !== '') {
+                    $assignedByDate[$date] = $directProject;
+                    $lastKnownProject = $directProject;
+                    continue;
+                }
+                if ($lastKnownProject !== '') {
+                    $assignedByDate[$date] = $lastKnownProject;
+                } else {
+                    $assignedByDate[$date] = '';
+                }
+            }
+
+            $nextKnownProject = trim((string) ($nextProjectByEmp[$empCode] ?? ''));
+            for ($i = count($dateRange) - 1; $i >= 0; $i--) {
+                $date = $dateRange[$i];
+                $current = trim((string) ($assignedByDate[$date] ?? ''));
+                if ($current !== '') {
+                    $nextKnownProject = $current;
+                    continue;
+                }
+                if ($nextKnownProject !== '') {
+                    $assignedByDate[$date] = $nextKnownProject;
+                }
+            }
+
+            $jobRows = [];
+            foreach ($dateRange as $date) {
+                $assignedJob = trim((string) ($assignedByDate[$date] ?? ''));
+                if ($assignedJob === '') {
+                    $assignedJob = $defaultJobCode;
+                    if ($assignedJob !== '') {
+                        $assignedByDate[$date] = $assignedJob;
+                    }
+                }
+                if ($assignedJob === '' || isset($jobRows[$assignedJob])) {
+                    continue;
+                }
+                $jobRows[$assignedJob] = [
+                    'job' => $assignedJob,
+                    'cells' => [],
+                ];
+            }
+            if (empty($jobRows)) {
+                $fallbackJob = $defaultJobCode;
+                $jobRows[$fallbackJob] = [
+                    'job' => $fallbackJob,
+                    'cells' => [],
+                ];
+            }
+
+            $jobKeys = array_keys($jobRows);
+            foreach ($dateRange as $date) {
+                $att = $attDaily[$empCode][$date] ?? null;
+                $override = $overrideDaily[$empCode][$date] ?? null;
+                $punch = $punchDaily[$empCode][$date] ?? null;
+
+                $workCode = is_array($att) ? trim((string) ($att['work_code'] ?? '')) : '';
+                $workHours = is_array($att) ? trim((string) ($att['work_hours'] ?? '')) : '';
+                $overrideCode = is_array($override) ? trim((string) ($override['override_work_code'] ?? '')) : '';
+                $overrideHours = is_array($override) ? trim((string) ($override['override_work_hours'] ?? '')) : '';
+                $overrideStatus = is_array($override) ? (int) ($override['override_is_approved'] ?? 0) : 0;
+                $firstLog = is_array($punch) ? ($punch['first_log'] ?? null) : null;
+                $lastLog = is_array($punch) ? ($punch['last_log'] ?? null) : null;
+                $punchHours = calculate_work_hours($firstLog, $lastLog);
+
+                $finalWorkCode = ($overrideStatus === 1) ? $overrideCode : $workCode;
+                if ($overrideStatus === 1) {
+                    $finalWorkHours = $overrideHours;
+                } elseif ($workHours !== '') {
+                    $finalWorkHours = $workHours;
+                } else {
+                    $finalWorkHours = $punchHours !== null ? $punchHours : '';
+                }
+
+                $dayValue = $finalWorkCode !== '' ? $finalWorkCode : $finalWorkHours;
+                if ($dayValue !== '' && is_numeric($dayValue)) {
+                    $numericValue = (float) $dayValue;
+                    if ((float) ((int) $numericValue) === $numericValue) {
+                        $dayValue = (string) ((int) $numericValue);
+                    } else {
+                        $dayValue = rtrim(rtrim(number_format($numericValue, 2, '.', ''), '0'), '.');
+                    }
+                }
+
+                $assignedJob = trim((string) ($assignedByDate[$date] ?? ''));
+                if ($assignedJob === '') {
+                    $assignedJob = (string) $jobKeys[0];
+                }
+
+                foreach ($jobKeys as $jobKey) {
+                    $jobRows[$jobKey]['cells'][] = ((string) $jobKey === $assignedJob) ? $dayValue : 'T';
+                }
+            }
+
+            foreach ($jobRows as $jobRow) {
+                $row = [
+                    $lineNo,
+                    $empCode,
+                    $empName,
+                    $jobRow['job'],
+                ];
+                $row = array_merge($row, $jobRow['cells']);
+                fputcsv($output, $row);
+            }
+        }
+
+        $processed += count($batchEmployees);
+        if ($progress) {
+            $progress($processed);
+        }
+
+        $exportOffset += count($batchEmployees);
+        if (count($batchEmployees) < $batchSize) {
+            break;
+        }
+    }
+
+    return null;
+}
+
 $context = null;
 
 $exportType = strtolower(trim((string) ($_GET['export'] ?? '')));
 $reportType = strtolower(trim((string) ($_GET['report'] ?? 'detailed')));
-if (!in_array($reportType, ['detailed', 'final'], true)) {
+if (!in_array($reportType, ['detailed', 'final', 'hrms'], true)) {
     $reportType = 'detailed';
 }
 if ($exportType === 'status') {
@@ -1075,6 +1511,7 @@ $defaultEnd = $today->format('Y-m-d');
 $defaultStart = $today->modify('-13 days')->format('Y-m-d');
 $last30Start = $today->modify('-29 days')->format('Y-m-d');
 $last60Start = $today->modify('-59 days')->format('Y-m-d');
+$defaultMonth = $today->format('Y-m');
 
 $designationFilter = normalize_multi_param($_GET['designation'] ?? []);
 $departmentFilter = normalize_multi_param($_GET['department'] ?? []);
@@ -1086,6 +1523,10 @@ $employeeIdInput = trim((string) ($_GET['employee_id'] ?? ''));
 $employeeIdTerms = normalize_search_terms($employeeIdInput);
 $startDate = normalize_date($_GET['start_date'] ?? '', $defaultStart);
 $endDate = normalize_date($_GET['end_date'] ?? '', $defaultEnd);
+$monthInput = normalize_month($_GET['month'] ?? '', $defaultMonth);
+$monthRange = build_month_range($monthInput);
+$monthStartDate = $monthRange[0] ?? $startDate;
+$monthEndDate = $monthRange[1] ?? $endDate;
 $exportRequested = in_array($exportType, ['1', 'true', 'yes', 'csv'], true);
 $exportStart = ($exportType === 'start');
 $page = max(1, (int) ($_GET['page'] ?? 1));
@@ -1101,7 +1542,15 @@ if ($startDate > $endDate) {
     $endDate = $swap;
 }
 
+$filterStartDate = $startDate;
+$filterEndDate = $endDate;
+if (($exportRequested || $exportStart) && $reportType === 'hrms') {
+    $filterStartDate = $monthStartDate;
+    $filterEndDate = $monthEndDate;
+}
+
 $dateRange = build_date_range($startDate, $endDate);
+$hrmsDateRange = build_date_range($monthStartDate, $monthEndDate);
 $collapsedDayColumns = 2;
 $expandedDayColumns = 10;
 
@@ -1496,7 +1945,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
             'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
             'WHERE dp.punch_date BETWEEN ? AND ? AND p.pro_code IN (' . $placeholders . ')' .
             ')';
-        $params = array_merge($params, [$startDate, $endDate], $loginProjectFilter);
+        $params = array_merge($params, [$filterStartDate, $filterEndDate], $loginProjectFilter);
         $types .= 'ss' . str_repeat('s', count($loginProjectFilter));
     }
     if (!empty($costCenterFilter)) {
@@ -1535,7 +1984,7 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
                     'WHERE dp.punch_date BETWEEN ? AND ? AND p.pro_code IN (' . $mapPlaceholders . ')' .
                 ')' .
             ')';
-            $params = array_merge($params, $mappedProjects, [$startDate, $endDate], $mappedProjects);
+            $params = array_merge($params, $mappedProjects, [$filterStartDate, $filterEndDate], $mappedProjects);
             $types .= str_repeat('s', count($mappedProjects)) . 'ss' . str_repeat('s', count($mappedProjects));
         }
 
@@ -1781,6 +2230,16 @@ $exportStartFinalUrl = build_query_url(array_merge($baseQuery, [
     'export' => 'start',
     'report' => 'final',
 ]));
+$exportHrmsUrl = build_query_url(array_merge($baseQuery, [
+    'export' => 'csv',
+    'report' => 'hrms',
+    'month' => $monthInput,
+]));
+$exportStartHrmsUrl = build_query_url(array_merge($baseQuery, [
+    'export' => 'start',
+    'report' => 'hrms',
+    'month' => $monthInput,
+]));
 $last30DaysUrl = build_query_url(array_merge($baseQuery, [
     'start_date' => $last30Start,
     'end_date' => $defaultEnd,
@@ -1831,6 +2290,11 @@ $context = [
     'exportStartFinalUrl' => $exportStartFinalUrl,
 ];
 
+$exportRunStartDate = ($reportType === 'hrms') ? $monthStartDate : $startDate;
+$exportRunEndDate = ($reportType === 'hrms') ? $monthEndDate : $endDate;
+$exportRunDateRange = ($reportType === 'hrms') ? $hrmsDateRange : $dateRange;
+$exportRunMonth = $monthInput;
+
 if ($exportStart) {
     // Ensure clean JSON output (avoid warnings/notices corrupting the response)
     while (ob_get_level() > 0) {
@@ -1840,8 +2304,9 @@ if ($exportStart) {
     @ini_set('html_errors', '0');
     export_log('export_start_request', [
         'report' => $reportType,
-        'date_start' => $startDate,
-        'date_end' => $endDate,
+        'date_start' => $exportRunStartDate,
+        'date_end' => $exportRunEndDate,
+        'month' => $exportRunMonth,
     ]);
 
     if ($mappingRequired) {
@@ -1868,8 +2333,17 @@ if ($exportStart) {
         echo json_encode(['ok' => false, 'message' => 'Export folder is not writable.'], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         exit;
     }
-    $reportLabel = ($reportType === 'final') ? 'final' : 'detailed';
-    $filename = 'attendance-daily-' . $reportLabel . '-' . $startDate . '-to-' . $endDate . '.csv';
+    $reportLabel = 'detailed';
+    if ($reportType === 'final') {
+        $reportLabel = 'final';
+    } elseif ($reportType === 'hrms') {
+        $reportLabel = 'hrms';
+    }
+    if ($reportType === 'hrms') {
+        $filename = build_hrms_export_filename($exportRunMonth);
+    } else {
+        $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.csv';
+    }
     $csvPath = export_job_csv_path($jobId);
     $createdAt = gmdate('c');
     $userId = (string) ($_SESSION['user_id'] ?? '');
@@ -1935,7 +2409,32 @@ if ($exportStart) {
         $job['status'] = 'running';
         write_export_job($jobId, $job);
     };
-    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $reportType, $output, $progress);
+    if ($reportType === 'hrms') {
+        $exportError = export_attendance_hrms_csv(
+            $bd,
+            $filters,
+            $params,
+            $types,
+            $exportRunDateRange,
+            $exportRunStartDate,
+            $exportRunEndDate,
+            $output,
+            $progress
+        );
+    } else {
+        $exportError = export_attendance_csv(
+            $bd,
+            $filters,
+            $params,
+            $types,
+            $exportRunDateRange,
+            $exportRunStartDate,
+            $exportRunEndDate,
+            $reportType,
+            $output,
+            $progress
+        );
+    }
     fclose($output);
 
     if ($exportError !== null) {
@@ -1967,8 +2466,17 @@ if ($exportRequested) {
         exit;
     }
 
-    $reportLabel = ($reportType === 'final') ? 'final' : 'detailed';
-    $filename = 'attendance-daily-' . $reportLabel . '-' . $startDate . '-to-' . $endDate . '.csv';
+    $reportLabel = 'detailed';
+    if ($reportType === 'final') {
+        $reportLabel = 'final';
+    } elseif ($reportType === 'hrms') {
+        $reportLabel = 'hrms';
+    }
+    if ($reportType === 'hrms') {
+        $filename = build_hrms_export_filename($exportRunMonth);
+    } else {
+        $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.csv';
+    }
 
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
@@ -1979,7 +2487,30 @@ if ($exportRequested) {
         exit;
     }
 
-    $exportError = export_attendance_csv($bd, $filters, $params, $types, $dateRange, $startDate, $endDate, $reportType, $output);
+    if ($reportType === 'hrms') {
+        $exportError = export_attendance_hrms_csv(
+            $bd,
+            $filters,
+            $params,
+            $types,
+            $exportRunDateRange,
+            $exportRunStartDate,
+            $exportRunEndDate,
+            $output
+        );
+    } else {
+        $exportError = export_attendance_csv(
+            $bd,
+            $filters,
+            $params,
+            $types,
+            $exportRunDateRange,
+            $exportRunStartDate,
+            $exportRunEndDate,
+            $reportType,
+            $output
+        );
+    }
     if ($exportError !== null) {
         fputcsv($output, ['ERROR', $exportError]);
     }
@@ -2419,6 +2950,42 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     0% { transform: scale(0.96); opacity: 0; }
     100% { transform: scale(1); opacity: 1; }
   }
+  .month-overlay {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(8, 12, 20, 0.58);
+    backdrop-filter: blur(2px);
+    z-index: 1055;
+  }
+  .month-overlay.is-active {
+    display: flex;
+  }
+  .month-modal {
+    width: min(420px, calc(100vw - 2rem));
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    padding: 16px;
+  }
+  .month-title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: #0f172a;
+  }
+  .month-field {
+    margin-bottom: 12px;
+  }
+  .month-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
   @media (max-width: 576px) {
     .export-modal {
       width: 90%;
@@ -2432,6 +2999,10 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     .export-ring-inner {
       width: 104px;
       height: 104px;
+    }
+    .month-actions {
+      flex-direction: column-reverse;
+      align-items: stretch;
     }
   }
 </style>
@@ -2567,7 +3138,10 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
             <a class="btn btn-outline-success btn-block export-btn" href="<?= h($exportDetailedUrl) ?>" data-export-start="<?= h($exportStartDetailedUrl) ?>">Export Detailed</a>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
-            <a class="btn btn-outline-primary btn-block export-btn" href="<?= h($exportFinalUrl) ?>" data-export-start="<?= h($exportStartFinalUrl) ?>">Export Final</a>
+            <a class="btn btn-outline-primary btn-block export-btn" href="<?= h($exportFinalUrl) ?>" data-export-start="<?= h($exportStartFinalUrl) ?>">Export Summary</a>
+          </div>
+          <div class="form-group col-md-2 d-flex align-items-end">
+            <a class="btn btn-outline-info btn-block export-btn export-btn-hrms" href="<?= h($exportHrmsUrl) ?>" data-export-start="<?= h($exportStartHrmsUrl) ?>" data-export-report="hrms" data-export-month="<?= h($monthInput) ?>">Export HRMS</a>
           </div>
         </form>
         <div class="small text-muted">
@@ -2880,6 +3454,21 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     <div class="export-status" aria-live="polite">Starting export...</div>
     <div class="export-actions">
       <button type="button" class="btn btn-outline-light btn-sm" id="exportClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="hrmsMonthOverlay" class="month-overlay" aria-hidden="true">
+  <div class="month-modal" role="dialog" aria-modal="true" aria-labelledby="hrmsMonthTitle">
+    <div class="month-title" id="hrmsMonthTitle">Select month for HRMS export</div>
+    <div class="month-field">
+      <label for="hrmsMonthInput" class="mb-1">Month</label>
+      <input id="hrmsMonthInput" type="month" class="form-control" value="<?= h($monthInput) ?>">
+      <small class="text-muted d-block mt-2">Export format: LNo, Employee Code, Employee Name, Job, D1..DX</small>
+    </div>
+    <div class="month-actions">
+      <button type="button" class="btn btn-outline-secondary btn-sm" id="hrmsMonthCancel">Cancel</button>
+      <button type="button" class="btn btn-primary btn-sm" id="hrmsMonthConfirm">Export HRMS</button>
     </div>
   </div>
 </div>
@@ -3464,10 +4053,15 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     const countEl = overlay.querySelector('.export-count');
     const statusEl = overlay.querySelector('.export-status');
     const closeBtn = document.getElementById('exportClose');
+    const monthOverlay = document.getElementById('hrmsMonthOverlay');
+    const monthInput = document.getElementById('hrmsMonthInput');
+    const monthCancelBtn = document.getElementById('hrmsMonthCancel');
+    const monthConfirmBtn = document.getElementById('hrmsMonthConfirm');
 
     let pollTimer = null;
     let activeJob = null;
     let activeBtn = null;
+    let pendingHrmsBtn = null;
 
     const showOverlay = () => {
       overlay.classList.add('is-active');
@@ -3512,6 +4106,40 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           throw new Error(`Invalid JSON response: ${snippet}`);
         }
       });
+    };
+    const addMonthToUrl = (url, month) => {
+      if (!url) {
+        return '';
+      }
+      try {
+        const parsed = new URL(url, window.location.href);
+        parsed.searchParams.set('month', month);
+        return parsed.toString();
+      } catch (error) {
+        return url;
+      }
+    };
+    const showMonthOverlay = (monthValue) => {
+      if (!monthOverlay || !monthInput) {
+        return;
+      }
+      const value = monthValue && /^\d{4}-\d{2}$/.test(monthValue) ? monthValue : monthInput.value;
+      if (value) {
+        monthInput.value = value;
+      }
+      monthOverlay.classList.add('is-active');
+      monthOverlay.setAttribute('aria-hidden', 'false');
+      setTimeout(() => {
+        monthInput.focus();
+      }, 60);
+    };
+    const hideMonthOverlay = () => {
+      if (!monthOverlay) {
+        return;
+      }
+      monthOverlay.classList.remove('is-active');
+      monthOverlay.setAttribute('aria-hidden', 'true');
+      pendingHrmsBtn = null;
     };
     const pollStatus = () => {
       if (!activeJob || !activeJob.statusUrl) {
@@ -3574,6 +4202,58 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           }
         });
     };
+    const startExport = (btn, startUrl, fallbackUrl) => {
+      if (activeBtn) {
+        return;
+      }
+      if (!startUrl) {
+        window.location.href = fallbackUrl || btn.getAttribute('href');
+        return;
+      }
+      activeBtn = btn;
+      activeBtn.classList.add('is-loading');
+      showOverlay();
+      if (ring) {
+        ring.classList.remove('is-complete');
+      }
+      setProgress(0, 0, 0);
+      if (statusEl) {
+        statusEl.textContent = 'Starting export...';
+      }
+
+      fetch(startUrl, { credentials: 'same-origin' })
+        .then(parseJsonResponse)
+        .then((data) => {
+          if (!data || !data.ok) {
+            throw new Error(data && data.message ? data.message : 'Unable to start export.');
+          }
+          activeJob = {
+            job: data.job,
+            statusUrl: data.statusUrl,
+            downloadUrl: data.downloadUrl,
+          };
+          setProgress(0, Number(data.total), 0);
+          pollStatus();
+          pollTimer = setInterval(pollStatus, 900);
+        })
+        .catch((error) => {
+          if (activeBtn) {
+            activeBtn.classList.remove('is-loading');
+          }
+          if (statusEl) {
+            statusEl.textContent = error && error.message ? error.message : 'Unable to start export.';
+          }
+          setTimeout(() => {
+            const target = fallbackUrl || btn.getAttribute('href');
+            if (target) {
+              window.location.href = target;
+            }
+            hideOverlay();
+          }, 1200);
+          activeBtn = null;
+          activeJob = null;
+        });
+    };
 
     exportButtons.forEach((btn) => {
       btn.addEventListener('click', function (event) {
@@ -3581,53 +4261,56 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
         if (activeBtn) {
           return;
         }
-        const startUrl = btn.getAttribute('data-export-start');
-        if (!startUrl) {
-          window.location.href = btn.getAttribute('href');
+        const report = (btn.getAttribute('data-export-report') || '').toLowerCase();
+        if (report === 'hrms' && monthOverlay && monthInput) {
+          pendingHrmsBtn = btn;
+          showMonthOverlay(btn.getAttribute('data-export-month') || monthInput.value);
           return;
         }
-        activeBtn = btn;
-        activeBtn.classList.add('is-loading');
-        showOverlay();
-        if (ring) {
-          ring.classList.remove('is-complete');
-        }
-        setProgress(0, 0, 0);
-        if (statusEl) {
-          statusEl.textContent = 'Starting export...';
-        }
-
-        fetch(startUrl, { credentials: 'same-origin' })
-          .then(parseJsonResponse)
-          .then((data) => {
-            if (!data || !data.ok) {
-              throw new Error(data && data.message ? data.message : 'Unable to start export.');
-            }
-            activeJob = {
-              job: data.job,
-              statusUrl: data.statusUrl,
-              downloadUrl: data.downloadUrl,
-            };
-            setProgress(0, Number(data.total), 0);
-            pollStatus();
-            pollTimer = setInterval(pollStatus, 900);
-          })
-          .catch((error) => {
-            if (activeBtn) {
-              activeBtn.classList.remove('is-loading');
-            }
-            if (statusEl) {
-              statusEl.textContent = error && error.message ? error.message : 'Unable to start export.';
-            }
-            setTimeout(() => {
-              window.location.href = btn.getAttribute('href');
-              hideOverlay();
-            }, 1200);
-            activeBtn = null;
-            activeJob = null;
-          });
+        const startUrl = btn.getAttribute('data-export-start');
+        const fallbackUrl = btn.getAttribute('href');
+        startExport(btn, startUrl, fallbackUrl);
       });
     });
+
+    if (monthCancelBtn) {
+      monthCancelBtn.addEventListener('click', function () {
+        hideMonthOverlay();
+      });
+    }
+    if (monthOverlay) {
+      monthOverlay.addEventListener('click', function (event) {
+        if (event.target === monthOverlay) {
+          hideMonthOverlay();
+        }
+      });
+    }
+    if (monthConfirmBtn && monthInput) {
+      monthConfirmBtn.addEventListener('click', function () {
+        const monthValue = (monthInput.value || '').trim();
+        if (!/^\d{4}-\d{2}$/.test(monthValue)) {
+          monthInput.setCustomValidity('Please select a valid month.');
+          monthInput.reportValidity();
+          return;
+        }
+        monthInput.setCustomValidity('');
+        const selectedBtn = pendingHrmsBtn;
+        hideMonthOverlay();
+        if (!selectedBtn) {
+          return;
+        }
+        selectedBtn.setAttribute('data-export-month', monthValue);
+        const startUrl = addMonthToUrl(selectedBtn.getAttribute('data-export-start'), monthValue);
+        const fallbackUrl = addMonthToUrl(selectedBtn.getAttribute('href'), monthValue);
+        startExport(selectedBtn, startUrl, fallbackUrl);
+      });
+      monthInput.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          monthConfirmBtn.click();
+        }
+      });
+    }
 
     if (closeBtn) {
       closeBtn.addEventListener('click', function () {
