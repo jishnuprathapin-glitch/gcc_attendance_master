@@ -179,6 +179,11 @@ function is_timekeeper_other_reason(?string $reasonCode): bool {
     return strtoupper(trim((string) $reasonCode)) === 'OTH';
 }
 
+function is_timekeeper_comp_off_reason(?string $reasonCode): bool {
+    $code = strtoupper(trim((string) $reasonCode));
+    return $code === 'COMP_OFF' || $code === 'COMPOFF';
+}
+
 $uaeTz = new DateTimeZone('Asia/Dubai');
 $todayUae = (new DateTimeImmutable('now', $uaeTz))->format('Y-m-d');
 
@@ -431,8 +436,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                         $medicalCertificatePath = null;
                         $medicalCertificateName = null;
                         $isSickReason = is_timekeeper_sick_leave_reason($reasonCode);
+                        $isStaff = is_staff_employee_type($employeeTypeCode);
 
                         $errors = [];
+
+                        if (is_timekeeper_comp_off_reason($reasonCode) && !$isStaff) {
+                            $errors[] = 'COMP_OFF reason is allowed only for staff employees.';
+                        }
 
                         if ($hoursRaw !== '') {
                             if (!is_numeric($hoursRaw)) {
@@ -448,7 +458,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                         }
 
                         if ($reasonMeta !== null) {
-                            apply_reason_defaults($reasonMeta, is_staff_employee_type($employeeTypeCode), $hours, $workCode);
+                            apply_reason_defaults($reasonMeta, $isStaff, $hours, $workCode);
                         }
 
                         if ($isSickReason) {
@@ -957,6 +967,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 $reasonCodeRaw = strtoupper(trim((string) ($reasonCodeList[$i] ?? '')));
                 $reasonCode = $reasonCodeRaw !== '' ? $reasonCodeRaw : null;
                 $reasonMeta = $reasonCode !== null ? ($noPunchReasonMeta[$reasonCode] ?? null) : null;
+                $isStaff = is_staff_employee_type($employeeTypeMap[$empCode] ?? null);
                 $reasonNote = trim((string) ($reasonNoteList[$i] ?? ''));
                 if ($reasonNote !== '') {
                     $reasonNote = substr($reasonNote, 0, 255);
@@ -966,6 +977,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
 
                 if (is_timekeeper_sick_leave_reason($reasonCode)) {
                     $errors[] = 'For SICK reason, use row "Send to HR" and attach medical certificate for ' . $empCode . ' on ' . $attDate . '.';
+                    continue;
+                }
+                if (is_timekeeper_comp_off_reason($reasonCode) && !$isStaff) {
+                    $errors[] = 'COMP_OFF reason is allowed only for staff employees for ' . $empCode . ' on ' . $attDate . '.';
                     continue;
                 }
 
@@ -983,7 +998,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$loadError && !$mappingRequired) {
                 }
 
                 if ($reasonMeta !== null) {
-                    $isStaff = is_staff_employee_type($employeeTypeMap[$empCode] ?? null);
                     apply_reason_defaults($reasonMeta, $isStaff, $hours, $workCode);
                 }
 
@@ -1708,31 +1722,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
   .no-punch-toast.is-error .no-punch-toast__title {
     color: #991b1b;
   }
-  .no-punch-medical-modal {
-    position: fixed;
-    inset: 0;
-    z-index: 2200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-  }
-  .no-punch-medical-modal__backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(15, 23, 42, 0.56);
-  }
-  .no-punch-medical-modal__dialog {
-    position: relative;
-    width: min(560px, calc(100vw - 32px));
-    max-height: calc(100vh - 32px);
-    overflow-y: auto;
-    border-radius: 14px;
-    background: #ffffff;
-    border: 1px solid rgba(15, 23, 42, 0.1);
-    box-shadow: 0 24px 48px rgba(15, 23, 42, 0.28);
-    padding: 18px;
-  }
   @media (max-width: 576px) {
     .no-punch-toast {
       grid-template-columns: 36px minmax(0, 1fr);
@@ -1888,6 +1877,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                   <?php $meta = $noPunchReasonMeta[$code] ?? []; ?>
                   <option
                     value="<?= h($code) ?>"
+                    data-staff-only="<?= is_timekeeper_comp_off_reason($code) ? '1' : '0' ?>"
                     data-default-behavior="<?= h($meta['default_behavior'] ?? 'NONE') ?>"
                     data-default-work-code="<?= h($meta['default_work_code'] ?? '') ?>"
                   ><?= h($code . ' - ' . $text) ?></option>
@@ -2012,6 +2002,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                           $medicalCertificateUrl = attendance_app_base() . '/' . ltrim($medicalCertificatePath, '/');
                       }
                     ?>
+                    <?php $rowIsStaff = is_staff_employee_type($row['employee_type_code'] ?? null); ?>
                     <tr data-row-index="<?= (int) $rowIndex ?>" data-employee-type="<?= h($row['employee_type_code'] ?? '') ?>">
                       <td>
                         <?= h($row['emp_code']) ?>
@@ -2064,6 +2055,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
                         >
                           <option value="">-- Select --</option>
                           <?php foreach ($noPunchReasonOptions as $code => $text): ?>
+                            <?php if (is_timekeeper_comp_off_reason($code) && !$rowIsStaff): ?>
+                              <?php continue; ?>
+                            <?php endif; ?>
                             <?php $selected = strtoupper((string) ($row['override_reason_code'] ?? '')) === $code; ?>
                             <?php $meta = $noPunchReasonMeta[$code] ?? []; ?>
                             <option
@@ -2092,6 +2086,12 @@ include __DIR__ . '/../admin/include/layout_top.php';
                         >
                         <?php if ($lockInputs): ?>
                           <input type="hidden" name="override_reason_note[]" value="<?= h($row['override_reason_note'] ?? '') ?>" data-generated-mirror="1">
+                        <?php endif; ?>
+                        <?php if (!$lockInputs): ?>
+                          <div class="mt-2">
+                            <input type="file" class="form-control-file js-inline-medical-file" accept=".pdf,.jpg,.jpeg,.png">
+                            <div class="small text-muted mt-1">Medical certificate for SICK (max 5 MB)</div>
+                          </div>
                         <?php endif; ?>
                         <?php if ($medicalCertificateUrl !== ''): ?>
                           <div class="small mt-1">
@@ -2138,28 +2138,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
         </div>
       </div>
 
-      <div class="no-punch-medical-modal d-none js-medical-modal" role="dialog" aria-modal="true" aria-labelledby="timekeeperMedicalModalTitle">
-        <div class="no-punch-medical-modal__backdrop js-medical-modal-cancel"></div>
-        <div class="no-punch-medical-modal__dialog" role="document">
-          <h3 class="h5 mb-2" id="timekeeperMedicalModalTitle">Sick Leave Details</h3>
-          <p class="text-muted small mb-3">Add medical note and upload medical certificate before sending this row to HR.</p>
-          <div class="form-group mb-3">
-            <label for="timekeeperMedicalPopupNote">Medical note</label>
-            <textarea id="timekeeperMedicalPopupNote" class="form-control js-medical-note-input" rows="4" maxlength="500" placeholder="Enter sick leave note"></textarea>
-            <div class="small text-danger mt-1 d-none js-medical-note-error">Medical note is required.</div>
-          </div>
-          <div class="form-group mb-3">
-            <label for="timekeeperMedicalPopupFile">Medical certificate</label>
-            <input id="timekeeperMedicalPopupFile" type="file" class="form-control-file js-medical-file-input" accept=".pdf,.jpg,.jpeg,.png">
-            <div class="small text-muted mt-1">Accepted: PDF, JPG, JPEG, PNG (max 5 MB)</div>
-            <div class="small text-danger mt-1 d-none js-medical-file-error">Medical certificate file is required.</div>
-          </div>
-          <div class="d-flex justify-content-end">
-            <button type="button" class="btn btn-outline-secondary js-medical-modal-cancel">Cancel</button>
-            <button type="button" class="btn btn-primary ml-2 js-medical-modal-confirm">Continue</button>
-          </div>
-        </div>
-      </div>
     <?php endif; ?>
   </div>
 </section>
@@ -2235,6 +2213,12 @@ include __DIR__ . '/../admin/include/layout_top.php';
       var reasonCode = String(reason.value || '').trim().toUpperCase();
       var noteVal = note ? String(note.value || '').trim() : '';
 
+      if (isCompOffReason(reasonCode) && !isStaffRow(tr)) {
+        showValidationError('COMP_OFF reason is allowed only for staff employees.');
+        reason.focus();
+        return false;
+      }
+
       if (hoursVal !== '' && codeVal !== '') {
         showValidationError('Choose only one override per row: work hours OR work code (not both).');
         code.focus();
@@ -2302,14 +2286,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
     var tableCampbossFilter = document.getElementById('noPunchCampbossFilter');
     var tableFilterResetBtn = document.getElementById('noPunchTableFilterReset');
     var toastHideTimer = null;
-    var medicalModal = document.querySelector('.js-medical-modal');
-    var medicalNoteInput = medicalModal ? medicalModal.querySelector('.js-medical-note-input') : null;
-    var medicalFileInput = medicalModal ? medicalModal.querySelector('.js-medical-file-input') : null;
-    var medicalNoteError = medicalModal ? medicalModal.querySelector('.js-medical-note-error') : null;
-    var medicalFileError = medicalModal ? medicalModal.querySelector('.js-medical-file-error') : null;
-    var medicalConfirmButton = medicalModal ? medicalModal.querySelector('.js-medical-modal-confirm') : null;
-    var medicalCancelButtons = medicalModal ? medicalModal.querySelectorAll('.js-medical-modal-cancel') : [];
-    var medicalModalState = null;
 
     function ensureNoPunchToastMarkup(el) {
       if (!el) return;
@@ -2464,50 +2440,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
       return String(code || '').trim().toUpperCase() === 'SICK';
     }
 
-    function hideMedicalModal() {
-      if (!medicalModal) return;
-      medicalModal.classList.add('d-none');
-      medicalModalState = null;
-      if (medicalNoteInput) {
-        medicalNoteInput.value = '';
-      }
-      if (medicalFileInput) {
-        medicalFileInput.value = '';
-      }
-      if (medicalNoteError) {
-        medicalNoteError.classList.add('d-none');
-      }
-      if (medicalFileError) {
-        medicalFileError.classList.add('d-none');
-      }
-    }
-
-    function openMedicalModal(row, submitter) {
-      if (!medicalModal || !medicalNoteInput || !medicalFileInput || !row || !submitter) {
-        return false;
-      }
-      var submitterRowIndex = String(submitter.value || '').trim();
-      if (submitterRowIndex === '') {
-        return false;
-      }
-      var rowReasonNote = row.querySelector('input.js-override-reason-note');
-      medicalModalState = {
-        row: row,
-        submitter: submitter,
-        rowIndex: '0'
-      };
-      medicalNoteInput.value = rowReasonNote ? String(rowReasonNote.value || '').trim() : '';
-      medicalFileInput.value = '';
-      if (medicalNoteError) {
-        medicalNoteError.classList.add('d-none');
-      }
-      if (medicalFileError) {
-        medicalFileError.textContent = 'Medical certificate file is required.';
-        medicalFileError.classList.add('d-none');
-      }
-      medicalModal.classList.remove('d-none');
-      medicalNoteInput.focus();
-      return true;
+    function isCompOffReason(code) {
+      var normalized = String(code || '').trim().toUpperCase();
+      return normalized === 'COMP_OFF' || normalized === 'COMPOFF';
     }
 
     function findEditableSickReasonRow(rows) {
@@ -3030,6 +2965,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
       if (totalRows === 0) {
         syncRecordCount(0, 0);
         syncTableFilterEmptyState(0, 0);
+        refreshBulkCompOffVisibility();
         return;
       }
 
@@ -3052,6 +2988,44 @@ include __DIR__ . '/../admin/include/layout_top.php';
 
       syncTableFilterEmptyState(visibleRows, totalRows);
       syncRecordCount(visibleRows, totalRows);
+      refreshBulkCompOffVisibility();
+    }
+
+    function allVisibleRowsAreStaff() {
+      if (!form) return false;
+      var rows = getNoPunchDataRows();
+      var visibleCount = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var tr = rows[i];
+        if (tr.style.display === 'none') {
+          continue;
+        }
+        visibleCount++;
+        if (!isStaffRow(tr)) {
+          return false;
+        }
+      }
+      return visibleCount > 0;
+    }
+
+    function refreshBulkCompOffVisibility() {
+      var reasonEl = document.getElementById('bulkOverrideReason');
+      if (!reasonEl || !reasonEl.options) return;
+      var allowCompOff = allVisibleRowsAreStaff();
+      var compOffOption = null;
+      for (var i = 0; i < reasonEl.options.length; i++) {
+        var option = reasonEl.options[i];
+        if (isCompOffReason(option.value || '')) {
+          compOffOption = option;
+          break;
+        }
+      }
+      if (!compOffOption) return;
+      compOffOption.disabled = !allowCompOff;
+      compOffOption.hidden = !allowCompOff;
+      if (!allowCompOff && isCompOffReason(reasonEl.value || '')) {
+        reasonEl.value = '';
+      }
     }
 
     function wireTableFilters() {
@@ -3377,6 +3351,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
           var saveRow = submitter.closest('tr');
           var saveReason = saveRow ? saveRow.querySelector('select[name="override_reason_code[]"]') : null;
           var isSickRowSave = saveReason ? isSickReason(saveReason.value || '') : false;
+          var sickExtraFields = null;
           if (!validateOverrideRow(saveRow)) {
             e.preventDefault();
             return;
@@ -3388,12 +3363,40 @@ include __DIR__ . '/../admin/include/layout_top.php';
           }
           e.preventDefault();
           if (isSickRowSave) {
-            if (!openMedicalModal(saveRow, submitter)) {
-              showAjaxMessage('Unable to open sick leave details popup.', true, submitter);
+            var saveRowIndex = String(submitter.value || '').trim();
+            var inlineMedicalFile = saveRow ? saveRow.querySelector('.js-inline-medical-file') : null;
+            var rowReasonNote = saveRow ? saveRow.querySelector('input.js-override-reason-note') : null;
+            var noteText = rowReasonNote ? String(rowReasonNote.value || '').trim() : '';
+            var fileObject = inlineMedicalFile && inlineMedicalFile.files ? inlineMedicalFile.files[0] : null;
+
+            if (noteText === '') {
+              showValidationError('Medical note is required for SICK reason.');
+              if (rowReasonNote) {
+                rowReasonNote.focus();
+              }
+              return;
             }
-            return;
+            if (!fileObject) {
+              showValidationError('Attach medical certificate for SICK reason.');
+              if (inlineMedicalFile) {
+                inlineMedicalFile.focus();
+              }
+              return;
+            }
+            if (Number(fileObject.size || 0) > (5 * 1024 * 1024)) {
+              showValidationError('Medical certificate must be 5 MB or smaller.');
+              if (inlineMedicalFile) {
+                inlineMedicalFile.focus();
+              }
+              return;
+            }
+            sickExtraFields = [
+              { name: 'medical_target_index', value: saveRowIndex },
+              { name: 'medical_popup_note', value: noteText },
+              { name: 'medical_certificate_file', value: fileObject, mode: 'append' }
+            ];
           }
-          submitRowActionAjax(submitter, null);
+          submitRowActionAjax(submitter, sickExtraFields);
           return;
         }
 
@@ -3504,6 +3507,11 @@ include __DIR__ . '/../admin/include/layout_top.php';
         reasonEl.focus();
         return;
       }
+      if (isCompOffReason(reasonVal) && !allVisibleRowsAreStaff()) {
+        showValidationError('COMP_OFF in bulk is allowed only when all visible rows are staff.');
+        reasonEl.focus();
+        return;
+      }
 
       // Normalize to 2 decimals for consistency with server-side formatting.
       var normalizedHours = n.toFixed(2);
@@ -3518,6 +3526,9 @@ include __DIR__ . '/../admin/include/layout_top.php';
         if (!rowHours || !rowCode || !rowReason) continue;
 
         if (rowHours.readOnly || rowHours.disabled || rowCode.readOnly || rowCode.disabled || rowReason.disabled) {
+          continue;
+        }
+        if (isCompOffReason(reasonVal) && !isStaffRow(tr)) {
           continue;
         }
 
@@ -3546,96 +3557,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
     if (bulkApplyBtn) {
       bulkApplyBtn.addEventListener('click', function () {
         applyBulkOverride();
-      });
-    }
-
-    if (medicalFileInput && medicalFileInput.dataset.bound !== '1') {
-      medicalFileInput.dataset.bound = '1';
-      medicalFileInput.addEventListener('change', function () {
-        if (medicalFileError) {
-          medicalFileError.classList.add('d-none');
-        }
-      });
-    }
-    if (medicalNoteInput && medicalNoteInput.dataset.bound !== '1') {
-      medicalNoteInput.dataset.bound = '1';
-      medicalNoteInput.addEventListener('input', function () {
-        if (medicalNoteError) {
-          medicalNoteError.classList.add('d-none');
-        }
-      });
-    }
-    for (var modalCancelIdx = 0; modalCancelIdx < medicalCancelButtons.length; modalCancelIdx++) {
-      var cancelButton = medicalCancelButtons[modalCancelIdx];
-      if (cancelButton.dataset.bound === '1') {
-        continue;
-      }
-      cancelButton.dataset.bound = '1';
-      cancelButton.addEventListener('click', function () {
-        hideMedicalModal();
-      });
-    }
-    if (medicalModal && medicalModal.dataset.bound !== '1') {
-      medicalModal.dataset.bound = '1';
-      medicalModal.addEventListener('keydown', function (event) {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          hideMedicalModal();
-        }
-      });
-    }
-    if (medicalConfirmButton && medicalConfirmButton.dataset.bound !== '1') {
-      medicalConfirmButton.dataset.bound = '1';
-      medicalConfirmButton.addEventListener('click', function () {
-        if (!medicalModalState) {
-          hideMedicalModal();
-          return;
-        }
-        var noteText = medicalNoteInput ? String(medicalNoteInput.value || '').trim() : '';
-        var fileObject = medicalFileInput && medicalFileInput.files ? medicalFileInput.files[0] : null;
-
-        if (noteText === '') {
-          if (medicalNoteError) {
-            medicalNoteError.textContent = 'Medical note is required.';
-            medicalNoteError.classList.remove('d-none');
-          }
-          if (medicalNoteInput) {
-            medicalNoteInput.focus();
-          }
-          return;
-        }
-        if (!fileObject) {
-          if (medicalFileError) {
-            medicalFileError.textContent = 'Medical certificate file is required.';
-            medicalFileError.classList.remove('d-none');
-          }
-          if (medicalFileInput) {
-            medicalFileInput.focus();
-          }
-          return;
-        }
-        if (Number(fileObject.size || 0) > (5 * 1024 * 1024)) {
-          if (medicalFileError) {
-            medicalFileError.textContent = 'Medical certificate must be 5 MB or smaller.';
-            medicalFileError.classList.remove('d-none');
-          }
-          if (medicalFileInput) {
-            medicalFileInput.focus();
-          }
-          return;
-        }
-
-        var state = medicalModalState;
-        var rowReasonNote = state.row ? state.row.querySelector('input.js-override-reason-note') : null;
-        if (rowReasonNote) {
-          rowReasonNote.value = noteText;
-        }
-        hideMedicalModal();
-        submitRowActionAjax(state.submitter, [
-          { name: 'medical_target_index', value: String(state.rowIndex) },
-          { name: 'medical_popup_note', value: noteText },
-          { name: 'medical_certificate_file', value: fileObject, mode: 'append' }
-        ]);
       });
     }
 

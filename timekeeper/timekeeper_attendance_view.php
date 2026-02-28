@@ -1590,6 +1590,7 @@ $costCenterFilter = normalize_multi_param($_GET['cost_center'] ?? []);
 $employeeTypeFilter = normalize_multi_param($_GET['employee_type'] ?? []);
 $employeeIdInput = trim((string) ($_GET['employee_id'] ?? ''));
 $employeeIdTerms = normalize_search_terms($employeeIdInput);
+$includeInactive = in_array(strtolower(trim((string) ($_GET['include_inactive'] ?? ''))), ['1', 'true', 'yes', 'on'], true);
 $startDate = normalize_date($_GET['start_date'] ?? '', $defaultStart);
 $endDate = normalize_date($_GET['end_date'] ?? '', $defaultEnd);
 $monthInput = normalize_month($_GET['month'] ?? '', $defaultMonth);
@@ -1983,7 +1984,10 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
             $loginProjectOptions = array_intersect_key($loginProjectOptions, $mappedProjectSet);
         }
 
-        $filters = ['hr.is_deleted = 0', 'hr.st_code = "A"'];
+        $filters = ['hr.is_deleted = 0'];
+        if (!$includeInactive) {
+            $filters[] = 'hr.st_code = "A"';
+        }
         $params = [];
         $types = '';
 
@@ -2283,6 +2287,9 @@ $baseQuery = [
     'start_date' => $startDate,
     'end_date' => $endDate,
 ];
+if ($includeInactive) {
+    $baseQuery['include_inactive'] = '1';
+}
 $exportDetailedUrl = build_query_url(array_merge($baseQuery, [
     'export' => 'csv',
     'report' => 'detailed',
@@ -2853,6 +2860,35 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     flex-wrap: wrap;
     justify-content: flex-end;
   }
+  .inactive-filter-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid rgba(15, 23, 42, 0.12);
+    border-radius: 10px;
+    background: linear-gradient(90deg, rgba(15, 23, 42, 0.05), rgba(15, 23, 42, 0.01));
+  }
+  .inactive-filter-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    font-weight: 600;
+    color: #0f172a;
+    cursor: pointer;
+  }
+  .inactive-filter-checkbox {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: #0f766e;
+  }
+  .inactive-filter-note {
+    margin: 0;
+    white-space: nowrap;
+  }
   .override-actions {
     display: flex;
     align-items: center;
@@ -3083,6 +3119,13 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     gap: 0.5rem;
   }
   @media (max-width: 576px) {
+    .inactive-filter-panel {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+    .inactive-filter-note {
+      white-space: normal;
+    }
     .export-modal {
       width: 90%;
       min-width: 0;
@@ -3223,6 +3266,14 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           <div class="form-group col-md-2">
             <label for="end_date">End date</label>
             <input id="end_date" type="date" name="end_date" class="form-control" value="<?= h($endDate) ?>">
+          </div>
+          <div class="form-group col-12 mb-2">
+            <div class="inactive-filter-panel">
+              <label class="inactive-filter-label" for="include_inactive">
+                <input class="inactive-filter-checkbox" type="checkbox" id="include_inactive" name="include_inactive" value="1" <?= $includeInactive ? 'checked' : '' ?>>
+                <span>Include inactive employees</span>
+              </label>
+            </div>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
             <button type="submit" class="btn btn-primary btn-block">Apply</button>

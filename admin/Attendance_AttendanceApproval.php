@@ -290,6 +290,140 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $postAction === 'approve') {
         'empCode' => $empCode,
         'attDate' => $attDate,
     ];
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && ($postAction === 'escalation-approve' || $postAction === 'escalation-reject')) {
+    $empCode = trim((string) ($_POST['employeeCode'] ?? ''));
+    $attDate = trim((string) ($_POST['attDate'] ?? ''));
+    $isEscalationApprove = $postAction === 'escalation-approve';
+    if (!verify_csrf($_POST['csrf'] ?? null)) {
+        $error = 'Invalid request token.';
+    } elseif ($empCode === '' || $attDate === '') {
+        $error = 'Employee code and date are required.';
+    } elseif ($userName === '' || $userEmail === '') {
+        $error = 'User name/email missing in session.';
+    } elseif (!isset($bd) || !($bd instanceof mysqli)) {
+        $error = 'Database connection not available.';
+    } elseif (!ensure_no_punch_review_table($bd)) {
+        $error = 'No-punch review table is not available.';
+    } else {
+        $reviewRow = null;
+        $stmt = $bd->prepare(
+            'SELECT campboss_reason_code, campboss_note, is_escalated ' .
+            'FROM gcc_attendance_master.attendance_no_punch_reviews ' .
+            'WHERE emp_code = ? AND att_date = ? LIMIT 1'
+        );
+        if ($stmt) {
+            $stmt->bind_param('ss', $empCode, $attDate);
+            if ($stmt->execute()) {
+                $result = $stmt->get_result();
+                if ($result) {
+                    $reviewRow = $result->fetch_assoc();
+                    $result->free();
+                }
+            }
+            $stmt->close();
+        }
+
+        if (!$reviewRow) {
+            $error = 'Escalation row not found.';
+        } elseif ((int) ($reviewRow['is_escalated'] ?? 0) !== 1) {
+            $error = 'Escalation is already handled.';
+        } else {
+            $changeDate = gmdate('Y-m-d H:i:s');
+            $overrideHours = '0.00';
+            $overrideCode = null;
+            $overrideReasonCode = strtoupper(trim((string) ($reviewRow['campboss_reason_code'] ?? '')));
+            if ($overrideReasonCode === '') {
+                $overrideReasonCode = null;
+            }
+            $overrideReasonNote = trim((string) ($reviewRow['campboss_note'] ?? ''));
+            if ($overrideReasonNote !== '') {
+                $overrideReasonNote = substr($overrideReasonNote, 0, 255);
+            } else {
+                $overrideReasonNote = null;
+            }
+            $approvedStatus = $isEscalationApprove ? 1 : 2;
+
+            $overrideSql = 'INSERT INTO `gcc_attendance_master`.`employee_att_daily_overrides` ' .
+                '(emp_code, att_date, override_work_hours, override_work_code, override_reason_code, override_reason_note, override_change_date, ' .
+                'override_changed_by_email, override_changed_by_name, override_is_approved, override_approved_by_email, override_approved_by_name, override_approved_date) ' .
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' .
+                'ON DUPLICATE KEY UPDATE ' .
+                'override_work_hours = VALUES(override_work_hours), ' .
+                'override_work_code = VALUES(override_work_code), ' .
+                'override_reason_code = VALUES(override_reason_code), ' .
+                'override_reason_note = VALUES(override_reason_note), ' .
+                'override_change_date = VALUES(override_change_date), ' .
+                'override_changed_by_email = VALUES(override_changed_by_email), ' .
+                'override_changed_by_name = VALUES(override_changed_by_name), ' .
+                'override_is_approved = VALUES(override_is_approved), ' .
+                'override_approved_by_email = VALUES(override_approved_by_email), ' .
+                'override_approved_by_name = VALUES(override_approved_by_name), ' .
+                'override_approved_date = VALUES(override_approved_date)';
+
+            $reviewUpdateSql = 'UPDATE gcc_attendance_master.attendance_no_punch_reviews ' .
+                'SET is_escalated = 0 ' .
+                'WHERE emp_code = ? AND att_date = ? AND is_escalated = 1';
+
+            if ($bd->begin_transaction()) {
+                $completed = false;
+                $stmtOverride = $bd->prepare($overrideSql);
+                if ($stmtOverride) {
+                    $stmtOverride->bind_param(
+                        'sssssssssisss',
+                        $empCode,
+                        $attDate,
+                        $overrideHours,
+                        $overrideCode,
+                        $overrideReasonCode,
+                        $overrideReasonNote,
+                        $changeDate,
+                        $userEmail,
+                        $userName,
+                        $approvedStatus,
+                        $userEmail,
+                        $userName,
+                        $changeDate
+                    );
+                    if ($stmtOverride->execute()) {
+                        $stmtReview = $bd->prepare($reviewUpdateSql);
+                        if ($stmtReview) {
+                            $stmtReview->bind_param('ss', $empCode, $attDate);
+                            if ($stmtReview->execute() && $stmtReview->affected_rows > 0) {
+                                $completed = true;
+                            } else {
+                                $error = 'Unable to update escalation status.';
+                            }
+                            $stmtReview->close();
+                        } else {
+                            $error = 'Unable to prepare escalation update statement.';
+                        }
+                    } else {
+                        $error = 'Unable to save escalation decision.';
+                    }
+                    $stmtOverride->close();
+                } else {
+                    $error = 'Unable to prepare override statement for escalation.';
+                }
+
+                if ($completed) {
+                    $bd->commit();
+                    $success = $isEscalationApprove ? 'Escalation approved.' : 'Escalation rejected.';
+                } else {
+                    $bd->rollback();
+                }
+            } else {
+                $error = 'Unable to start database transaction.';
+            }
+        }
+    }
+    $ajaxPayload = [
+        'action' => $postAction,
+        'ok' => $error === null,
+        'message' => $success,
+        'error' => $error,
+        'empCode' => $empCode,
+        'attDate' => $attDate,
+    ];
 } elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && $postAction === 'approve-all') {
     $approvedCount = 0;
     $skippedCount = 0;
@@ -1103,7 +1237,7 @@ include __DIR__ . '/include/layout_top.php';
           </div>
           <div class="approval-stat">
             <div class="approval-stat-label">Escalations</div>
-            <div class="approval-stat-value"><?= h((string) $escalationCount) ?></div>
+            <div class="approval-stat-value js-escalation-count"><?= h((string) $escalationCount) ?></div>
             <div class="approval-stat-meta">No-show cases</div>
           </div>
           <div class="approval-stat">
@@ -1404,7 +1538,7 @@ include __DIR__ . '/include/layout_top.php';
             <span class="approval-accordion-toggle-indicator" aria-hidden="true">&#8250;</span>
             <div>
               <h3 class="card-title">Escalations (No show / Missing in camp)</h3>
-              <div class="approval-accordion-toggle-meta"><?= h((string) $escalationCount) ?> rows</div>
+              <div class="approval-accordion-toggle-meta"><span class="js-escalation-count"><?= h((string) $escalationCount) ?></span> rows</div>
             </div>
           </button>
         </div>
@@ -1421,6 +1555,7 @@ include __DIR__ . '/include/layout_top.php';
                   <th>Transfer To Camp</th>
                   <th>Camp Boss Note</th>
                   <th>Reviewed At</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1444,7 +1579,7 @@ include __DIR__ . '/include/layout_top.php';
                           }
                       }
                     ?>
-                    <tr>
+                    <tr class="js-escalation-row" data-emp-code="<?= h($row['emp_code'] ?? '') ?>" data-att-date="<?= h($row['att_date'] ?? '') ?>">
                       <td><?= h($row['emp_code'] ?? '-') ?></td>
                       <td><?= h($row['emp_name'] ?? '-') ?></td>
                       <td><?= h($row['dept_name'] ?? '-') ?></td>
@@ -1453,13 +1588,30 @@ include __DIR__ . '/include/layout_top.php';
                       <td><?= h($transferLabel) ?></td>
                       <td><?= h($row['campboss_note'] ?? '-') ?></td>
                       <td><?= h($row['campboss_reviewed_at'] ?? '-') ?></td>
+                      <td class="text-nowrap">
+                        <div class="d-flex flex-column">
+                          <form method="post" action="<?= h($actionUrl) ?>" class="js-escalation-approve-form">
+                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="action" value="escalation-approve">
+                            <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                            <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                            <button type="submit" class="btn btn-sm btn-success approval-approve-btn">Approve</button>
+                          </form>
+                          <form method="post" action="<?= h($actionUrl) ?>" class="js-escalation-reject-form mt-1">
+                            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+                            <input type="hidden" name="action" value="escalation-reject">
+                            <input type="hidden" name="employeeCode" value="<?= h($row['emp_code'] ?? '') ?>">
+                            <input type="hidden" name="attDate" value="<?= h($row['att_date'] ?? '') ?>">
+                            <button type="submit" class="btn btn-sm btn-outline-danger approval-reject-btn">Reject</button>
+                          </form>
+                        </div>
+                      </td>
                     </tr>
                   <?php endforeach; ?>
-                <?php else: ?>
-                  <tr>
-                    <td colspan="8" class="text-center text-muted">No escalations found.</td>
-                  </tr>
                 <?php endif; ?>
+                <tr class="js-escalation-empty-row" style="<?= !empty($escalations) ? 'display: none;' : '' ?>">
+                  <td colspan="9" class="text-center text-muted">No escalations found.</td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -1523,7 +1675,9 @@ include __DIR__ . '/include/layout_top.php';
 (() => {
   const alerts = document.getElementById('approval-alerts');
   const pendingCountEls = Array.from(document.querySelectorAll('.js-pending-total-count'));
+  const escalationCountEls = Array.from(document.querySelectorAll('.js-escalation-count'));
   const pendingSections = Array.from(document.querySelectorAll('.js-pending-section'));
+  const escalationPanel = document.getElementById('escalations-panel');
   const bulkForms = Array.from(document.querySelectorAll('.js-bulk-action-form'));
   const accordionToggles = Array.from(document.querySelectorAll('.js-approval-accordion-toggle'));
 
@@ -1543,6 +1697,13 @@ include __DIR__ . '/include/layout_top.php';
   const setPendingCount = (value) => {
     const next = Math.max(0, value);
     pendingCountEls.forEach((el) => {
+      el.textContent = String(next);
+    });
+  };
+
+  const setEscalationCount = (value) => {
+    const next = Math.max(0, value);
+    escalationCountEls.forEach((el) => {
       el.textContent = String(next);
     });
   };
@@ -1583,6 +1744,19 @@ include __DIR__ . '/include/layout_top.php';
       total += getSectionRows(section).length;
     });
     setPendingCount(total);
+  };
+
+  const syncEscalationState = () => {
+    if (!escalationPanel) {
+      return;
+    }
+    const rows = Array.from(escalationPanel.querySelectorAll('tbody tr.js-escalation-row'));
+    const count = rows.length;
+    setEscalationCount(count);
+    const emptyRow = escalationPanel.querySelector('.js-escalation-empty-row');
+    if (emptyRow) {
+      emptyRow.style.display = count > 0 ? 'none' : '';
+    }
   };
 
   const removeBulkInputs = (empCode, attDate) => {
@@ -1644,6 +1818,9 @@ include __DIR__ . '/include/layout_top.php';
         }
         removeBulkInputs(data.empCode, data.attDate);
         syncPendingState();
+        if (typeof options.afterSuccess === 'function') {
+          options.afterSuccess(data);
+        }
       } else {
         showAlert('warning', (data && data.error) || options.errorFallback || 'Action failed.');
         if (button) {
@@ -1709,6 +1886,24 @@ include __DIR__ . '/include/layout_top.php';
     })
   );
 
+  document.querySelectorAll('.js-escalation-approve-form').forEach((form) =>
+    handleRowForm(form, {
+      busyLabel: 'Approving...',
+      successFallback: 'Escalation approved.',
+      errorFallback: 'Escalation approval failed.',
+      afterSuccess: syncEscalationState,
+    })
+  );
+
+  document.querySelectorAll('.js-escalation-reject-form').forEach((form) =>
+    handleRowForm(form, {
+      busyLabel: 'Rejecting...',
+      successFallback: 'Escalation rejected.',
+      errorFallback: 'Escalation rejection failed.',
+      afterSuccess: syncEscalationState,
+    })
+  );
+
   document.querySelectorAll('.js-approve-all-form').forEach((form) =>
     handleBulkForm(form, {
       busyLabel: 'Approving...',
@@ -1757,6 +1952,7 @@ include __DIR__ . '/include/layout_top.php';
   });
 
   syncPendingState();
+  syncEscalationState();
 })();
 </script>
 

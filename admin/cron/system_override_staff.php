@@ -24,6 +24,12 @@ if (!mysqli_select_db($bd, 'gcc_attendance_master')) {
     exit(1);
 }
 
+$phpOverrideEnabled = trim((string) get_api_config($bd, 'system_override_php_enabled', '0'));
+if ($phpOverrideEnabled !== '1') {
+    fwrite(STDOUT, "Legacy PHP system override is disabled via api_config.\n");
+    exit(0);
+}
+
 if (!ensure_attendance_override_table($bd)) {
     fwrite(STDERR, "Override table not available.\n");
     exit(1);
@@ -707,11 +713,11 @@ if ($onlyRule === null || $onlyRule === 'hours') {
         ['02'],
         '10.00',
         'AUTO_10H_NON_STAFF',
-        'AUTO_10H_NON_STAFF: NON STAFF login incomplete; set 10 hours',
+        'AUTO_10H_NON_STAFF: NON STAFF has at least one punch; set 10 hours',
         null,
         null,
         false,
-        true
+        false
     );
 
     $nonStaffOt = run_override_rule(

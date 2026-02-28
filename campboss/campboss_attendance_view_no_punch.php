@@ -760,12 +760,13 @@ if (!$loadError && !$mappingRequired) {
     $sql = 'SELECT r.emp_code, r.att_date, r.timekeeper_submitted_at, r.campboss_reason_code, ' .
         'r.campboss_note, mc.medical_note, mc.file_path AS medical_certificate_path, mc.file_name AS medical_certificate_name, mc.updated_at AS medical_certificate_uploaded_at, ' .
         'r.campboss_reviewed_at, r.is_escalated, r.transfer_to_camp_code, r.transfer_to_camp_name, r.auto_escalated_reason, ' .
-        'h.emp_name, h.desg_name, h.dept_name, h.jbno, h.jbdesc, h.ty_cd, ' .
+        'h.emp_name, h.desg_name, h.dept_name, h.jbno, h.jbdesc, h.ty_cd, d.Projectcode_utime AS utime_project, ' .
         'm.emp_camp_loc, c.camp_name AS emp_camp_name, ' .
         $effectiveCampExpr . ' AS effective_camp_code, ' .
         'o.override_work_hours, o.override_work_code, o.override_is_approved ' .
         'FROM gcc_attendance_master.attendance_no_punch_reviews r ' .
         'LEFT JOIN gcc_attendance_master.hrmsvw_sync h ON h.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci ' .
+        'LEFT JOIN gcc_attendance_master.employee_att_daily d ON d.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci AND d.att_date = r.att_date ' .
         'LEFT JOIN gcc_attendance_master.hrms_hrmemp_camp_mapping m ON m.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci AND m.is_deleted = 0 ' .
         'LEFT JOIN gcc_attendance_master.hrms_camp_sync c ON c.camp_code COLLATE utf8mb4_general_ci = m.emp_camp_loc COLLATE utf8mb4_general_ci AND c.is_deleted = 0 ' .
         'LEFT JOIN gcc_attendance_master.employee_att_daily_overrides o ON o.emp_code COLLATE utf8mb4_general_ci = r.emp_code COLLATE utf8mb4_general_ci ' .
@@ -839,14 +840,14 @@ include __DIR__ . '/../admin/include/layout_top.php';
   .campboss-table td {
     vertical-align: middle;
   }
-  .campboss-table th:nth-child(7),
-  .campboss-table td:nth-child(7) {
+  .campboss-table th:nth-child(8),
+  .campboss-table td:nth-child(8) {
     min-width: 180px;
   }
-  .campboss-table th:nth-child(8),
-  .campboss-table td:nth-child(8),
-  .campboss-table th:nth-child(10),
-  .campboss-table td:nth-child(10) {
+  .campboss-table th:nth-child(9),
+  .campboss-table td:nth-child(9),
+  .campboss-table th:nth-child(11),
+  .campboss-table td:nth-child(11) {
     text-align: center;
   }
   .campboss-status-actions {
@@ -957,31 +958,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
     border-color: rgba(30, 64, 175, 0.25);
     color: #1e40af;
   }
-  .campboss-medical-modal {
-    position: fixed;
-    inset: 0;
-    z-index: 2200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-  }
-  .campboss-medical-modal__backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(15, 23, 42, 0.56);
-  }
-  .campboss-medical-modal__dialog {
-    position: relative;
-    width: min(560px, calc(100vw - 32px));
-    max-height: calc(100vh - 32px);
-    overflow-y: auto;
-    border-radius: 14px;
-    background: #ffffff;
-    border: 1px solid rgba(15, 23, 42, 0.1);
-    box-shadow: 0 24px 48px rgba(15, 23, 42, 0.28);
-    padding: 18px;
-  }
 </style>
 
 <section class="content-header">
@@ -1088,6 +1064,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                             <th>Designation</th>
                             <th>Department</th>
                             <th>Camp</th>
+                            <th>UTime Project</th>
                             <th>Reason</th>
                             <th>Work Hour Action</th>
                             <th>Work Code</th>
@@ -1172,6 +1149,10 @@ include __DIR__ . '/../admin/include/layout_top.php';
                               $campLabel .= ' (' . $transferName . ')';
                           }
                       }
+                      $utimeProjectLabel = strtoupper(trim((string) ($row['utime_project'] ?? '')));
+                      if ($utimeProjectLabel === '') {
+                          $utimeProjectLabel = '-';
+                      }
                     ?>
                     <tr data-row-index="<?= (int) $rowIndex ?>" data-submitted="<?= $isSubmitted ? '1' : '0' ?>" data-employee-type="<?= h($row['ty_cd'] ?? '') ?>">
                       <td>
@@ -1184,6 +1165,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
                       <td><?= h($row['desg_name'] ?? '') ?></td>
                       <td><?= h($row['dept_name'] ?? '') ?></td>
                       <td><?= h($campLabel) ?></td>
+                      <td><?= h($utimeProjectLabel) ?></td>
                       <td>
                         <select class="form-control form-control-sm js-reason-code" name="reason_code[]">
                           <option value="">Select</option>
@@ -1227,6 +1209,12 @@ include __DIR__ . '/../admin/include/layout_top.php';
                       </td>
                       <td>
                         <input class="form-control form-control-sm js-campboss-note" name="campboss_note[]" value="<?= h($rowNoteValue) ?>">
+                        <?php if (!$isSubmitted): ?>
+                          <div class="mt-2">
+                            <input type="file" class="form-control-file js-inline-medical-file" accept=".pdf,.jpg,.jpeg,.png">
+                            <div class="small text-muted mt-1">Medical certificate for SICK (max 5 MB)</div>
+                          </div>
+                        <?php endif; ?>
                         <?php if ($medicalCertificateUrl !== ''): ?>
                           <div class="small mt-1">
                             <a href="<?= h($medicalCertificateUrl) ?>" target="_blank" rel="noopener">
@@ -1272,28 +1260,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
         </div>
       </div>
 
-      <div class="campboss-medical-modal d-none js-medical-modal" role="dialog" aria-modal="true" aria-labelledby="campbossMedicalModalTitle">
-        <div class="campboss-medical-modal__backdrop js-medical-modal-cancel"></div>
-        <div class="campboss-medical-modal__dialog" role="document">
-          <h3 class="h5 mb-2" id="campbossMedicalModalTitle">Sick Leave Details</h3>
-          <p class="text-muted small mb-3">Add medical note and upload medical certificate before saving this row.</p>
-          <div class="form-group mb-3">
-            <label for="campbossMedicalPopupNote">Medical note</label>
-            <textarea id="campbossMedicalPopupNote" class="form-control js-medical-note-input" rows="4" maxlength="500" placeholder="Enter sick leave note"></textarea>
-            <div class="small text-danger mt-1 d-none js-medical-note-error">Medical note is required.</div>
-          </div>
-          <div class="form-group mb-3">
-            <label for="campbossMedicalPopupFile">Medical certificate</label>
-            <input id="campbossMedicalPopupFile" type="file" class="form-control-file js-medical-file-input" accept=".pdf,.jpg,.jpeg,.png">
-            <div class="small text-muted mt-1">Accepted: PDF, JPG, JPEG, PNG (max 5 MB)</div>
-            <div class="small text-danger mt-1 d-none js-medical-file-error">Medical certificate file is required.</div>
-          </div>
-          <div class="d-flex justify-content-end">
-            <button type="button" class="btn btn-outline-secondary js-medical-modal-cancel">Cancel</button>
-            <button type="button" class="btn btn-primary ml-2 js-medical-modal-confirm">Continue</button>
-          </div>
-        </div>
-      </div>
     <?php endif; ?>
   </div>
 </section>
@@ -1312,14 +1278,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
     var toastLayer = document.createElement('div');
     toastLayer.className = 'campboss-toast-layer';
     document.body.appendChild(toastLayer);
-    var medicalModal = document.querySelector('.js-medical-modal');
-    var medicalNoteInput = medicalModal ? medicalModal.querySelector('.js-medical-note-input') : null;
-    var medicalFileInput = medicalModal ? medicalModal.querySelector('.js-medical-file-input') : null;
-    var medicalNoteError = medicalModal ? medicalModal.querySelector('.js-medical-note-error') : null;
-    var medicalFileError = medicalModal ? medicalModal.querySelector('.js-medical-file-error') : null;
-    var medicalConfirmButton = medicalModal ? medicalModal.querySelector('.js-medical-modal-confirm') : null;
-    var medicalCancelButtons = medicalModal ? medicalModal.querySelectorAll('.js-medical-modal-cancel') : [];
-    var medicalModalState = null;
 
     function normalizeToastType(type) {
       var value = String(type || '').trim().toLowerCase();
@@ -1361,61 +1319,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
 
     function isSickReason(code) {
       return String(code || '').trim().toUpperCase() === 'SICK';
-    }
-
-    function hideMedicalModal() {
-      if (!medicalModal) return;
-      medicalModal.classList.add('d-none');
-      medicalModalState = null;
-      if (medicalNoteError) {
-        medicalNoteError.classList.add('d-none');
-      }
-      if (medicalFileError) {
-        medicalFileError.classList.add('d-none');
-      }
-      if (medicalNoteInput) {
-        medicalNoteInput.value = '';
-      }
-      if (medicalFileInput) {
-        medicalFileInput.value = '';
-      }
-    }
-
-    function openMedicalModal(row, submitter, rowsToMarkBusy) {
-      if (!medicalModal || !medicalNoteInput || !medicalFileInput || !submitter || !row) {
-        return false;
-      }
-      var rowIndex = Number(row.getAttribute('data-row-index'));
-      if (!Number.isFinite(rowIndex) || rowIndex < 0) {
-        showCenterToast('Invalid row selected for sick leave upload.', 'warning');
-        return false;
-      }
-      var rowNoteInput = row.querySelector('input.js-campboss-note');
-      medicalModalState = {
-        rowIndex: rowIndex,
-        row: row,
-        submitter: submitter,
-        rowsToMarkBusy: rowsToMarkBusy
-      };
-
-      if (medicalNoteInput) {
-        medicalNoteInput.value = rowNoteInput ? String(rowNoteInput.value || '').trim() : '';
-      }
-      if (medicalFileInput) {
-        medicalFileInput.value = '';
-      }
-      if (medicalNoteError) {
-        medicalNoteError.classList.add('d-none');
-      }
-      if (medicalFileError) {
-        medicalFileError.textContent = 'Medical certificate file is required.';
-        medicalFileError.classList.add('d-none');
-      }
-      medicalModal.classList.remove('d-none');
-      window.setTimeout(function () {
-        medicalNoteInput.focus();
-      }, 40);
-      return true;
     }
 
     var serverFlash = document.querySelector('.js-server-flash');
@@ -1869,98 +1772,6 @@ include __DIR__ . '/../admin/include/layout_top.php';
       });
     }
 
-    if (medicalFileInput && medicalFileInput.dataset.bound !== '1') {
-      medicalFileInput.dataset.bound = '1';
-      medicalFileInput.addEventListener('change', function () {
-        if (medicalFileError) {
-          medicalFileError.classList.add('d-none');
-        }
-      });
-    }
-    if (medicalNoteInput && medicalNoteInput.dataset.bound !== '1') {
-      medicalNoteInput.dataset.bound = '1';
-      medicalNoteInput.addEventListener('input', function () {
-        if (medicalNoteError) {
-          medicalNoteError.classList.add('d-none');
-        }
-      });
-    }
-    for (var modalCancelIdx = 0; modalCancelIdx < medicalCancelButtons.length; modalCancelIdx++) {
-      var cancelButton = medicalCancelButtons[modalCancelIdx];
-      if (cancelButton.dataset.bound === '1') {
-        continue;
-      }
-      cancelButton.dataset.bound = '1';
-      cancelButton.addEventListener('click', function () {
-        if (reviewForm.dataset.submitting === '1') return;
-        hideMedicalModal();
-      });
-    }
-    if (medicalModal && medicalModal.dataset.bound !== '1') {
-      medicalModal.dataset.bound = '1';
-      medicalModal.addEventListener('keydown', function (event) {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          hideMedicalModal();
-        }
-      });
-    }
-    if (medicalConfirmButton && medicalConfirmButton.dataset.bound !== '1') {
-      medicalConfirmButton.dataset.bound = '1';
-      medicalConfirmButton.addEventListener('click', function () {
-        if (!medicalModalState) {
-          hideMedicalModal();
-          return;
-        }
-        var noteText = medicalNoteInput ? String(medicalNoteInput.value || '').trim() : '';
-        var fileObject = medicalFileInput && medicalFileInput.files ? medicalFileInput.files[0] : null;
-
-        if (noteText === '') {
-          if (medicalNoteError) {
-            medicalNoteError.textContent = 'Medical note is required.';
-            medicalNoteError.classList.remove('d-none');
-          }
-          if (medicalNoteInput) {
-            medicalNoteInput.focus();
-          }
-          return;
-        }
-        if (!fileObject) {
-          if (medicalFileError) {
-            medicalFileError.textContent = 'Medical certificate file is required.';
-            medicalFileError.classList.remove('d-none');
-          }
-          if (medicalFileInput) {
-            medicalFileInput.focus();
-          }
-          return;
-        }
-        if (Number(fileObject.size || 0) > (5 * 1024 * 1024)) {
-          if (medicalFileError) {
-            medicalFileError.textContent = 'Medical certificate must be 5 MB or smaller.';
-            medicalFileError.classList.remove('d-none');
-          }
-          if (medicalFileInput) {
-            medicalFileInput.focus();
-          }
-          return;
-        }
-
-        var state = medicalModalState;
-        var noteInput = state.row ? state.row.querySelector('input.js-campboss-note') : null;
-        if (noteInput) {
-          noteInput.value = noteText;
-        }
-        hideMedicalModal();
-
-        submitReviewRequest(state.submitter, state.rowsToMarkBusy, [
-          { name: 'medical_target_index', value: String(state.rowIndex) },
-          { name: 'medical_popup_note', value: noteText },
-          { name: 'medical_certificate_file', value: fileObject }
-        ]);
-      });
-    }
-
     reviewForm.addEventListener('submit', function (event) {
       var submitter = event.submitter || document.activeElement;
       if (!submitter || !submitter.name) {
@@ -1986,7 +1797,7 @@ include __DIR__ . '/../admin/include/layout_top.php';
         rowsToValidate = reviewForm.querySelectorAll('tr[data-row-index]');
       }
 
-      var sickRowForPopup = null;
+      var sickRowPayload = null;
       for (var i = 0; i < rowsToValidate.length; i++) {
         var row = rowsToValidate[i];
         var reasonSel = row.querySelector('select.js-reason-code');
@@ -2074,7 +1885,43 @@ include __DIR__ . '/../admin/include/layout_top.php';
         }
 
         if (isRowSave && isSickReason(reasonCode)) {
-          sickRowForPopup = row;
+          var rowIndex = Number(row.getAttribute('data-row-index'));
+          var rowNoteInput = row.querySelector('input.js-campboss-note');
+          var inlineMedicalFile = row.querySelector('.js-inline-medical-file');
+          var noteText = rowNoteInput ? String(rowNoteInput.value || '').trim() : '';
+          var fileObject = inlineMedicalFile && inlineMedicalFile.files ? inlineMedicalFile.files[0] : null;
+
+          if (!Number.isFinite(rowIndex) || rowIndex < 0) {
+            showCenterToast('Invalid row selected for sick leave upload.', 'warning');
+            return;
+          }
+          if (noteText === '') {
+            showCenterToast('Medical note is required for SICK reason.', 'warning');
+            if (rowNoteInput) {
+              rowNoteInput.focus();
+            }
+            return;
+          }
+          if (!fileObject) {
+            showCenterToast('Attach medical certificate for SICK reason.', 'warning');
+            if (inlineMedicalFile) {
+              inlineMedicalFile.focus();
+            }
+            return;
+          }
+          if (Number(fileObject.size || 0) > (5 * 1024 * 1024)) {
+            showCenterToast('Medical certificate must be 5 MB or smaller.', 'warning');
+            if (inlineMedicalFile) {
+              inlineMedicalFile.focus();
+            }
+            return;
+          }
+
+          sickRowPayload = {
+            rowIndex: rowIndex,
+            noteText: noteText,
+            fileObject: fileObject
+          };
         }
       }
 
@@ -2082,11 +1929,12 @@ include __DIR__ . '/../admin/include/layout_top.php';
         ? rowsToValidate
         : reviewForm.querySelectorAll('tbody tr[data-row-index]');
 
-      if (sickRowForPopup) {
-        if (!openMedicalModal(sickRowForPopup, submitter, rowsToMarkBusy)) {
-          showCenterToast('Unable to open sick leave details popup.', 'danger');
-          return;
-        }
+      if (sickRowPayload) {
+        submitReviewRequest(submitter, rowsToMarkBusy, [
+          { name: 'medical_target_index', value: String(sickRowPayload.rowIndex) },
+          { name: 'medical_popup_note', value: sickRowPayload.noteText },
+          { name: 'medical_certificate_file', value: sickRowPayload.fileObject, mode: 'append' }
+        ]);
         return;
       }
 
