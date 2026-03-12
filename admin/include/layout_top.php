@@ -127,7 +127,7 @@ if (!isset($page_title)) {
     }
   </style>
 </head>
-<body class="hold-transition sidebar-mini layout-fixed">
+<body class="hold-transition sidebar-mini layout-fixed sidebar-collapse">
 <div class="wrapper">
   <?php include 'include/top_bar.php'; ?>
   <?php include 'include/side_bar.php'; ?>

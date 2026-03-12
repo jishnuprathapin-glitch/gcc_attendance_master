@@ -1220,7 +1220,7 @@ function export_attendance_hrms_csv(
                 return 'Unable to prepare override query for HRMS export.';
             }
 
-            $punchSql = 'SELECT dp.emp_code, dp.punch_date, dp.first_log, dp.last_log, p.pro_code ' .
+            $punchSql = 'SELECT dp.emp_code, dp.punch_date, dp.first_log, dp.last_log, dp.first_terminal_sn, dp.last_terminal_sn, p.pro_code ' .
                 'FROM gcc_attendance_master.employee_daily_punch dp ' .
                 'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
                 'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
@@ -1243,6 +1243,8 @@ function export_attendance_hrms_csv(
                             $punchDaily[$emp][$date] = [
                                 'first_log' => $row['first_log'] ?? null,
                                 'last_log' => $row['last_log'] ?? null,
+                                'first_terminal_sn' => $row['first_terminal_sn'] ?? null,
+                                'last_terminal_sn' => $row['last_terminal_sn'] ?? null,
                                 'pro_code' => trim((string) ($row['pro_code'] ?? '')),
                             ];
                         }
@@ -1405,19 +1407,19 @@ function export_attendance_hrms_csv(
                 $punch = $punchDaily[$empCode][$date] ?? null;
 
                 $workCode = is_array($att) ? trim((string) ($att['work_code'] ?? '')) : '';
-                $workHours = is_array($att) ? trim((string) ($att['work_hours'] ?? '')) : '';
                 $overrideCode = is_array($override) ? trim((string) ($override['override_work_code'] ?? '')) : '';
                 $overrideHours = is_array($override) ? trim((string) ($override['override_work_hours'] ?? '')) : '';
                 $overrideStatus = is_array($override) ? (int) ($override['override_is_approved'] ?? 0) : 0;
                 $firstLog = is_array($punch) ? ($punch['first_log'] ?? null) : null;
                 $lastLog = is_array($punch) ? ($punch['last_log'] ?? null) : null;
-                $punchHours = calculate_work_hours($firstLog, $lastLog);
+                $firstTerminalSn = is_array($punch) ? trim((string) ($punch['first_terminal_sn'] ?? '')) : '';
+                $lastTerminalSn = is_array($punch) ? trim((string) ($punch['last_terminal_sn'] ?? '')) : '';
+                $hasDeviceSn = ($firstTerminalSn !== '' || $lastTerminalSn !== '');
+                $punchHours = $hasDeviceSn ? calculate_work_hours($firstLog, $lastLog) : null;
 
                 $finalWorkCode = ($overrideStatus === 1) ? $overrideCode : $workCode;
                 if ($overrideStatus === 1) {
                     $finalWorkHours = $overrideHours;
-                } elseif ($workHours !== '') {
-                    $finalWorkHours = $workHours;
                 } else {
                     $finalWorkHours = $punchHours !== null ? $punchHours : '';
                 }
@@ -1468,11 +1470,256 @@ function export_attendance_hrms_csv(
     return null;
 }
 
+function export_attendance_month_value_csv(
+    mysqli $bd,
+    array $filters,
+    array $params,
+    string $types,
+    array $dateRange,
+    string $startDate,
+    string $endDate,
+    array &$writer,
+    ?callable $progress = null,
+    int $batchSize = 200
+): ?string {
+    if (empty($dateRange)) {
+        return 'Invalid month range for monthly export.';
+    }
+
+    $header = ['Employee Code', 'Employee Name'];
+    foreach ($dateRange as $date) {
+        $header[] = $date;
+    }
+    export_writer_row($writer, $header, true);
+
+    $exportSql = 'SELECT hr.emp_code, ' .
+        'COALESCE(NULLIF(hr.emp_name, ""), NULLIF(hr.name, "")) AS emp_name ' .
+        'FROM gcc_attendance_master.hrmsvw_sync hr';
+    if (!empty($filters)) {
+        $exportSql .= ' WHERE ' . implode(' AND ', $filters);
+    }
+    $exportSql .= ' ORDER BY CAST(hr.emp_code AS UNSIGNED), hr.emp_code LIMIT ? OFFSET ?';
+
+    $processed = 0;
+    $exportOffset = 0;
+
+    while (true) {
+        $batchEmployees = [];
+
+        $batchParams = $params;
+        $batchTypes = $types;
+        $batchParams[] = $batchSize;
+        $batchParams[] = $exportOffset;
+        $batchTypes .= 'ii';
+
+        $stmt = $bd->prepare($exportSql);
+        if (!$stmt) {
+            return 'Unable to prepare monthly export query.';
+        }
+        bind_params($stmt, $batchTypes, $batchParams);
+        if ($stmt->execute()) {
+            $result = $stmt->get_result();
+            if ($result) {
+                while ($row = $result->fetch_assoc()) {
+                    $batchEmployees[] = $row;
+                }
+                $result->free();
+            }
+        } else {
+            $stmt->close();
+            return 'Unable to load employees for monthly export.';
+        }
+        $stmt->close();
+
+        if (empty($batchEmployees)) {
+            break;
+        }
+
+        $empCodes = [];
+        foreach ($batchEmployees as $row) {
+            $code = trim((string) ($row['emp_code'] ?? ''));
+            if ($code !== '') {
+                $empCodes[] = $code;
+            }
+        }
+        $empCodes = array_values(array_unique($empCodes, SORT_STRING));
+
+        $attDaily = [];
+        $punchDaily = [];
+        $overrideDaily = [];
+
+        if (!empty($empCodes)) {
+            $placeholders = implode(',', array_fill(0, count($empCodes), '?'));
+            $rangeTypes = str_repeat('s', count($empCodes)) . 'ss';
+            $rangeParams = array_merge($empCodes, [$startDate, $endDate]);
+
+            $attSql = 'SELECT d.emp_code, d.att_date, d.work_code ' .
+                'FROM gcc_attendance_master.employee_att_daily d ' .
+                'INNER JOIN (' .
+                    'SELECT emp_code, att_date, MAX(change_id) AS max_change_id ' .
+                    'FROM gcc_attendance_master.employee_att_daily ' .
+                    'WHERE emp_code IN (' . $placeholders . ') AND att_date BETWEEN ? AND ? ' .
+                    'AND (is_delete = 0 OR is_delete IS NULL) AND (is_deleted = 0 OR is_deleted IS NULL) ' .
+                    'GROUP BY emp_code, att_date' .
+                ') latest ON latest.max_change_id = d.change_id';
+            $stmt = $bd->prepare($attSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['att_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($attDaily[$emp])) {
+                                $attDaily[$emp] = [];
+                            }
+                            $attDaily[$emp][$date] = $row;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load attendance details for monthly export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare attendance query for monthly export.';
+            }
+
+            $punchSql = 'SELECT dp.emp_code, dp.punch_date, dp.first_log, dp.last_log, dp.first_terminal_sn, dp.last_terminal_sn ' .
+                'FROM gcc_attendance_master.employee_daily_punch dp ' .
+                'WHERE dp.emp_code IN (' . $placeholders . ') AND dp.punch_date BETWEEN ? AND ?';
+            $stmt = $bd->prepare($punchSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['punch_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($punchDaily[$emp])) {
+                                $punchDaily[$emp] = [];
+                            }
+                            $punchDaily[$emp][$date] = [
+                                'first_log' => $row['first_log'] ?? null,
+                                'last_log' => $row['last_log'] ?? null,
+                                'first_terminal_sn' => $row['first_terminal_sn'] ?? null,
+                                'last_terminal_sn' => $row['last_terminal_sn'] ?? null,
+                            ];
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load punch details for monthly export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare punch query for monthly export.';
+            }
+
+            $overrideSql = 'SELECT o.emp_code, o.att_date, o.override_work_hours, o.override_work_code, o.override_is_approved ' .
+                'FROM gcc_attendance_master.employee_att_daily_overrides o ' .
+                'WHERE o.emp_code IN (' . $placeholders . ') AND o.att_date BETWEEN ? AND ?';
+            $stmt = $bd->prepare($overrideSql);
+            if ($stmt) {
+                bind_params($stmt, $rangeTypes, $rangeParams);
+                if ($stmt->execute()) {
+                    $result = $stmt->get_result();
+                    if ($result) {
+                        while ($row = $result->fetch_assoc()) {
+                            $emp = trim((string) ($row['emp_code'] ?? ''));
+                            $date = trim((string) ($row['att_date'] ?? ''));
+                            if ($emp === '' || $date === '') {
+                                continue;
+                            }
+                            if (!isset($overrideDaily[$emp])) {
+                                $overrideDaily[$emp] = [];
+                            }
+                            $overrideDaily[$emp][$date] = $row;
+                        }
+                        $result->free();
+                    }
+                } else {
+                    $stmt->close();
+                    return 'Unable to load override details for monthly export.';
+                }
+                $stmt->close();
+            } else {
+                return 'Unable to prepare override query for monthly export.';
+            }
+        }
+
+        foreach ($batchEmployees as $employee) {
+            $empCode = trim((string) ($employee['emp_code'] ?? ''));
+            $empName = trim((string) ($employee['emp_name'] ?? ''));
+            $row = [$empCode, $empName];
+
+            foreach ($dateRange as $date) {
+                $att = $attDaily[$empCode][$date] ?? null;
+                $punch = $punchDaily[$empCode][$date] ?? null;
+                $override = $overrideDaily[$empCode][$date] ?? null;
+
+                $workCode = is_array($att) ? trim((string) ($att['work_code'] ?? '')) : '';
+                $firstLog = is_array($punch) ? ($punch['first_log'] ?? null) : null;
+                $lastLog = is_array($punch) ? ($punch['last_log'] ?? null) : null;
+                $firstTerminalSn = is_array($punch) ? trim((string) ($punch['first_terminal_sn'] ?? '')) : '';
+                $lastTerminalSn = is_array($punch) ? trim((string) ($punch['last_terminal_sn'] ?? '')) : '';
+                $hasDeviceSn = ($firstTerminalSn !== '' || $lastTerminalSn !== '');
+                $workHours = $hasDeviceSn ? calculate_work_hours($firstLog, $lastLog) : null;
+
+                $overrideCode = is_array($override) ? trim((string) ($override['override_work_code'] ?? '')) : '';
+                $overrideHours = is_array($override) ? trim((string) ($override['override_work_hours'] ?? '')) : '';
+                $overrideStatus = is_array($override) ? (int) ($override['override_is_approved'] ?? 0) : 0;
+
+                if ($overrideStatus === 1) {
+                    $dayValue = $overrideCode !== '' ? $overrideCode : $overrideHours;
+                } else {
+                    $dayValue = $workCode !== '' ? $workCode : ($workHours ?? '');
+                }
+
+                if ($dayValue !== '' && is_numeric($dayValue)) {
+                    $numericValue = (float) $dayValue;
+                    if ((float) ((int) $numericValue) === $numericValue) {
+                        $dayValue = (string) ((int) $numericValue);
+                    } else {
+                        $dayValue = rtrim(rtrim(number_format($numericValue, 2, '.', ''), '0'), '.');
+                    }
+                }
+
+                $row[] = $dayValue;
+            }
+
+            export_writer_row($writer, $row, false);
+        }
+
+        $processed += count($batchEmployees);
+        if ($progress) {
+            $progress($processed);
+        }
+
+        $exportOffset += count($batchEmployees);
+        if (count($batchEmployees) < $batchSize) {
+            break;
+        }
+    }
+
+    return null;
+}
+
 $context = null;
 
 $exportType = strtolower(trim((string) ($_GET['export'] ?? '')));
 $reportType = strtolower(trim((string) ($_GET['report'] ?? 'detailed')));
-if (!in_array($reportType, ['detailed', 'final', 'hrms'], true)) {
+if (!in_array($reportType, ['detailed', 'final', 'hrms', 'month_value'], true)) {
     $reportType = 'detailed';
 }
 if ($exportType === 'status') {
@@ -1614,7 +1861,8 @@ if ($startDate > $endDate) {
 
 $filterStartDate = $startDate;
 $filterEndDate = $endDate;
-if (($exportRequested || $exportStart) && $reportType === 'hrms') {
+$monthBasedExportReport = in_array($reportType, ['hrms', 'month_value'], true);
+if (($exportRequested || $exportStart) && $monthBasedExportReport) {
     $filterStartDate = $monthStartDate;
     $filterEndDate = $monthEndDate;
 }
@@ -1991,59 +2239,62 @@ if (!isset($bd) || !($bd instanceof mysqli)) {
         $params = [];
         $types = '';
 
-    if (!empty($designationFilter)) {
-        $placeholders = implode(',', array_fill(0, count($designationFilter), '?'));
-        $filters[] = 'hr.desg_cd IN (' . $placeholders . ')';
-        $params = array_merge($params, $designationFilter);
-        $types .= str_repeat('s', count($designationFilter));
-    }
-    if (!empty($departmentFilter)) {
-        $placeholders = implode(',', array_fill(0, count($departmentFilter), '?'));
-        $filters[] = 'hr.dept_cd IN (' . $placeholders . ')';
-        $params = array_merge($params, $departmentFilter);
-        $types .= str_repeat('s', count($departmentFilter));
-    }
-    if (!empty($projectCodeFilter)) {
-        $placeholders = implode(',', array_fill(0, count($projectCodeFilter), '?'));
-        $filters[] = 'hr.jbno IN (' . $placeholders . ')';
-        $params = array_merge($params, $projectCodeFilter);
-        $types .= str_repeat('s', count($projectCodeFilter));
-    }
-    if (!empty($loginProjectFilter)) {
-        $placeholders = implode(',', array_fill(0, count($loginProjectFilter), '?'));
-        $filters[] = 'hr.emp_code IN (' .
-            'SELECT DISTINCT dp.emp_code ' .
-            'FROM gcc_attendance_master.employee_daily_punch dp ' .
-            'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
-            'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
-            'WHERE dp.punch_date BETWEEN ? AND ? AND p.pro_code IN (' . $placeholders . ')' .
-            ')';
-        $params = array_merge($params, [$filterStartDate, $filterEndDate], $loginProjectFilter);
-        $types .= 'ss' . str_repeat('s', count($loginProjectFilter));
-    }
-    if (!empty($costCenterFilter)) {
-        $placeholders = implode(',', array_fill(0, count($costCenterFilter), '?'));
-        $filters[] = 'hr.cc_code IN (' . $placeholders . ')';
-        $params = array_merge($params, $costCenterFilter);
-        $types .= str_repeat('s', count($costCenterFilter));
-    }
-    if (!empty($employeeTypeFilter)) {
-        $placeholders = implode(',', array_fill(0, count($employeeTypeFilter), '?'));
-        $filters[] = 'hr.ty_cd IN (' . $placeholders . ')';
-        $params = array_merge($params, $employeeTypeFilter);
-        $types .= str_repeat('s', count($employeeTypeFilter));
-    }
-    if (!empty($employeeIdTerms)) {
-        $likeParts = [];
-        foreach ($employeeIdTerms as $term) {
-            $likeParts[] = 'hr.emp_code LIKE ?';
-            $params[] = '%' . $term . '%';
-            $types .= 's';
+        $allEmployeesMonthValue = (($exportRequested || $exportStart) && $reportType === 'month_value');
+        if (!$allEmployeesMonthValue) {
+            if (!empty($designationFilter)) {
+                $placeholders = implode(',', array_fill(0, count($designationFilter), '?'));
+                $filters[] = 'hr.desg_cd IN (' . $placeholders . ')';
+                $params = array_merge($params, $designationFilter);
+                $types .= str_repeat('s', count($designationFilter));
+            }
+            if (!empty($departmentFilter)) {
+                $placeholders = implode(',', array_fill(0, count($departmentFilter), '?'));
+                $filters[] = 'hr.dept_cd IN (' . $placeholders . ')';
+                $params = array_merge($params, $departmentFilter);
+                $types .= str_repeat('s', count($departmentFilter));
+            }
+            if (!empty($projectCodeFilter)) {
+                $placeholders = implode(',', array_fill(0, count($projectCodeFilter), '?'));
+                $filters[] = 'hr.jbno IN (' . $placeholders . ')';
+                $params = array_merge($params, $projectCodeFilter);
+                $types .= str_repeat('s', count($projectCodeFilter));
+            }
+            if (!empty($loginProjectFilter)) {
+                $placeholders = implode(',', array_fill(0, count($loginProjectFilter), '?'));
+                $filters[] = 'hr.emp_code IN (' .
+                    'SELECT DISTINCT dp.emp_code ' .
+                    'FROM gcc_attendance_master.employee_daily_punch dp ' .
+                    'LEFT JOIN gcc_attendance_master.device_project_map d ON d.device_sn = dp.first_terminal_sn ' .
+                    'LEFT JOIN gcc_it.projects p ON p.id = d.project_id ' .
+                    'WHERE dp.punch_date BETWEEN ? AND ? AND p.pro_code IN (' . $placeholders . ')' .
+                    ')';
+                $params = array_merge($params, [$filterStartDate, $filterEndDate], $loginProjectFilter);
+                $types .= 'ss' . str_repeat('s', count($loginProjectFilter));
+            }
+            if (!empty($costCenterFilter)) {
+                $placeholders = implode(',', array_fill(0, count($costCenterFilter), '?'));
+                $filters[] = 'hr.cc_code IN (' . $placeholders . ')';
+                $params = array_merge($params, $costCenterFilter);
+                $types .= str_repeat('s', count($costCenterFilter));
+            }
+            if (!empty($employeeTypeFilter)) {
+                $placeholders = implode(',', array_fill(0, count($employeeTypeFilter), '?'));
+                $filters[] = 'hr.ty_cd IN (' . $placeholders . ')';
+                $params = array_merge($params, $employeeTypeFilter);
+                $types .= str_repeat('s', count($employeeTypeFilter));
+            }
+            if (!empty($employeeIdTerms)) {
+                $likeParts = [];
+                foreach ($employeeIdTerms as $term) {
+                    $likeParts[] = 'hr.emp_code LIKE ?';
+                    $params[] = '%' . $term . '%';
+                    $types .= 's';
+                }
+                if (!empty($likeParts)) {
+                    $filters[] = '(' . implode(' OR ', $likeParts) . ')';
+                }
+            }
         }
-        if (!empty($likeParts)) {
-            $filters[] = '(' . implode(' OR ', $likeParts) . ')';
-        }
-    }
 
         if (!empty($mappedProjects)) {
             $mapPlaceholders = implode(',', array_fill(0, count($mappedProjects), '?'));
@@ -2316,6 +2567,20 @@ $exportStartHrmsUrl = build_query_url(array_merge($baseQuery, [
     'report' => 'hrms',
     'month' => $monthInput,
 ]));
+$monthValueBaseQuery = [];
+if ($includeInactive) {
+    $monthValueBaseQuery['include_inactive'] = '1';
+}
+$exportMonthValueUrl = build_query_url(array_merge($monthValueBaseQuery, [
+    'export' => 'csv',
+    'report' => 'month_value',
+    'month' => $monthInput,
+]));
+$exportStartMonthValueUrl = build_query_url(array_merge($monthValueBaseQuery, [
+    'export' => 'start',
+    'report' => 'month_value',
+    'month' => $monthInput,
+]));
 $last30DaysUrl = build_query_url(array_merge($baseQuery, [
     'start_date' => $last30Start,
     'end_date' => $defaultEnd,
@@ -2366,9 +2631,9 @@ $context = [
     'exportStartFinalUrl' => $exportStartFinalUrl,
 ];
 
-$exportRunStartDate = ($reportType === 'hrms') ? $monthStartDate : $startDate;
-$exportRunEndDate = ($reportType === 'hrms') ? $monthEndDate : $endDate;
-$exportRunDateRange = ($reportType === 'hrms') ? $hrmsDateRange : $dateRange;
+$exportRunStartDate = $monthBasedExportReport ? $monthStartDate : $startDate;
+$exportRunEndDate = $monthBasedExportReport ? $monthEndDate : $endDate;
+$exportRunDateRange = $monthBasedExportReport ? $hrmsDateRange : $dateRange;
 $exportRunMonth = $monthInput;
 
 if ($exportStart) {
@@ -2414,9 +2679,13 @@ if ($exportStart) {
         $reportLabel = 'final';
     } elseif ($reportType === 'hrms') {
         $reportLabel = 'hrms';
+    } elseif ($reportType === 'month_value') {
+        $reportLabel = 'month-value';
     }
     if ($reportType === 'hrms') {
         $filename = build_hrms_export_filename($exportRunMonth);
+    } elseif ($reportType === 'month_value') {
+        $filename = 'attendance-month-value-' . $exportRunMonth . '.xls';
     } else {
         $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.xls';
     }
@@ -2506,6 +2775,18 @@ if ($exportStart) {
             $writer,
             $progress
         );
+    } elseif ($reportType === 'month_value') {
+        $exportError = export_attendance_month_value_csv(
+            $bd,
+            $filters,
+            $params,
+            $types,
+            $exportRunDateRange,
+            $exportRunStartDate,
+            $exportRunEndDate,
+            $writer,
+            $progress
+        );
     } else {
         $exportError = export_attendance_csv(
             $bd,
@@ -2560,9 +2841,13 @@ if ($exportRequested) {
         $reportLabel = 'final';
     } elseif ($reportType === 'hrms') {
         $reportLabel = 'hrms';
+    } elseif ($reportType === 'month_value') {
+        $reportLabel = 'month-value';
     }
     if ($reportType === 'hrms') {
         $filename = build_hrms_export_filename($exportRunMonth);
+    } elseif ($reportType === 'month_value') {
+        $filename = 'attendance-month-value-' . $exportRunMonth . '.xls';
     } else {
         $filename = 'attendance-daily-' . $reportLabel . '-' . $exportRunStartDate . '-to-' . $exportRunEndDate . '.xls';
     }
@@ -2585,6 +2870,17 @@ if ($exportRequested) {
 
     if ($reportType === 'hrms') {
         $exportError = export_attendance_hrms_csv(
+            $bd,
+            $filters,
+            $params,
+            $types,
+            $exportRunDateRange,
+            $exportRunStartDate,
+            $exportRunEndDate,
+            $writer
+        );
+    } elseif ($reportType === 'month_value') {
+        $exportError = export_attendance_month_value_csv(
             $bd,
             $filters,
             $params,
@@ -3288,7 +3584,10 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
             <a class="btn btn-outline-primary btn-block export-btn" href="<?= h($exportFinalUrl) ?>" data-export-start="<?= h($exportStartFinalUrl) ?>">Export Summary</a>
           </div>
           <div class="form-group col-md-2 d-flex align-items-end">
-            <a class="btn btn-outline-info btn-block export-btn export-btn-hrms" href="<?= h($exportHrmsUrl) ?>" data-export-start="<?= h($exportStartHrmsUrl) ?>" data-export-report="hrms" data-export-month="<?= h($monthInput) ?>">Export HRMS</a>
+            <a class="btn btn-outline-info btn-block export-btn export-btn-hrms" href="<?= h($exportHrmsUrl) ?>" data-export-start="<?= h($exportStartHrmsUrl) ?>" data-export-report="hrms" data-export-month="<?= h($monthInput) ?>" data-export-requires-month="1" data-month-title="Select month for HRMS export" data-month-note="Export format: LNo, Employee Code, Employee Name, Job, D1..DX" data-month-confirm="Export HRMS">Export HRMS</a>
+          </div>
+          <div class="form-group col-md-2 d-flex align-items-end">
+            <a class="btn btn-outline-dark btn-block export-btn export-btn-month-value" href="<?= h($exportMonthValueUrl) ?>" data-export-start="<?= h($exportStartMonthValueUrl) ?>" data-export-report="month_value" data-export-month="<?= h($monthInput) ?>" data-export-requires-month="1" data-month-title="Select month for monthly day value export" data-month-note="For each day: use work code if present, otherwise work hours from login/logout." data-month-confirm="Export Month Value">Export Month Value</a>
           </div>
         </form>
         <div class="small text-muted">
@@ -3607,15 +3906,15 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
 
 <div id="hrmsMonthOverlay" class="month-overlay" aria-hidden="true">
   <div class="month-modal" role="dialog" aria-modal="true" aria-labelledby="hrmsMonthTitle">
-    <div class="month-title" id="hrmsMonthTitle">Select month for HRMS export</div>
+    <div class="month-title" id="hrmsMonthTitle">Select month for export</div>
     <div class="month-field">
       <label for="hrmsMonthInput" class="mb-1">Month</label>
       <input id="hrmsMonthInput" type="month" class="form-control" value="<?= h($monthInput) ?>">
-      <small class="text-muted d-block mt-2">Export format: LNo, Employee Code, Employee Name, Job, D1..DX</small>
+      <small class="text-muted d-block mt-2" id="hrmsMonthNote">Choose month and year for export.</small>
     </div>
     <div class="month-actions">
       <button type="button" class="btn btn-outline-secondary btn-sm" id="hrmsMonthCancel">Cancel</button>
-      <button type="button" class="btn btn-primary btn-sm" id="hrmsMonthConfirm">Export HRMS</button>
+      <button type="button" class="btn btn-primary btn-sm" id="hrmsMonthConfirm">Export</button>
     </div>
   </div>
 </div>
@@ -4204,11 +4503,16 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
     const monthInput = document.getElementById('hrmsMonthInput');
     const monthCancelBtn = document.getElementById('hrmsMonthCancel');
     const monthConfirmBtn = document.getElementById('hrmsMonthConfirm');
+    const monthTitle = document.getElementById('hrmsMonthTitle');
+    const monthNote = document.getElementById('hrmsMonthNote');
 
     let pollTimer = null;
     let activeJob = null;
     let activeBtn = null;
-    let pendingHrmsBtn = null;
+    let pendingMonthBtn = null;
+    const defaultMonthTitle = monthTitle ? monthTitle.textContent : 'Select month for export';
+    const defaultMonthNote = monthNote ? monthNote.textContent : 'Choose month and year for export.';
+    const defaultMonthConfirm = monthConfirmBtn ? monthConfirmBtn.textContent : 'Export';
 
     const showOverlay = () => {
       overlay.classList.add('is-active');
@@ -4266,9 +4570,18 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
         return url;
       }
     };
-    const showMonthOverlay = (monthValue) => {
+    const showMonthOverlay = (btn, monthValue) => {
       if (!monthOverlay || !monthInput) {
         return;
+      }
+      if (monthTitle) {
+        monthTitle.textContent = (btn && btn.getAttribute('data-month-title')) || defaultMonthTitle;
+      }
+      if (monthNote) {
+        monthNote.textContent = (btn && btn.getAttribute('data-month-note')) || defaultMonthNote;
+      }
+      if (monthConfirmBtn) {
+        monthConfirmBtn.textContent = (btn && btn.getAttribute('data-month-confirm')) || defaultMonthConfirm;
       }
       const value = monthValue && /^\d{4}-\d{2}$/.test(monthValue) ? monthValue : monthInput.value;
       if (value) {
@@ -4286,7 +4599,7 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
       }
       monthOverlay.classList.remove('is-active');
       monthOverlay.setAttribute('aria-hidden', 'true');
-      pendingHrmsBtn = null;
+      pendingMonthBtn = null;
     };
     const pollStatus = () => {
       if (!activeJob || !activeJob.statusUrl) {
@@ -4408,10 +4721,10 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
         if (activeBtn) {
           return;
         }
-        const report = (btn.getAttribute('data-export-report') || '').toLowerCase();
-        if (report === 'hrms' && monthOverlay && monthInput) {
-          pendingHrmsBtn = btn;
-          showMonthOverlay(btn.getAttribute('data-export-month') || monthInput.value);
+        const requiresMonth = btn.getAttribute('data-export-requires-month') === '1' || (btn.getAttribute('data-export-report') || '').toLowerCase() === 'hrms';
+        if (requiresMonth && monthOverlay && monthInput) {
+          pendingMonthBtn = btn;
+          showMonthOverlay(btn, btn.getAttribute('data-export-month') || monthInput.value);
           return;
         }
         const startUrl = btn.getAttribute('data-export-start');
@@ -4441,7 +4754,7 @@ include dirname(__DIR__) . '/admin/include/layout_top.php';
           return;
         }
         monthInput.setCustomValidity('');
-        const selectedBtn = pendingHrmsBtn;
+        const selectedBtn = pendingMonthBtn;
         hideMonthOverlay();
         if (!selectedBtn) {
           return;
