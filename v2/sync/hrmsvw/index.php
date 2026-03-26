@@ -51,6 +51,8 @@ foreach ($changes as $index => $change) {
         respond(400, ['error' => 'Invalid change item.', 'index' => $index]);
     }
 
+    $change = canonicalize_hrmsvw_change($change);
+
     $changeType = normalize_change_type($change['changeType'] ?? null);
     if ($changeType === null && array_key_exists('changeType', $change)) {
         log_message('invalid_change_type', ['index' => $index, 'value' => $change['changeType']]);
@@ -116,6 +118,8 @@ foreach ($changes as $index => $change) {
 
             $record[$meta['column']] = $normalized;
         }
+
+        $record = apply_hrmsvw_defaults($record);
     }
 
     $normalizedChanges[] = [
@@ -232,6 +236,8 @@ try {
         }
         $summary['applied']++;
     }
+
+    sync_lookup_tables($bd);
 
     $bd->commit();
     log_message('sync_complete', $summary);
@@ -422,6 +428,7 @@ function open_db(): mysqli
 function ensure_tables(mysqli $bd): void
 {
     ensure_config_table($bd);
+    ensure_lookup_tables($bd);
 
     if (!$bd->query(
         'CREATE TABLE IF NOT EXISTS hrmsvw_sync (' .
@@ -637,11 +644,19 @@ function normalize_change_type($value): ?string
     if ($value === null) {
         return null;
     }
+
     $value = strtolower(trim((string) $value));
-    if (in_array($value, ['upsert', 'insert', 'update', 'delete'], true)) {
-        return $value;
-    }
-    return null;
+    $map = [
+        'upsert' => 'upsert',
+        'insert' => 'insert',
+        'update' => 'update',
+        'delete' => 'delete',
+        'i' => 'insert',
+        'u' => 'update',
+        'd' => 'delete',
+    ];
+
+    return $map[$value] ?? null;
 }
 
 function normalize_bitlike($value): ?string
@@ -741,6 +756,184 @@ function log_message(string $message, array $context = []): void
     }
 
     @file_put_contents($logPath, $line . PHP_EOL, FILE_APPEND | LOCK_EX);
+}
+
+
+function canonicalize_hrmsvw_change(array $change): array
+{
+    $canonical = $change;
+
+    set_first_present_alias($canonical, $change, 'EMP_CODE', ['EMP_CODE', 'EMPLOYEE_CODE', 'CODE']);
+    set_first_present_alias($canonical, $change, 'BR_CD', ['BR_CD', 'BRANCH_CODE']);
+    set_first_present_alias($canonical, $change, 'BR_DESC', ['BR_DESC', 'BRANCH_NAME']);
+    set_first_present_alias($canonical, $change, 'LC_CD', ['LC_CD', 'LOC_CODE', 'LOCATION_CODE']);
+    set_first_present_alias($canonical, $change, 'LC_DESC', ['LC_DESC', 'LOC_NAME', 'LOCATION_NAME']);
+    set_first_present_alias($canonical, $change, 'DIV_CD', ['DIV_CD', 'DIV_CODE']);
+    set_first_present_alias($canonical, $change, 'DIV_DESC', ['DIV_DESC', 'DIV_NAME']);
+    set_first_present_alias($canonical, $change, 'CC_CODE', ['CC_CODE', 'COST_CENTER_CODE']);
+    set_first_present_alias($canonical, $change, 'CC_NAME', ['CC_NAME', 'COST_CENTER_NAME']);
+    set_first_present_alias($canonical, $change, 'SPH_CD', ['SPH_CD', 'SPONS_CODE', 'SPONSOR_CODE']);
+    set_first_present_alias($canonical, $change, 'SPH_NAME', ['SPH_NAME', 'SPONS_NAME', 'SPONSOR_NAME']);
+    set_first_present_alias($canonical, $change, 'TY_CD', ['TY_CD', 'EMP_TYPE_CODE']);
+    set_first_present_alias($canonical, $change, 'TY_DESC', ['TY_DESC', 'EMP_TYPE_NAME']);
+    set_first_present_alias($canonical, $change, 'ST_CODE', ['ST_CODE', 'STATUS_CODE']);
+    set_first_present_alias($canonical, $change, 'ST_DESC', ['ST_DESC', 'STATUS_NAME']);
+    set_first_present_alias($canonical, $change, 'DEPT_CD', ['DEPT_CD', 'DEPARTMENT_CODE']);
+    set_first_present_alias($canonical, $change, 'DEPT_NAME', ['DEPT_NAME', 'DEPARTMENT_NAME']);
+    set_first_present_alias($canonical, $change, 'DESG_CD', ['DESG_CD', 'DESIGNATION_CODE']);
+    set_first_present_alias($canonical, $change, 'DESG_NAME', ['DESG_NAME', 'DESIGNATION_NAME']);
+    set_first_present_alias($canonical, $change, 'TC_CD', ['TC_CD', 'TRAD_CAT_CODE', 'TRADE_CAT_CODE']);
+    set_first_present_alias($canonical, $change, 'TC_DESC', ['TC_DESC', 'TRAD_CAT_NAME', 'TRADE_CAT_NAME']);
+    set_first_present_alias($canonical, $change, 'GRD_CD', ['GRD_CD', 'GRAD_CODE', 'GRADE_CODE']);
+    set_first_present_alias($canonical, $change, 'GRD_DESC', ['GRD_DESC', 'GRAD_NAME', 'GRADE_NAME']);
+    set_first_present_alias($canonical, $change, 'CM_CD', ['CM_CD', 'CM_CODE', 'CAMP_LOC_CD', 'CAMP_CODE']);
+    set_first_present_alias($canonical, $change, 'CM_DESC', ['CM_DESC', 'CAMP_LOC_NAME', 'CAMP_NAME']);
+    set_first_present_alias($canonical, $change, 'Code', ['Code', 'GENDER_CD', 'SEX_CODE']);
+    set_first_present_alias($canonical, $change, 'NAME', ['NAME', 'GENDER_NAME', 'SEX_NAME']);
+    set_first_present_alias($canonical, $change, 'CU_CCD', ['CU_CCD', 'NATIONALITY_CD', 'COUNTRY_CODE']);
+    set_first_present_alias($canonical, $change, 'CU_CNAME', ['CU_CNAME', 'NATIONALITY_NAME', 'COUNTRY_NAME']);
+    set_first_present_alias($canonical, $change, 'EMP_NAME', ['EMP_NAME', 'EMPLOYEE_NAME', 'FULL_NAME']);
+    set_first_present_alias($canonical, $change, 'SPG_ID', ['SPG_ID', 'SPONSOR_GROUP_ID']);
+    set_first_present_alias($canonical, $change, 'SPH_GROUP', ['SPH_GROUP', 'SPONS_GROUP', 'SPONSOR_GROUP', 'GRP']);
+    set_first_present_alias($canonical, $change, 'JBNO', ['JBNO', 'PROJECT_CODE', 'JOB_NO']);
+    set_first_present_alias($canonical, $change, 'JBDESC', ['JBDESC', 'PROJECT_NAME', 'JOB_DESC']);
+    set_first_present_alias($canonical, $change, 'ST_PAY', ['ST_PAY', 'PAY']);
+    set_first_present_alias($canonical, $change, 'EMP_SEX', ['EMP_SEX', 'GENDER_CD', 'SEX_CODE']);
+    set_first_present_alias($canonical, $change, 'EMP_NATIONALITY', ['EMP_NATIONALITY', 'NATIONALITY_NAME', 'COUNTRY_NAME']);
+    set_first_present_alias($canonical, $change, 'EMP_DOR', ['EMP_DOR', 'RESIGNED_DATE']);
+    set_first_present_alias($canonical, $change, 'EMP_DOJ', ['EMP_DOJ', 'JOINING_DATE']);
+    set_first_present_alias($canonical, $change, 'changeType', ['changeType', 'CHANGE_TYPE']);
+    set_first_present_alias($canonical, $change, 'is_deleted', ['is_deleted', 'isDeleted', 'IS_DELETED']);
+
+    if (!has_present_value($canonical['EMP_NAME'] ?? null)) {
+        $rawEmployeeName = get_first_present_value($change, ['EMP_NAME', 'EMPLOYEE_NAME', 'FULL_NAME', 'NAME']);
+        $genderName = get_first_present_value($change, ['GENDER_NAME', 'SEX_NAME']);
+        if (has_present_value($rawEmployeeName) && !has_present_value($genderName)) {
+            $canonical['EMP_NAME'] = $rawEmployeeName;
+            unset($canonical['NAME']);
+        }
+    }
+
+    return $canonical;
+}
+
+function apply_hrmsvw_defaults(array $record): array
+{
+    if (!has_present_value($record['emp_name'] ?? null) && has_present_value($record['name'] ?? null) && !has_present_value($record['code'] ?? null)) {
+        $record['emp_name'] = $record['name'];
+        $record['name'] = null;
+    }
+
+    if (!has_present_value($record['emp_name'] ?? null) && has_present_value($record['emp_sex'] ?? null) && has_present_value($record['name'] ?? null)) {
+        $record['emp_name'] = $record['name'];
+        $record['name'] = null;
+    }
+
+    if (!has_present_value($record['code'] ?? null) && has_present_value($record['emp_sex'] ?? null)) {
+        $record['code'] = $record['emp_sex'];
+    }
+
+    if (!has_present_value($record['emp_sex'] ?? null) && has_present_value($record['code'] ?? null)) {
+        $record['emp_sex'] = $record['code'];
+    }
+
+    if (!has_present_value($record['name'] ?? null) && has_present_value($record['code'] ?? null)) {
+        $record['name'] = resolve_gender_name((string) $record['code']);
+    }
+
+    if (!has_present_value($record['emp_nationality'] ?? null) && has_present_value($record['cu_cname'] ?? null)) {
+        $record['emp_nationality'] = $record['cu_cname'];
+    }
+
+    if (!has_present_value($record['spg_id'] ?? null)) {
+        $record['spg_id'] = '0';
+    }
+
+    return $record;
+}
+
+function set_first_present_alias(array &$target, array $source, string $canonicalKey, array $aliases): void
+{
+    if (has_present_value($target[$canonicalKey] ?? null)) {
+        return;
+    }
+
+    $value = get_first_present_value($source, $aliases);
+    if ($value !== null) {
+        $target[$canonicalKey] = $value;
+    }
+}
+
+function get_first_present_value(array $source, array $aliases)
+{
+    foreach ($aliases as $alias) {
+        if (!array_key_exists($alias, $source)) {
+            continue;
+        }
+        $value = $source[$alias];
+        if (has_present_value($value)) {
+            return $value;
+        }
+    }
+
+    return null;
+}
+
+function has_present_value($value): bool
+{
+    if ($value === null) {
+        return false;
+    }
+    if (is_string($value)) {
+        return trim($value) !== '';
+    }
+    return true;
+}
+
+function resolve_gender_name(string $code): ?string
+{
+    $code = strtoupper(trim($code));
+    if ($code === 'M') {
+        return 'Male';
+    }
+    if ($code === 'F') {
+        return 'Female';
+    }
+    return $code === '' ? null : $code;
+}
+
+function ensure_lookup_tables(mysqli $bd): void
+{
+    $queries = [
+        'CREATE TABLE IF NOT EXISTS hrms_departments (dept_cd varchar(50) NOT NULL, dept_name varchar(200) NULL, PRIMARY KEY (dept_cd)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+        'CREATE TABLE IF NOT EXISTS hrms_designations (desg_cd varchar(50) NOT NULL, desg_name varchar(200) NULL, PRIMARY KEY (desg_cd)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+        'CREATE TABLE IF NOT EXISTS hrms_cost_centers (cc_code varchar(50) NOT NULL, cc_name varchar(200) NULL, PRIMARY KEY (cc_code)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+        'CREATE TABLE IF NOT EXISTS hrms_employee_types (ty_cd varchar(50) NOT NULL, ty_desc varchar(200) NULL, PRIMARY KEY (ty_cd)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+        'CREATE TABLE IF NOT EXISTS hrms_projects (project_code varchar(50) NOT NULL, project_name varchar(200) NULL, PRIMARY KEY (project_code)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4',
+    ];
+
+    foreach ($queries as $sql) {
+        if (!$bd->query($sql)) {
+            throw new RuntimeException('Failed to ensure lookup table: ' . $bd->error);
+        }
+    }
+}
+
+function sync_lookup_tables(mysqli $bd): void
+{
+    $queries = [
+        "INSERT INTO hrms_departments (dept_cd, dept_name) SELECT DISTINCT s.dept_cd, NULLIF(s.dept_name, '') FROM hrmsvw_sync s WHERE s.dept_cd IS NOT NULL AND s.dept_cd <> '' ON DUPLICATE KEY UPDATE dept_name = VALUES(dept_name)",
+        "INSERT INTO hrms_designations (desg_cd, desg_name) SELECT DISTINCT s.desg_cd, NULLIF(s.desg_name, '') FROM hrmsvw_sync s WHERE s.desg_cd IS NOT NULL AND s.desg_cd <> '' ON DUPLICATE KEY UPDATE desg_name = VALUES(desg_name)",
+        "INSERT INTO hrms_cost_centers (cc_code, cc_name) SELECT DISTINCT s.cc_code, NULLIF(s.cc_name, '') FROM hrmsvw_sync s WHERE s.cc_code IS NOT NULL AND s.cc_code <> '' ON DUPLICATE KEY UPDATE cc_name = VALUES(cc_name)",
+        "INSERT INTO hrms_employee_types (ty_cd, ty_desc) SELECT DISTINCT s.ty_cd, NULLIF(s.ty_desc, '') FROM hrmsvw_sync s WHERE s.ty_cd IS NOT NULL AND s.ty_cd <> '' ON DUPLICATE KEY UPDATE ty_desc = VALUES(ty_desc)",
+        "INSERT INTO hrms_projects (project_code, project_name) SELECT DISTINCT s.jbno, NULLIF(s.jbdesc, '') FROM hrmsvw_sync s WHERE s.jbno IS NOT NULL AND s.jbno <> '' ON DUPLICATE KEY UPDATE project_name = VALUES(project_name)",
+    ];
+
+    foreach ($queries as $sql) {
+        if (!$bd->query($sql)) {
+            throw new RuntimeException('Failed to sync lookup table: ' . $bd->error);
+        }
+    }
 }
 
 function respond(int $status, array $body): void

@@ -43,7 +43,7 @@ if (!is_array($payload)) {
 }
 
 $source = trim((string) ($payload['source'] ?? ''));
-if ($source !== 'HRMS_HRMEMP_PUSH') {
+if (!is_allowed_hrmemp_source($source)) {
     log_message('invalid_source', ['source' => $source]);
     respond(400, ['error' => 'Invalid source.']);
 }
@@ -69,7 +69,9 @@ foreach ($changes as $index => $change) {
         respond(400, ['error' => 'Invalid change item.', 'index' => $index]);
     }
 
-    $changeId = normalize_change_id($change['changeId'] ?? null);
+    $change = canonicalize_hrmemp_change($change);
+
+    $changeId = resolve_hrmemp_change_id($change);
     if ($changeId === '') {
         log_message('missing_change_id', ['index' => $index]);
         respond(400, ['error' => 'Missing or invalid changeId.', 'index' => $index]);
@@ -77,20 +79,22 @@ foreach ($changes as $index => $change) {
 
     $changeType = normalize_change_type($change['changeType'] ?? null);
     if ($changeType === null) {
+        $changeType = infer_hrmemp_change_type($change);
+    }
+    if ($changeType === null) {
         log_message('invalid_change_type', ['index' => $index, 'change_id' => $changeId]);
         respond(400, ['error' => 'Invalid changeType.', 'index' => $index]);
     }
 
     $isDeleted = normalize_required_bool($change['isDeleted'] ?? null);
     if ($isDeleted === null) {
-        log_message('invalid_is_deleted', ['index' => $index, 'change_id' => $changeId]);
-        respond(400, ['error' => 'Invalid isDeleted.', 'index' => $index]);
+        $isDeleted = ($changeType === 'D') ? '1' : '0';
     }
     if ($changeType === 'D') {
         $isDeleted = '1';
     }
 
-    [$okEmpCompCd, $empCompCd] = normalize_required_string($change['EMP_COMPCD'] ?? null, 3);
+    [$okEmpCompCd, $empCompCd] = normalize_required_string($change['EMP_COMPCD'] ?? '001', 3);
     if (!$okEmpCompCd) {
         log_message('invalid_emp_compcd', ['index' => $index, 'change_id' => $changeId]);
         respond(400, ['error' => 'Invalid EMP_COMPCD.', 'index' => $index]);
@@ -442,10 +446,15 @@ function normalize_change_type($value): ?string
         return null;
     }
     $value = strtoupper(trim($value));
-    if (!in_array($value, ['I', 'U', 'D'], true)) {
-        return null;
-    }
-    return $value;
+    $map = [
+        'I' => 'I',
+        'U' => 'U',
+        'D' => 'D',
+        'INSERT' => 'I',
+        'UPDATE' => 'U',
+        'DELETE' => 'D',
+    ];
+    return $map[$value] ?? null;
 }
 
 function normalize_required_bool($value): ?string
@@ -513,6 +522,113 @@ function normalize_datetime($value): ?string
         return null;
     }
     return $dt->format('Y-m-d H:i:s');
+}
+
+
+function is_allowed_hrmemp_source(string $source): bool
+{
+    return in_array($source, [
+        'HRMS_HRMEMP_PUSH',
+        'HRINTEGRATION_HRMEMP_PUSH',
+        'HRINTEGRATION_EMP_CAMP_PUSH',
+        'HRINTEGRATION_EMP_MST_PUSH',
+    ], true);
+}
+
+function canonicalize_hrmemp_change(array $change): array
+{
+    $canonical = $change;
+
+    set_first_present_alias($canonical, $change, 'changeId', ['changeId', 'CHANGE_ID']);
+    set_first_present_alias($canonical, $change, 'changeType', ['changeType', 'CHANGE_TYPE']);
+    set_first_present_alias($canonical, $change, 'isDeleted', ['isDeleted', 'IS_DELETED', 'is_deleted']);
+    set_first_present_alias($canonical, $change, 'EMP_COMPCD', ['EMP_COMPCD', 'EMP_COMP_CD', 'COMP_CODE', 'COMPANY_CODE']);
+    set_first_present_alias($canonical, $change, 'EMP_CODE', ['EMP_CODE', 'EMPLOYEE_CODE', 'CODE']);
+    set_first_present_alias($canonical, $change, 'EMP_CAMP_LOC', ['EMP_CAMP_LOC', 'CAMP_LOC_CD', 'CM_CODE', 'CAMP_CODE']);
+    set_first_present_alias($canonical, $change, 'changedAt', ['changedAt', 'CHANGED_AT', 'MODIFIED_DATE', 'CREATED_DATE']);
+
+    if (!has_present_value($canonical['EMP_COMPCD'] ?? null)) {
+        $canonical['EMP_COMPCD'] = '001';
+    }
+
+    return $canonical;
+}
+
+function resolve_hrmemp_change_id(array $change): string
+{
+    $changeId = normalize_change_id($change['changeId'] ?? null);
+    if ($changeId !== '') {
+        return $changeId;
+    }
+
+    [$okEmpCode, $empCode] = normalize_required_string($change['EMP_CODE'] ?? null, 10);
+    $changedAt = normalize_datetime($change['changedAt'] ?? null);
+    $changeType = normalize_change_type($change['changeType'] ?? null);
+    if ($changeType === null) {
+        $changeType = infer_hrmemp_change_type($change) ?? 'U';
+    }
+
+    if (!$okEmpCode || $changedAt === null) {
+        return '';
+    }
+
+    return build_fallback_change_id($changedAt, $empCode, $changeType);
+}
+
+function infer_hrmemp_change_type(array $change): ?string
+{
+    $isDeleted = normalize_required_bool($change['isDeleted'] ?? null);
+    if ($isDeleted === '1') {
+        return 'D';
+    }
+
+    return has_present_value($change['EMP_CAMP_LOC'] ?? null) ? 'U' : 'I';
+}
+
+function build_fallback_change_id(string $changedAt, string $entityCode, string $changeType): string
+{
+    $stamp = str_replace(['-', ' ', ':'], '', $changedAt);
+    $hash = str_pad(sprintf('%u', crc32($entityCode . '|' . $changedAt . '|' . $changeType)), 10, '0', STR_PAD_LEFT);
+    return $stamp . substr($hash, -5);
+}
+
+function set_first_present_alias(array &$target, array $source, string $canonicalKey, array $aliases): void
+{
+    if (has_present_value($target[$canonicalKey] ?? null)) {
+        return;
+    }
+
+    $value = get_first_present_value($source, $aliases);
+    if ($value !== null) {
+        $target[$canonicalKey] = $value;
+    }
+}
+
+function get_first_present_value(array $source, array $aliases)
+{
+    foreach ($aliases as $alias) {
+        foreach ($source as $key => $value) {
+            if (strcasecmp((string) $key, (string) $alias) !== 0) {
+                continue;
+            }
+            if (has_present_value($value)) {
+                return $value;
+            }
+        }
+    }
+
+    return null;
+}
+
+function has_present_value($value): bool
+{
+    if ($value === null) {
+        return false;
+    }
+    if (is_string($value)) {
+        return trim($value) !== '';
+    }
+    return true;
 }
 
 function truncate_error(string $message): string
