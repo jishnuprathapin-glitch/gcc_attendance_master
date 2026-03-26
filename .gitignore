@@ -1,2 +1,6 @@
 # Sync endpoint logs
 v2/sync/*/logs/
+api/*/logs/*.log
+
+# Generated diagnostics
+test-results/db-runtime-diagnostics/
